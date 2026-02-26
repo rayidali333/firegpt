@@ -1,10 +1,11 @@
 import React, { useState } from "react";
 import { DrawingData, ChatMessage } from "./types";
 import { uploadDrawing, chatWithDrawing } from "./api";
+import Header from "./components/Header";
+import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
 import SymbolTable from "./components/SymbolTable";
 import ChatPanel from "./components/ChatPanel";
-import Header from "./components/Header";
 import "./App.css";
 
 function App() {
@@ -56,26 +57,37 @@ function App() {
   };
 
   return (
-    <div className="app">
-      <Header drawing={drawing} onReset={handleReset} />
-      <main className="main-content">
-        {!drawing ? (
-          <UploadZone
+    <div className="desktop">
+      <div className="window">
+        <Header />
+        <div className="window-content">
+          <Sidebar
+            drawing={drawing}
             onUpload={handleUpload}
             uploading={uploading}
-            error={error}
+            onReset={handleReset}
           />
-        ) : (
-          <div className="workspace">
-            <div className="left-panel">
-              <SymbolTable symbols={drawing.symbols} total={drawing.total_symbols} />
-            </div>
-            <div className="right-panel">
-              <ChatPanel messages={messages} onSend={handleChat} />
-            </div>
-          </div>
-        )}
-      </main>
+          <main className="main-content">
+            {!drawing ? (
+              <UploadZone
+                onUpload={handleUpload}
+                uploading={uploading}
+                error={error}
+              />
+            ) : (
+              <SymbolTable
+                symbols={drawing.symbols}
+                total={drawing.total_symbols}
+              />
+            )}
+          </main>
+          <ChatPanel
+            messages={messages}
+            onSend={handleChat}
+            disabled={!drawing}
+          />
+        </div>
+      </div>
     </div>
   );
 }
