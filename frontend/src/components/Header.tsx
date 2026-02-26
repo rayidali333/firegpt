@@ -1,31 +1,16 @@
 import React from "react";
-import { FileText } from "lucide-react";
-import { DrawingData } from "../types";
 
-interface Props {
-  drawing: DrawingData | null;
-  onReset: () => void;
-}
-
-export default function Header({ drawing, onReset }: Props) {
+export default function Header() {
   return (
-    <header className="header">
-      <div className="header-left">
-        <div className="header-logo">
-          Drawing<span>IQ</span>
-        </div>
-        {drawing && (
-          <div className="header-file">
-            <FileText />
-            {drawing.filename}
-          </div>
-        )}
+    <div className="titlebar">
+      <div className="titlebar-buttons">
+        <span className="titlebar-btn red" />
+        <span className="titlebar-btn yellow" />
+        <span className="titlebar-btn green" />
       </div>
-      {drawing && (
-        <button className="btn-reset" onClick={onReset}>
-          New Drawing
-        </button>
-      )}
-    </header>
+      <span className="titlebar-title">
+        DrawingIQ — Fire Alarm Symbol Analysis
+      </span>
+    </div>
   );
 }

@@ -15,7 +15,7 @@ export default function SymbolTable({ symbols, total }: Props) {
       </div>
       <div className="symbol-list">
         {symbols.length === 0 ? (
-          <p style={{ color: "var(--text-muted)", fontSize: 14, padding: 12 }}>
+          <p style={{ color: "var(--text-muted)", fontSize: 13, padding: 12 }}>
             No symbols detected in this drawing.
           </p>
         ) : (
