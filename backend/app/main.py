@@ -3,9 +3,10 @@ import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.parser import parse_dxf_file, parse_dwg_file
 from app.chat import chat_with_drawing
@@ -16,6 +17,9 @@ load_dotenv()
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# React build directory (built during deploy)
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 app = FastAPI(title="DrawingIQ", version="1.0.0")
 
@@ -102,3 +106,16 @@ def list_drawings():
             for d in drawings_store.values()
         ]
     }
+
+
+# Serve React frontend — must be after all /api routes
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR / "static"), name="static-files")
+
+    @app.get("/{full_path:path}")
+    async def serve_react(full_path: str):
+        """Serve React app for all non-API routes (SPA catch-all)."""
+        file_path = STATIC_DIR / full_path
+        if full_path and file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(STATIC_DIR / "index.html")

@@ -4,6 +4,7 @@ frontend/node_modules/
 
 # Build
 frontend/build/
+backend/static/
 backend/__pycache__/
 backend/app/__pycache__/
 **/__pycache__/
