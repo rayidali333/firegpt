@@ -205,39 +205,104 @@ def parse_dxf_file(filepath: str) -> list[SymbolInfo]:
 
 def parse_dwg_file(filepath: str) -> list[SymbolInfo]:
     """
-    Parse a DWG file by first converting to DXF, then parsing.
+    Parse a DWG file by converting to DXF first, then parsing.
 
-    DWG is AutoCAD's proprietary binary format. We convert it to DXF
-    using the ODA File Converter (if available) or ezdxf's recovery mode.
+    DWG is AutoCAD's proprietary binary format. Conversion strategy:
+    1. LibreDWG dwg2dxf (open source, installed in Docker image)
+    2. ODA File Converter (if available on system)
+    3. ezdxf recovery mode (limited, works for some files)
     """
-    # Try using ezdxf's recover mode which can handle some DWG-like files
+    # Strategy 1: LibreDWG dwg2dxf (primary — fast, reliable, open source)
+    dwg2dxf_path = _find_dwg2dxf()
+    if dwg2dxf_path:
+        try:
+            return _convert_with_libredwg(filepath, dwg2dxf_path)
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Fall through to next strategy
+
+    # Strategy 2: ODA File Converter
+    oda_path = _find_oda_converter()
+    if oda_path:
+        try:
+            return _convert_with_oda(filepath, oda_path)
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Fall through to next strategy
+
+    # Strategy 3: ezdxf recovery mode (handles some DWG-like files)
     try:
         doc, auditor = ezdxf.recover.readfile(filepath)
         if auditor.has_errors:
-            # Log but continue — partial data is better than none
-            pass
+            pass  # Partial data is better than none
     except Exception:
         pass
     else:
-        # If ezdxf can read it directly, parse it
         temp_dxf = filepath + ".converted.dxf"
         try:
             doc.saveas(temp_dxf)
             return parse_dxf_file(temp_dxf)
+        except Exception:
+            pass
         finally:
             Path(temp_dxf).unlink(missing_ok=True)
 
-    # Try ODA File Converter if available
-    oda_path = _find_oda_converter()
-    if oda_path:
-        return _convert_with_oda(filepath, oda_path)
-
     raise HTTPException(
         400,
-        "Cannot parse DWG file. The ODA File Converter is not installed. "
-        "Please convert the file to DXF format using AutoCAD or a free online converter, "
-        "then upload the DXF file."
+        "Cannot parse this DWG file. No compatible converter is available. "
+        "Please convert the file to DXF format using AutoCAD, BricsCAD, "
+        "or a free tool like Autodesk's online viewer, then upload the DXF."
     )
+
+
+def _find_dwg2dxf() -> str | None:
+    """Find the dwg2dxf binary from LibreDWG."""
+    for p in ["/usr/local/bin/dwg2dxf", "/usr/bin/dwg2dxf"]:
+        if Path(p).exists():
+            return p
+    try:
+        result = subprocess.run(
+            ["which", "dwg2dxf"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _convert_with_libredwg(dwg_path: str, dwg2dxf_path: str) -> list[SymbolInfo]:
+    """Convert DWG to DXF using LibreDWG's dwg2dxf, then parse."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dxf_out = Path(tmpdir) / (Path(dwg_path).stem + ".dxf")
+        try:
+            result = subprocess.run(
+                [dwg2dxf_path, "-y", "-o", str(dxf_out), dwg_path],
+                timeout=120,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(500, "DWG conversion timed out")
+        except Exception as e:
+            raise HTTPException(500, f"DWG conversion failed: {str(e)}")
+
+        if not dxf_out.exists():
+            # dwg2dxf may output to current directory without -o
+            # Try alternate location
+            alt_path = Path(dwg_path).with_suffix(".dxf")
+            if alt_path.exists():
+                return parse_dxf_file(str(alt_path))
+            raise HTTPException(
+                500,
+                f"DWG conversion produced no output. "
+                f"Converter stderr: {result.stderr[:200] if result.stderr else 'none'}"
+            )
+
+        return parse_dxf_file(str(dxf_out))
 
 
 def _find_oda_converter() -> str | None:
@@ -250,18 +315,15 @@ def _find_oda_converter() -> str | None:
     for p in possible_paths:
         if Path(p).exists():
             return p
-
-    # Try to find it in PATH
     try:
         result = subprocess.run(
             ["which", "ODAFileConverter"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip()
     except Exception:
         pass
-
     return None
 
 
@@ -289,7 +351,6 @@ def _convert_with_oda(dwg_path: str, oda_path: str) -> list[SymbolInfo]:
         except Exception as e:
             raise HTTPException(500, f"DWG conversion failed: {str(e)}")
 
-        # Find the converted DXF file
         dxf_files = list(Path(tmpdir).glob("*.dxf"))
         if not dxf_files:
             raise HTTPException(500, "DWG conversion produced no output")
