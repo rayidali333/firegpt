@@ -5,14 +5,20 @@ The parsed symbol data is tiny (~2-5KB JSON), so we inject it directly
 into the system prompt. No RAG or vector DB needed.
 
 Supports full conversation history for multi-turn chat sessions.
+
+Also provides AI-powered block identification for symbols that can't be
+recognized by dictionary matching alone.
 """
 
 import json
+import logging
 import os
 
 from anthropic import AsyncAnthropic
 
 from app.models import ParseResponse
+
+logger = logging.getLogger(__name__)
 
 client: AsyncAnthropic | None = None
 
@@ -27,6 +33,133 @@ def _get_client() -> AsyncAnthropic:
             )
         client = AsyncAnthropic(api_key=api_key)
     return client
+
+
+async def identify_blocks_with_ai(
+    unrecognized_blocks: list,
+    filename: str,
+    all_layer_names: list[str] | None = None,
+) -> dict[str, str]:
+    """Use Claude to identify unrecognized CAD blocks from their metadata.
+
+    Sends block metadata (name, layer, entity types, attributes, text content)
+    to Claude and asks it to identify fire alarm devices.
+
+    Returns a dict of block_name → identified_label for blocks Claude could identify.
+    Returns empty dict if API key is missing or on any error (graceful degradation).
+    """
+    if not unrecognized_blocks:
+        return {}
+
+    # Check if API key is available — skip AI if not configured
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return {}
+
+    # Build a structured summary for each unrecognized block
+    blocks_data = []
+    for block in unrecognized_blocks:
+        entry = {
+            "block_name": block.block_name,
+            "count": block.count,
+            "layers": block.layers,
+        }
+        if block.entity_types:
+            entry["geometry_inside"] = block.entity_types
+        if block.attribs:
+            entry["attributes"] = block.attribs
+        if block.texts_inside:
+            entry["text_labels_inside"] = block.texts_inside
+        if block.description:
+            entry["description"] = block.description
+        blocks_data.append(entry)
+
+    blocks_json = json.dumps(blocks_data, indent=2)
+
+    layer_context = ""
+    if all_layer_names:
+        layer_context = f"\nAll layers in drawing: {', '.join(all_layer_names)}\n"
+
+    prompt = f"""You are a fire alarm and building systems expert analyzing a CAD drawing.
+
+The drawing file is: "{filename}"
+{layer_context}
+The following blocks could NOT be identified by their names alone. For each block,
+I'm providing all available metadata: the block name, how many times it appears,
+which layers it's on, what geometry/entities are inside its definition, any text
+labels drawn inside it, and any attribute data attached to it.
+
+UNRECOGNIZED BLOCKS:
+{blocks_json}
+
+For each block, determine if it is a fire alarm or building safety device.
+Consider:
+- Layer names (e.g., "INCENDIO", "FIRE", "ALARM" indicate fire alarm content)
+- Text labels inside the block (e.g., "SD" = Smoke Detector, "HS" = Horn/Strobe)
+- Attribute values (may describe the device type)
+- Block name patterns (e.g., "*U" prefix = AutoCAD anonymous dynamic block)
+- Geometry patterns (circle = detector, triangle = alarm device)
+- The block description field
+
+Respond with ONLY a JSON object mapping block names to their identified labels.
+Use standard fire alarm terminology in English:
+- "Smoke Detector", "Heat Detector", "Duct Detector", "Beam Detector"
+- "Pull Station", "Manual Call Point"
+- "Horn/Strobe", "Horn", "Strobe", "Speaker"
+- "Fire Alarm Control Panel", "Annunciator"
+- "Monitor Module", "Control Module"
+- "Sprinkler", "Fire Extinguisher", "Emergency Light", "Exit Sign"
+- "Fire Hydrant", "Fire Hose", "Fire Cabinet"
+- etc.
+
+If a block is clearly NOT a fire alarm device (e.g., furniture, doors, windows,
+structural elements, title block components), set its value to null.
+If you cannot determine what a block is, set its value to null.
+
+RESPOND WITH ONLY THE JSON OBJECT, no explanation:
+{{"block_name_1": "Identified Label", "block_name_2": null, ...}}"""
+
+    try:
+        api_client = _get_client()
+        response = await api_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = response.content[0].text.strip()
+
+        # Extract JSON from response (handle markdown code blocks)
+        if response_text.startswith("```"):
+            # Strip ```json ... ``` wrapper
+            lines = response_text.split("\n")
+            json_lines = []
+            in_block = False
+            for line in lines:
+                if line.startswith("```") and not in_block:
+                    in_block = True
+                    continue
+                if line.startswith("```") and in_block:
+                    break
+                if in_block:
+                    json_lines.append(line)
+            response_text = "\n".join(json_lines)
+
+        result = json.loads(response_text)
+
+        # Filter out null values and return only identified blocks
+        identified = {}
+        for block_name, label in result.items():
+            if label and isinstance(label, str) and len(label.strip()) > 1:
+                identified[block_name] = label.strip()
+
+        return identified
+
+    except json.JSONDecodeError:
+        logger.warning("AI block identification returned invalid JSON")
+        return {}
+    except Exception as e:
+        logger.warning(f"AI block identification failed: {e}")
+        return {}
 
 
 def _build_system_prompt(drawing: ParseResponse) -> str:

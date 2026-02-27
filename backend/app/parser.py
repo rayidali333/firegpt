@@ -8,11 +8,14 @@ that references the block by name, with a position (x, y, z).
 For fire alarm drawings, symbols like SD (Smoke Detector), HD (Heat Detector),
 PS (Pull Station) are stored as named blocks. We count INSERT references
 to each block to get accurate symbol counts.
+
+IMPORTANT: Block names are NOT standardized. Different firms, languages,
+and CAD standards use different naming conventions. This parser supports
+English, Spanish, Portuguese, and French fire alarm vocabulary.
 """
 
 import re
 import subprocess
-import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +25,11 @@ from fastapi import HTTPException
 
 from app.models import SymbolInfo
 
-# Common fire alarm symbol patterns for auto-labeling
+# ────────────────────────────────────────────────────────
+# Symbol recognition dictionaries
+# ────────────────────────────────────────────────────────
+
+# English fire alarm abbreviations (most common in US/UK/Canada drawings)
 KNOWN_SYMBOLS = {
     "SD": "Smoke Detector",
     "HD": "Heat Detector",
@@ -57,6 +64,108 @@ KNOWN_SYMBOLS = {
     "WP": "Weatherproof",
 }
 
+# International fire alarm vocabulary (Spanish, Portuguese, French, Italian)
+# These use substring matching, so order matters — longer/more specific first
+KNOWN_SYMBOLS_INTL = {
+    # Spanish (Argentina, Spain, Mexico, etc.)
+    "DETECTOR DE HUMO": "Smoke Detector",
+    "DETECTOR DE CALOR": "Heat Detector",
+    "DETECTOR DE INCENDIO": "Fire Detector",
+    "DETECTOR TERMICO": "Heat Detector",
+    "DETECTOR OPTICO": "Smoke Detector",
+    "DETECTOR IONICO": "Smoke Detector",
+    "DETECTOR TERMOVELOCIMETRICO": "Heat Detector",
+    "DETECTOR LINEAL": "Beam Detector",
+    "PULSADOR DE ALARMA": "Pull Station",
+    "PULSADOR MANUAL": "Pull Station",
+    "PULSADOR": "Pull Station",
+    "LUZ DE EMERGENCIA": "Emergency Light",
+    "LUMINARIA EMERGENCIA": "Emergency Light",
+    "SALIDA DE EMERGENCIA": "Emergency Exit Sign",
+    "CARTEL DE SALIDA": "Exit Sign",
+    "MATAFUEGOS": "Fire Extinguisher",
+    "EXTINTOR": "Fire Extinguisher",
+    "SIRENA": "Horn/Strobe",
+    "ALARMA SONORA": "Horn",
+    "ALARMA VISUAL": "Strobe",
+    "ALARMA": "Alarm Device",
+    "TABLERO DE INCENDIO": "Fire Alarm Control Panel",
+    "TABLERO DE BOMBEROS": "Fire Brigade Panel",
+    "PANEL DE ALARMA": "Fire Alarm Control Panel",
+    "TABLERO": "Fire Panel",
+    "CENTRAL DE ALARMA": "Fire Alarm Control Panel",
+    "ROCIADOR": "Sprinkler",
+    "GABINETE DE INCENDIO": "Fire Cabinet",
+    "GABINETE": "Fire Cabinet",
+    "BOCA DE INCENDIO": "Fire Hydrant",
+    "B.I.E.": "Fire Hydrant (BIE)",
+    "BIE": "Fire Hydrant (BIE)",
+    "HIDRANTE": "Fire Hydrant",
+    "COLUMNA DE INCENDIO": "Fire Standpipe",
+    "COLUMNA": "Fire Standpipe",
+    "BOMBA DE INCENDIO": "Fire Pump",
+    "BOMBA": "Fire Pump",
+    "TOMA DE BOMBEROS": "Fire Department Connection",
+    "TOMA IMPULSION": "Fire Department Connection",
+    "CANERIA PRESURIZADA": "Pressurized Pipe",
+    "CANERIA AEREA": "Overhead Pipe",
+    "CANERIA": "Fire Pipe",
+    "BOTIQUIN": "First Aid Kit",
+    "VIA DE EVACUACION": "Evacuation Route",
+    "EVACUACION": "Evacuation Route",
+    "LLAVE DE CORTE": "Gas Shutoff Valve",
+    "MODULO MONITOR": "Monitor Module",
+    "MODULO CONTROL": "Control Module",
+    "MODULO": "Module",
+    # Portuguese (Brazil, Portugal)
+    "DETECTOR DE FUMACA": "Smoke Detector",
+    "DETECTOR DE FUMACO": "Smoke Detector",
+    "ACIONADOR MANUAL": "Pull Station",
+    "BOTOEIRA": "Pull Station",
+    "AVISADOR SONORO": "Horn",
+    "SINALIZADOR VISUAL": "Strobe",
+    "SAIDA DE EMERGENCIA": "Emergency Exit Sign",
+    "EXTINTOR DE INCENDIO": "Fire Extinguisher",
+    "SPRINKLER": "Sprinkler",
+    "MANGUEIRA": "Fire Hose",
+    "CENTRAL DE INCENDIO": "Fire Alarm Control Panel",
+    # French
+    "DETECTEUR DE FUMEE": "Smoke Detector",
+    "DETECTEUR DE CHALEUR": "Heat Detector",
+    "DETECTEUR OPTIQUE": "Smoke Detector",
+    "DETECTEUR": "Detector",
+    "DECLENCHEUR MANUEL": "Pull Station",
+    "EXTINCTEUR": "Fire Extinguisher",
+    "SORTIE DE SECOURS": "Emergency Exit Sign",
+    "ALARME INCENDIE": "Fire Alarm",
+    "SIRENE": "Horn",
+    "FLASH": "Strobe",
+    "ROBINET INCENDIE": "Fire Hydrant",
+    "COLONNE SECHE": "Fire Standpipe",
+    "SPRINKLEUR": "Sprinkler",
+    # Italian
+    "RILEVATORE DI FUMO": "Smoke Detector",
+    "RILEVATORE DI CALORE": "Heat Detector",
+    "RILEVATORE": "Detector",
+    "PULSANTE": "Pull Station",
+    "ESTINTORE": "Fire Extinguisher",
+    "USCITA DI EMERGENZA": "Emergency Exit Sign",
+    "IDRANTE": "Fire Hydrant",
+}
+
+# Keywords in layer names that indicate fire alarm content
+FIRE_LAYER_KEYWORDS = [
+    "fire", "alarm", "fa_", "fa-", "f.a.",
+    "incendio", "incêndio", "incendi",
+    "smoke", "humo", "fumaca", "fumée",
+    "detector", "detect",
+    "sprinkler", "rociador", "sprinkleur",
+    "suppression", "extinc",
+    "notif", "horn", "strobe", "sirena", "alarma", "alarme",
+    "emergency", "emergencia", "emergência",
+    "evacu",
+]
+
 # Color assignments by symbol category for drawing visualization
 SYMBOL_COLORS: dict[str, str] = {
     "Smoke Detector": "#E74C3C",
@@ -64,6 +173,8 @@ SYMBOL_COLORS: dict[str, str] = {
     "Duct Detector": "#D35400",
     "Beam Detector": "#C0392B",
     "VESDA Detector": "#922B21",
+    "Fire Detector": "#E74C3C",
+    "Detector": "#E74C3C",
     "Pull Station": "#F39C12",
     "Break Glass": "#F1C40F",
     "Manual Call Point": "#F39C12",
@@ -71,12 +182,17 @@ SYMBOL_COLORS: dict[str, str] = {
     "Horn": "#2980B9",
     "Strobe": "#1ABC9C",
     "Speaker": "#2ECC71",
+    "Alarm Device": "#3498DB",
+    "Fire Alarm": "#3498DB",
     "Notification Appliance Circuit": "#3498DB",
     "Fire Alarm Control Panel": "#9B59B6",
+    "Fire Panel": "#9B59B6",
+    "Fire Brigade Panel": "#8E44AD",
     "Annunciator": "#8E44AD",
     "Monitor Module": "#27AE60",
     "Control Module": "#16A085",
     "Monitor/Control Module": "#1ABC9C",
+    "Module": "#1ABC9C",
     "Relay Module": "#2C3E50",
     "End of Line": "#7F8C8D",
     "Signaling Line Circuit": "#34495E",
@@ -88,22 +204,36 @@ SYMBOL_COLORS: dict[str, str] = {
     "Terminal Box": "#7F8C8D",
     "Junction Box": "#95A5A6",
     "Weatherproof": "#607D8B",
+    "Emergency Light": "#F1C40F",
+    "Emergency Exit Sign": "#2ECC71",
+    "Exit Sign": "#27AE60",
+    "Fire Extinguisher": "#E67E22",
+    "Fire Cabinet": "#795548",
+    "Fire Hydrant": "#2980B9",
+    "Fire Hydrant (BIE)": "#2980B9",
+    "Fire Standpipe": "#34495E",
+    "Fire Pump": "#8E44AD",
+    "Fire Pipe": "#546E7A",
+    "Pressurized Pipe": "#455A64",
+    "Overhead Pipe": "#607D8B",
+    "Fire Hose": "#2980B9",
+    "Gas Shutoff Valve": "#C0392B",
+    "First Aid Kit": "#27AE60",
+    "Evacuation Route": "#2ECC71",
 }
 
 DEFAULT_COLOR = "#95A5A6"
 
 # Block names to always skip (only truly internal AutoCAD objects)
-# NOTE: We do NOT skip all *-prefixed blocks — anonymous blocks (*U1, *X1)
-# can contain valid dynamic block content in fire alarm drawings.
 SKIP_PATTERNS = [
-    r"^\*Model_Space",    # Model space container
-    r"^\*Paper_Space",    # Paper space containers
-    r"^\*D\d+",           # Dimension blocks (*D1, *D2, ...)
-    r"^\*T\d+",           # Table blocks
-    r"^_",                # Internal blocks
-    r"^A\$C",             # AutoCAD system blocks
-    r"^AcDb",             # AutoCAD database objects
-    r"^ACAD_DSTYLE",      # Dimension style overrides
+    r"^\*Model_Space",
+    r"^\*Paper_Space",
+    r"^\*D\d+",
+    r"^\*T\d+",
+    r"^_",
+    r"^A\$C",
+    r"^AcDb",
+    r"^ACAD_DSTYLE",
 ]
 
 # DXF version codes to human-readable names
@@ -121,11 +251,24 @@ DXF_VERSIONS = {
 
 
 @dataclass
+class UnrecognizedBlock:
+    """Metadata about a block that couldn't be identified by dictionary matching."""
+    block_name: str
+    count: int
+    layers: list[str] = field(default_factory=list)
+    entity_types: dict[str, int] = field(default_factory=dict)
+    attribs: dict[str, str] = field(default_factory=dict)
+    texts_inside: list[str] = field(default_factory=list)
+    description: str = ""
+
+
+@dataclass
 class ParseResult:
     """Internal result from parsing, includes symbols + analysis log + file path."""
     symbols: list[SymbolInfo] = field(default_factory=list)
     analysis: list[dict] = field(default_factory=list)
-    dxf_path: str = ""  # Actual DXF file path (for preview generation)
+    dxf_path: str = ""
+    unrecognized_blocks: list[UnrecognizedBlock] = field(default_factory=list)
 
     def log(self, type: str, message: str):
         self.analysis.append({"type": type, "message": message})
@@ -140,26 +283,181 @@ def _should_skip_block(block_name: str) -> bool:
 
 
 def _guess_label(block_name: str) -> str:
-    """Try to match a block name to a known fire alarm symbol."""
-    name_upper = block_name.upper().strip()
+    """Try to match a block name to a known fire alarm symbol.
 
-    # Direct match
+    Checks English abbreviations first, then international terms.
+    Uses both exact and substring matching.
+    Normalizes underscores/hyphens to spaces for international matching.
+    """
+    name_upper = block_name.upper().strip()
+    # Normalize separators for international matching (CAD blocks use _ instead of spaces)
+    name_normalized = name_upper.replace("_", " ").replace("-", " ").strip()
+
+    # 1. Exact match — English abbreviations (use raw name)
     if name_upper in KNOWN_SYMBOLS:
         return KNOWN_SYMBOLS[name_upper]
 
-    # Check if known symbol is contained in the block name
+    # 2. Exact match — International terms (use normalized name)
+    if name_normalized in KNOWN_SYMBOLS_INTL:
+        return KNOWN_SYMBOLS_INTL[name_normalized]
+
+    # 3. Substring match — English abbreviations
     for abbrev, label in KNOWN_SYMBOLS.items():
         if abbrev in name_upper:
             return label
 
-    # Clean up the block name for display
-    cleaned = block_name.replace("_", " ").replace("-", " ").strip()
-    return cleaned
+    # 4. Substring match — International terms (against normalized name)
+    for term, label in KNOWN_SYMBOLS_INTL.items():
+        if term in name_normalized:
+            return label
+
+    # 5. Clean up the block name for display
+    return name_normalized
 
 
 def _get_symbol_color(label: str) -> str:
     """Get the visualization color for a symbol based on its label."""
     return SYMBOL_COLORS.get(label, DEFAULT_COLOR)
+
+
+# Attribute tags that typically describe what a block IS
+_TYPE_ATTRIB_TAGS = {"TYPE", "TIPO", "NAME", "NOMBRE", "DESCRIPTION", "DESCRIPCION",
+                     "DESC", "DEVICE", "DISPOSITIVO", "SYMBOL", "SIMBOLO", "EQUIPO",
+                     "DEVICE_TYPE", "DEVICE TYPE", "EQUIPMENT"}
+
+
+def _guess_label_from_attribs(attrs: dict[str, str]) -> str | None:
+    """Try to identify a symbol from its block attribute values.
+
+    Professional CAD drawings often attach attributes like TYPE="SMOKE DETECTOR"
+    to block references. This catches symbols that have non-standard block names.
+    """
+    # Check type-describing attributes first
+    for tag in _TYPE_ATTRIB_TAGS:
+        if tag in attrs:
+            value = attrs[tag]
+            # Try matching the attribute value against our dictionaries
+            label = _guess_label(value)
+            # If it matched to something meaningful (not just cleaned-up text)
+            if label != value.upper().replace("_", " ").replace("-", " ").strip():
+                return label
+            # Even if no dictionary match, the attribute value itself is descriptive
+            if len(value) > 2:
+                return value.title()
+
+    # Check ALL attribute values for fire alarm keywords
+    all_values = " ".join(attrs.values()).upper()
+    for term, label in KNOWN_SYMBOLS_INTL.items():
+        if term in all_values:
+            return label
+    for abbrev, label in KNOWN_SYMBOLS.items():
+        if abbrev in all_values:
+            return label
+
+    return None
+
+
+def _match_known_label(text: str) -> str | None:
+    """Check if any known symbol label appears as a substring in text.
+
+    This is a reverse lookup: instead of matching block names against dictionaries,
+    we check if the text already contains a recognized label (e.g., "Pull Station"
+    appears in the description "Pull Station - Manual Alarm Activation").
+    """
+    text_upper = text.upper()
+    # Check labels from both dictionaries (values, not keys)
+    seen = set()
+    for label in list(KNOWN_SYMBOLS.values()) + list(KNOWN_SYMBOLS_INTL.values()):
+        if label not in seen and label.upper() in text_upper:
+            seen.add(label)
+            return label
+    return None
+
+
+def _guess_label_from_block_def(block, doc) -> str | None:
+    """Try to identify a symbol from its block definition content.
+
+    Scans three data sources inside the block definition:
+    1. Block description field (DXF group code 4)
+    2. ATTDEF entities (attribute definitions with default values)
+    3. TEXT/MTEXT entities drawn inside the block (e.g., "SD", "HD")
+
+    This is critical for *U anonymous dynamic blocks where the block name
+    is meaningless but the internal content identifies the device.
+    """
+    # Source 1: Block description field
+    try:
+        desc = block.block.dxf.get("description", "")
+        if desc and len(desc.strip()) > 1:
+            # First try dictionary key matching
+            label = _guess_label(desc.strip())
+            if label != desc.strip().upper().replace("_", " ").replace("-", " ").strip():
+                return label
+            # Then try reverse label matching (e.g., "Pull Station" in description)
+            label = _match_known_label(desc)
+            if label:
+                return label
+    except Exception:
+        pass
+
+    # Source 2: ATTDEF entities (attribute definitions in the block)
+    # Constant ATTDEFs are especially valuable — fixed, unchangeable text
+    try:
+        for attdef in block.attdefs():
+            tag = attdef.dxf.tag.upper().strip()
+            # Check the default text value
+            default_text = attdef.dxf.text.strip()
+            if default_text and tag in _TYPE_ATTRIB_TAGS:
+                label = _guess_label(default_text)
+                if label != default_text.upper().replace("_", " ").replace("-", " ").strip():
+                    return label
+                if len(default_text) > 2:
+                    return default_text.title()
+            # Check the prompt text (e.g., "Enter device type:")
+            try:
+                prompt = attdef.dxf.prompt.strip()
+                if prompt:
+                    for term, label in KNOWN_SYMBOLS_INTL.items():
+                        if term in prompt.upper():
+                            return label
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Source 3: TEXT/MTEXT entities inside the block definition
+    # Fire alarm symbols typically contain short labels like "SD", "HD", "PS"
+    texts_found = []
+    try:
+        for entity in block:
+            etype = entity.dxftype()
+            if etype == "TEXT":
+                text = entity.dxf.text.strip()
+                if text and 1 <= len(text) <= 20:
+                    texts_found.append(text)
+            elif etype == "MTEXT":
+                try:
+                    text = entity.plain_text().strip()
+                except Exception:
+                    text = entity.text.strip() if entity.text else ""
+                if text and 1 <= len(text) <= 20:
+                    texts_found.append(text)
+    except Exception:
+        pass
+
+    # Match block-internal text against known symbols
+    for text in texts_found:
+        label = _guess_label(text)
+        if label != text.upper().replace("_", " ").replace("-", " ").strip():
+            return label
+
+    return None
+
+
+def _is_fire_layer(layer_name: str) -> bool:
+    """Check if a layer name indicates fire alarm content."""
+    name_lower = layer_name.lower()
+    return any(kw in name_lower for kw in FIRE_LAYER_KEYWORDS)
 
 
 def parse_dxf_file(filepath: str) -> ParseResult:
@@ -192,17 +490,44 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     version_name = DXF_VERSIONS.get(version_code, version_code)
     result.log("info", f"DXF version: {version_code} ({version_name})")
 
-    # Step 3: Enumerate layouts
+    # Step 3: Analyze layers
+    layer_names = []
+    fire_layers = []
+    try:
+        for layer in doc.layers:
+            lname = layer.dxf.name
+            layer_names.append(lname)
+            if _is_fire_layer(lname):
+                fire_layers.append(lname)
+    except Exception:
+        pass
+
+    if layer_names:
+        result.log("info", f"Layers in drawing: {len(layer_names)} total")
+        if len(layer_names) <= 20:
+            result.log("info", f"Layer names: {', '.join(layer_names)}")
+        else:
+            result.log("info", f"Layer names (first 20): {', '.join(layer_names[:20])}...")
+
+    if fire_layers:
+        result.log("success", f"Fire-related layers detected: {', '.join(fire_layers)}")
+    else:
+        result.log("info", "No fire-specific layer names found (will analyze all layers)")
+
+    # Step 4: Enumerate layouts
     layout_names = [layout.name for layout in doc.layouts]
     result.log("info", f"Layouts found: {len(layout_names)} — {', '.join(layout_names)}")
 
     block_counts: dict[str, int] = defaultdict(int)
     block_locations: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    block_layers: dict[str, set[str]] = defaultdict(set)
+    block_attribs: dict[str, dict[str, str]] = {}  # block_name → {tag: value}
     skipped_blocks: dict[str, int] = defaultdict(int)
 
     # Phase 1: Scan ALL layouts (model space + all paper space layouts)
     total_entities = 0
     total_inserts = 0
+    total_attribs_found = 0
 
     for layout in doc.layouts:
         layout_entity_count = 0
@@ -225,6 +550,28 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                     continue
 
                 block_counts[block_name] += 1
+
+                # Track which layer this block is on
+                try:
+                    block_layers[block_name].add(entity.dxf.layer)
+                except Exception:
+                    pass
+
+                # Read block attributes (ATTRIB entities attached to INSERT)
+                # These often contain TYPE, NAME, DESCRIPTION, TAG, etc.
+                try:
+                    if hasattr(entity, "attribs") and entity.attribs:
+                        for attrib in entity.attribs:
+                            tag = attrib.dxf.tag.upper().strip()
+                            value = attrib.dxf.text.strip()
+                            if value and block_name not in block_attribs:
+                                block_attribs[block_name] = {}
+                            if value:
+                                block_attribs[block_name][tag] = value
+                                total_attribs_found += 1
+                except Exception:
+                    pass
+
                 try:
                     insert_point = entity.dxf.insert
                     block_locations[block_name].append(
@@ -255,22 +602,66 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         )
         result.log("info", f"Skipped system blocks: {skip_list}")
 
+    # Log block attributes (critical for non-standard block name identification)
+    if block_attribs:
+        result.log("success", f"Block attributes found on {len(block_attribs)} blocks ({total_attribs_found} total attribute values)")
+        for bname, attrs in list(block_attribs.items())[:10]:
+            attr_str = ", ".join(f'{k}="{v}"' for k, v in attrs.items())
+            result.log("info", f'Block "{bname}" attributes: {attr_str}')
+    else:
+        result.log("info", "No block attributes found (blocks have no ATTRIB data)")
+
+    # Log block-to-layer mapping
+    if block_layers:
+        bl_entries = []
+        for bname, layers in list(block_layers.items())[:10]:
+            layer_str = ", ".join(sorted(layers))
+            bl_entries.append(f'"{bname}" on layer [{layer_str}]')
+        result.log("info", f"Block layers: {'; '.join(bl_entries)}")
+
     # Phase 2: Build nested reference map from block definitions
+    # Also scan block content for identification (text, ATTDEFs, description)
     nested_ref_counts: dict[str, dict[str, int]] = {}
     block_def_count = 0
+    block_def_entities: dict[str, dict[str, int]] = {}
+    block_def_labels: dict[str, str] = {}  # block_name → label from definition content
 
     for block in doc.blocks:
         if _should_skip_block(block.name):
             continue
         block_def_count += 1
         refs: dict[str, int] = defaultdict(int)
+        entity_types: dict[str, int] = defaultdict(int)
         for entity in block:
+            entity_types[entity.dxftype()] += 1
             if entity.dxftype() == "INSERT" and not _should_skip_block(entity.dxf.name):
                 refs[entity.dxf.name] += 1
         if refs:
             nested_ref_counts[block.name] = dict(refs)
+        if entity_types and block.name in block_counts:
+            block_def_entities[block.name] = dict(entity_types)
+
+        # For blocks that are actually used in the drawing, scan their definition
+        # for identifying text, ATTDEFs, and description fields
+        if block.name in block_counts:
+            label_from_def = _guess_label_from_block_def(block, doc)
+            if label_from_def:
+                block_def_labels[block.name] = label_from_def
 
     result.log("info", f"Block definitions analyzed: {block_def_count}")
+
+    if block_def_labels:
+        result.log(
+            "success",
+            f"Block definition content identified {len(block_def_labels)} blocks: "
+            + ", ".join(f'"{k}" → {v}' for k, v in list(block_def_labels.items())[:8])
+        )
+
+    # Log what's inside each detected block (helps debugging)
+    if block_def_entities:
+        for bname, etypes in list(block_def_entities.items())[:8]:
+            etype_str = ", ".join(f"{t}: {c}" for t, c in sorted(etypes.items(), key=lambda x: -x[1])[:5])
+            result.log("info", f'Block "{bname}" contains: {etype_str}')
 
     if nested_ref_counts:
         nesting_details = []
@@ -309,6 +700,35 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     symbols = []
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
         label = _guess_label(block_name)
+
+        # Detection waterfall: block name → INSERT attribs → block definition content
+        is_unrecognized = label == block_name.replace("_", " ").replace("-", " ").strip().upper()
+
+        # Tier 2: If block name didn't match, try INSERT attributes
+        if is_unrecognized:
+            attrs = block_attribs.get(block_name, {})
+            label_from_attribs = _guess_label_from_attribs(attrs) if attrs else None
+            if label_from_attribs:
+                label = label_from_attribs
+                is_unrecognized = False
+                result.log(
+                    "success",
+                    f'"{block_name}" identified as "{label}" from block attributes'
+                )
+
+        # Tier 3: If still unrecognized, try block definition content
+        # (description field, ATTDEFs, internal TEXT/MTEXT)
+        if is_unrecognized and block_name in block_def_labels:
+            label = block_def_labels[block_name]
+            result.log(
+                "success",
+                f'"{block_name}" identified as "{label}" from block definition content'
+            )
+
+        # Check if this block is on a fire-related layer
+        layers = block_layers.get(block_name, set())
+        on_fire_layer = any(_is_fire_layer(l) for l in layers)
+
         symbols.append(
             SymbolInfo(
                 block_name=block_name,
@@ -319,6 +739,54 @@ def parse_dxf_file(filepath: str) -> ParseResult:
             )
         )
 
+        # Collect unrecognized blocks for potential AI identification
+        if is_unrecognized:
+            # Gather all available metadata for this block
+            texts_inside = []
+            desc = ""
+            try:
+                block_def = doc.blocks.get(block_name)
+                if block_def:
+                    try:
+                        desc = block_def.block.dxf.get("description", "") or ""
+                    except Exception:
+                        pass
+                    for entity in block_def:
+                        etype = entity.dxftype()
+                        if etype == "TEXT":
+                            t = entity.dxf.text.strip()
+                            if t:
+                                texts_inside.append(t)
+                        elif etype == "MTEXT":
+                            try:
+                                t = entity.plain_text().strip()
+                            except Exception:
+                                t = ""
+                            if t:
+                                texts_inside.append(t)
+            except Exception:
+                pass
+
+            result.unrecognized_blocks.append(
+                UnrecognizedBlock(
+                    block_name=block_name,
+                    count=count,
+                    layers=sorted(layers),
+                    entity_types=block_def_entities.get(block_name, {}),
+                    attribs=block_attribs.get(block_name, {}),
+                    texts_inside=texts_inside[:10],
+                    description=desc,
+                )
+            )
+
+        # Log if block is on a fire-related layer
+        if on_fire_layer:
+            result.log(
+                "success",
+                f'"{block_name}" ({label}) is on fire-related layer: '
+                f'{", ".join(l for l in layers if _is_fire_layer(l))}'
+            )
+
     result.symbols = symbols
     total = sum(s.count for s in symbols)
     result.log("success", f"Detection complete: {len(symbols)} symbol types, {total} total devices")
@@ -327,14 +795,15 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         result.log(
             "warning",
             "No symbols detected. The drawing may use non-standard block names, "
-            "or content may be in an unsupported format."
+            "or content may be in an unsupported format (e.g., pure geometry without blocks)."
         )
-    elif len(symbols) < 3 and total < 10:
+    elif len(symbols) < 5 and total < 15:
         result.log(
             "warning",
-            "Very few symbols detected. If you expected more, the DWG-to-DXF "
-            "conversion may have lost data. Try exporting DXF directly from "
-            "AutoCAD or BricsCAD for best results."
+            "Very few symbols detected. Possible causes: "
+            "(1) DWG-to-DXF conversion lost data — try exporting DXF directly from AutoCAD; "
+            "(2) Symbols are drawn as raw geometry instead of named blocks; "
+            "(3) Dynamic blocks lost their names during conversion (showing as *U blocks)."
         )
 
     return result
@@ -356,15 +825,19 @@ def parse_dwg_file(filepath: str) -> ParseResult:
     file_size_mb = Path(filepath).stat().st_size / (1024 * 1024)
     result.log("info", f"File type: DWG (binary AutoCAD format, {file_size_mb:.1f} MB)")
     result.log("info", "DWG files require conversion to DXF before analysis")
+    result.log(
+        "warning",
+        "DWG conversion may lose data (dynamic block names, some entities). "
+        "For best results, export DXF directly from AutoCAD or BricsCAD."
+    )
 
-    # Strategy 1: LibreDWG dwg2dxf (primary — fast, reliable, open source)
+    # Strategy 1: LibreDWG dwg2dxf
     dwg2dxf_path = _find_dwg2dxf()
     if dwg2dxf_path:
         result.log("info", f"Using LibreDWG converter: {dwg2dxf_path}")
         try:
             dxf_path = _convert_with_libredwg(filepath, dwg2dxf_path, result)
             dxf_result = parse_dxf_file(dxf_path)
-            # Merge: DWG analysis first, then DXF analysis
             result.analysis.extend(dxf_result.analysis)
             result.symbols = dxf_result.symbols
             result.dxf_path = dxf_path
@@ -394,7 +867,7 @@ def parse_dwg_file(filepath: str) -> ParseResult:
     else:
         result.log("info", "ODA File Converter not available")
 
-    # Strategy 3: ezdxf recovery mode (handles some DWG-like files)
+    # Strategy 3: ezdxf recovery mode
     result.log("info", "Attempting ezdxf recovery mode (last resort)...")
     try:
         doc, auditor = ezdxf.recover.readfile(filepath)
@@ -409,7 +882,6 @@ def parse_dwg_file(filepath: str) -> ParseResult:
             "or a free tool like Autodesk's online viewer, then upload the DXF."
         )
 
-    # Save the recovered document as DXF for preview
     dxf_path = filepath + ".recovered.dxf"
     try:
         doc.saveas(dxf_path)
@@ -434,12 +906,11 @@ def _find_dwg2dxf() -> str | None:
         if Path(p).exists():
             return p
     try:
-        result = subprocess.run(
-            ["which", "dwg2dxf"],
-            capture_output=True, text=True, timeout=5,
+        r = subprocess.run(
+            ["which", "dwg2dxf"], capture_output=True, text=True, timeout=5
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
+        if r.returncode == 0:
+            return r.stdout.strip()
     except Exception:
         pass
     return None
@@ -460,9 +931,7 @@ def _convert_with_libredwg(
     try:
         proc = subprocess.run(
             [dwg2dxf_path, "-y", "-o", str(dxf_out), dwg_path],
-            timeout=120,
-            capture_output=True,
-            text=True,
+            timeout=120, capture_output=True, text=True,
         )
     except subprocess.TimeoutExpired:
         result.log("error", "Conversion timed out after 120 seconds")
@@ -471,7 +940,6 @@ def _convert_with_libredwg(
         result.log("error", f"Conversion error: {str(e)}")
         raise HTTPException(500, f"DWG conversion failed: {str(e)}")
 
-    # Log converter output (stderr often has useful info about what was processed)
     if proc.stderr:
         for line in proc.stderr.strip().split("\n")[:8]:
             line = line.strip()
@@ -484,7 +952,6 @@ def _convert_with_libredwg(
                 result.log("info", f"dwg2dxf: {line}")
 
     if not dxf_out.exists():
-        # dwg2dxf sometimes writes to the same directory as input without -o
         alt_path = Path(dwg_path).with_suffix(".dxf")
         if alt_path.exists():
             size_kb = alt_path.stat().st_size / 1024
@@ -508,21 +975,19 @@ def _convert_with_libredwg(
 
 def _find_oda_converter() -> str | None:
     """Look for ODA File Converter on the system."""
-    possible_paths = [
+    for p in [
         "/usr/bin/ODAFileConverter",
         "/usr/local/bin/ODAFileConverter",
         "/opt/ODAFileConverter/ODAFileConverter",
-    ]
-    for p in possible_paths:
+    ]:
         if Path(p).exists():
             return p
     try:
-        result = subprocess.run(
-            ["which", "ODAFileConverter"],
-            capture_output=True, text=True, timeout=5,
+        r = subprocess.run(
+            ["which", "ODAFileConverter"], capture_output=True, text=True, timeout=5
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
+        if r.returncode == 0:
+            return r.stdout.strip()
     except Exception:
         pass
     return None
@@ -531,10 +996,7 @@ def _find_oda_converter() -> str | None:
 def _convert_with_oda(
     dwg_path: str, oda_path: str, result: ParseResult
 ) -> str:
-    """Convert DWG to DXF using ODA File Converter.
-
-    Saves persistently for preview access. Returns path to converted DXF.
-    """
+    """Convert DWG to DXF using ODA File Converter."""
     dwg_file = Path(dwg_path)
     output_dir = dwg_file.parent
     result.log("info", "Converting DWG to DXF with ODA...")
@@ -543,16 +1005,10 @@ def _convert_with_oda(
         subprocess.run(
             [
                 oda_path,
-                str(dwg_file.parent),  # input dir
-                str(output_dir),       # output dir (same as input)
-                "ACAD2018",            # output version
-                "DXF",                 # output format
-                "0",                   # recurse
-                "1",                   # audit
-                dwg_file.name,         # input filename filter
+                str(dwg_file.parent), str(output_dir),
+                "ACAD2018", "DXF", "0", "1", dwg_file.name,
             ],
-            timeout=120,
-            capture_output=True,
+            timeout=120, capture_output=True,
         )
     except subprocess.TimeoutExpired:
         result.log("error", "ODA conversion timed out after 120 seconds")
@@ -561,10 +1017,8 @@ def _convert_with_oda(
         result.log("error", f"ODA conversion error: {str(e)}")
         raise HTTPException(500, f"DWG conversion failed: {str(e)}")
 
-    # Look for the output DXF
     dxf_path = output_dir / dwg_file.with_suffix(".dxf").name
     if not dxf_path.exists():
-        # Try glob for any new DXF files
         dxf_files = list(output_dir.glob("*.dxf"))
         if dxf_files:
             dxf_path = dxf_files[0]
