@@ -6,6 +6,7 @@ import {
   BarChart3,
   Eye,
   Flame,
+  ClipboardList,
 } from "lucide-react";
 import { DrawingData } from "../types";
 
@@ -15,8 +16,8 @@ interface Props {
   uploading: boolean;
   onReset: () => void;
   messageCount: number;
-  activeTab: "symbols" | "drawing";
-  onTabChange: (tab: "symbols" | "drawing") => void;
+  activeTab: "symbols" | "drawing" | "analysis";
+  onTabChange: (tab: "symbols" | "drawing" | "analysis") => void;
 }
 
 export default function Sidebar({
@@ -107,6 +108,14 @@ export default function Sidebar({
           >
             <Eye />
             <span>Drawing</span>
+          </div>
+          <div
+            className={`sidebar-nav-item ${activeTab === "analysis" ? "active" : ""}`}
+            onClick={() => onTabChange("analysis")}
+          >
+            <ClipboardList />
+            <span>Analysis</span>
+            <span className="sidebar-badge">{drawing.analysis?.length || 0}</span>
           </div>
           <div className="sidebar-nav-item">
             <MessageSquare />

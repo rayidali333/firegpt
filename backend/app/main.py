@@ -12,7 +12,8 @@ from app.parser import parse_dxf_file, parse_dwg_file
 from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing
 from app.models import (
-    ChatRequest, ChatResponse, ParseResponse, PreviewResponse, SymbolInfo,
+    AnalysisStep, ChatRequest, ChatResponse, ParseResponse, PreviewResponse,
+    SymbolInfo,
 )
 
 load_dotenv()
@@ -36,7 +37,7 @@ app.add_middleware(
 
 # In-memory store for parsed drawings (use a DB in production)
 drawings_store: dict[str, ParseResponse] = {}
-# Store file paths for preview generation
+# Store file paths for preview generation — always points to a readable DXF
 file_paths_store: dict[str, str] = {}
 # Cache generated previews
 preview_cache: dict[str, dict] = {}
@@ -67,9 +68,9 @@ async def upload_drawing(file: UploadFile):
 
     try:
         if ext == ".dxf":
-            symbols = parse_dxf_file(str(save_path))
+            parse_result = parse_dxf_file(str(save_path))
         elif ext == ".dwg":
-            symbols = parse_dwg_file(str(save_path))
+            parse_result = parse_dwg_file(str(save_path))
         else:
             raise HTTPException(400, f"Unsupported file type: {ext}")
     except HTTPException:
@@ -77,15 +78,27 @@ async def upload_drawing(file: UploadFile):
     except Exception as e:
         raise HTTPException(500, f"Failed to parse drawing: {str(e)}")
 
+    # Convert analysis dicts to AnalysisStep models
+    analysis_steps = [
+        AnalysisStep(**step) for step in parse_result.analysis
+    ]
+
     result = ParseResponse(
         drawing_id=drawing_id,
         filename=file.filename,
         file_type=ext.lstrip("."),
-        symbols=symbols,
-        total_symbols=sum(s.count for s in symbols),
+        symbols=parse_result.symbols,
+        total_symbols=sum(s.count for s in parse_result.symbols),
+        analysis=analysis_steps,
     )
     drawings_store[drawing_id] = result
-    file_paths_store[drawing_id] = str(save_path)
+
+    # Store the effective DXF path for preview generation.
+    # For DWG files, this is the converted DXF (not the original .dwg).
+    # For DXF files, this is the original file.
+    effective_path = parse_result.dxf_path or str(save_path)
+    file_paths_store[drawing_id] = effective_path
+
     return result
 
 

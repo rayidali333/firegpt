@@ -6,6 +6,7 @@ import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
 import SymbolTable from "./components/SymbolTable";
 import DrawingViewer from "./components/DrawingViewer";
+import AnalysisLog from "./components/AnalysisLog";
 import ChatPanel from "./components/ChatPanel";
 import "./App.css";
 
@@ -14,7 +15,7 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"symbols" | "drawing">("symbols");
+  const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis">("symbols");
   const [preview, setPreview] = useState<DrawingPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
@@ -142,6 +143,13 @@ function App() {
                   >
                     Drawing View
                   </button>
+                  <button
+                    className={`content-tab ${activeTab === "analysis" ? "active" : ""}`}
+                    onClick={() => setActiveTab("analysis")}
+                  >
+                    Analysis
+                    <span className="tab-badge">{drawing.analysis?.length || 0}</span>
+                  </button>
                   <div className="content-tabs-fill" />
                   <span className="content-tabs-filename">
                     {drawing.filename}
@@ -157,13 +165,18 @@ function App() {
                       selectedSymbol={selectedSymbol}
                       onSelectSymbol={handleSelectSymbol}
                     />
-                  ) : (
+                  ) : activeTab === "drawing" ? (
                     <DrawingViewer
                       preview={preview}
                       loading={previewLoading}
                       symbols={drawing.symbols}
                       selectedSymbol={selectedSymbol}
                       onSelectSymbol={handleSelectSymbol}
+                    />
+                  ) : (
+                    <AnalysisLog
+                      analysis={drawing.analysis || []}
+                      filename={drawing.filename}
                     />
                   )}
                 </div>
