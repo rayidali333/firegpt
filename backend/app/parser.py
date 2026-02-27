@@ -344,6 +344,103 @@ def _guess_label_from_attribs(attrs: dict[str, str]) -> str | None:
     return None
 
 
+def _match_known_label(text: str) -> str | None:
+    """Check if any known symbol label appears as a substring in text.
+
+    This is a reverse lookup: instead of matching block names against dictionaries,
+    we check if the text already contains a recognized label (e.g., "Pull Station"
+    appears in the description "Pull Station - Manual Alarm Activation").
+    """
+    text_upper = text.upper()
+    # Check labels from both dictionaries (values, not keys)
+    seen = set()
+    for label in list(KNOWN_SYMBOLS.values()) + list(KNOWN_SYMBOLS_INTL.values()):
+        if label not in seen and label.upper() in text_upper:
+            seen.add(label)
+            return label
+    return None
+
+
+def _guess_label_from_block_def(block, doc) -> str | None:
+    """Try to identify a symbol from its block definition content.
+
+    Scans three data sources inside the block definition:
+    1. Block description field (DXF group code 4)
+    2. ATTDEF entities (attribute definitions with default values)
+    3. TEXT/MTEXT entities drawn inside the block (e.g., "SD", "HD")
+
+    This is critical for *U anonymous dynamic blocks where the block name
+    is meaningless but the internal content identifies the device.
+    """
+    # Source 1: Block description field
+    try:
+        desc = block.block.dxf.get("description", "")
+        if desc and len(desc.strip()) > 1:
+            # First try dictionary key matching
+            label = _guess_label(desc.strip())
+            if label != desc.strip().upper().replace("_", " ").replace("-", " ").strip():
+                return label
+            # Then try reverse label matching (e.g., "Pull Station" in description)
+            label = _match_known_label(desc)
+            if label:
+                return label
+    except Exception:
+        pass
+
+    # Source 2: ATTDEF entities (attribute definitions in the block)
+    # Constant ATTDEFs are especially valuable — fixed, unchangeable text
+    try:
+        for attdef in block.attdefs():
+            tag = attdef.dxf.tag.upper().strip()
+            # Check the default text value
+            default_text = attdef.dxf.text.strip()
+            if default_text and tag in _TYPE_ATTRIB_TAGS:
+                label = _guess_label(default_text)
+                if label != default_text.upper().replace("_", " ").replace("-", " ").strip():
+                    return label
+                if len(default_text) > 2:
+                    return default_text.title()
+            # Check the prompt text (e.g., "Enter device type:")
+            try:
+                prompt = attdef.dxf.prompt.strip()
+                if prompt:
+                    for term, label in KNOWN_SYMBOLS_INTL.items():
+                        if term in prompt.upper():
+                            return label
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Source 3: TEXT/MTEXT entities inside the block definition
+    # Fire alarm symbols typically contain short labels like "SD", "HD", "PS"
+    texts_found = []
+    try:
+        for entity in block:
+            etype = entity.dxftype()
+            if etype == "TEXT":
+                text = entity.dxf.text.strip()
+                if text and 1 <= len(text) <= 20:
+                    texts_found.append(text)
+            elif etype == "MTEXT":
+                try:
+                    text = entity.plain_text().strip()
+                except Exception:
+                    text = entity.text.strip() if entity.text else ""
+                if text and 1 <= len(text) <= 20:
+                    texts_found.append(text)
+    except Exception:
+        pass
+
+    # Match block-internal text against known symbols
+    for text in texts_found:
+        label = _guess_label(text)
+        if label != text.upper().replace("_", " ").replace("-", " ").strip():
+            return label
+
+    return None
+
+
 def _is_fire_layer(layer_name: str) -> bool:
     """Check if a layer name indicates fire alarm content."""
     name_lower = layer_name.lower()
@@ -510,9 +607,11 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         result.log("info", f"Block layers: {'; '.join(bl_entries)}")
 
     # Phase 2: Build nested reference map from block definitions
+    # Also scan block content for identification (text, ATTDEFs, description)
     nested_ref_counts: dict[str, dict[str, int]] = {}
     block_def_count = 0
     block_def_entities: dict[str, dict[str, int]] = {}
+    block_def_labels: dict[str, str] = {}  # block_name → label from definition content
 
     for block in doc.blocks:
         if _should_skip_block(block.name):
@@ -529,7 +628,21 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         if entity_types and block.name in block_counts:
             block_def_entities[block.name] = dict(entity_types)
 
+        # For blocks that are actually used in the drawing, scan their definition
+        # for identifying text, ATTDEFs, and description fields
+        if block.name in block_counts:
+            label_from_def = _guess_label_from_block_def(block, doc)
+            if label_from_def:
+                block_def_labels[block.name] = label_from_def
+
     result.log("info", f"Block definitions analyzed: {block_def_count}")
+
+    if block_def_labels:
+        result.log(
+            "success",
+            f"Block definition content identified {len(block_def_labels)} blocks: "
+            + ", ".join(f'"{k}" → {v}' for k, v in list(block_def_labels.items())[:8])
+        )
 
     # Log what's inside each detected block (helps debugging)
     if block_def_entities:
@@ -575,15 +688,28 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
         label = _guess_label(block_name)
 
-        # If block name didn't match, try to identify from attributes
-        attrs = block_attribs.get(block_name, {})
-        label_from_attribs = _guess_label_from_attribs(attrs) if attrs else None
-        if label_from_attribs and label == block_name.replace("_", " ").replace("-", " ").strip().upper():
-            # Block name wasn't recognized, but attributes identified it
-            label = label_from_attribs
+        # Detection waterfall: block name → INSERT attribs → block definition content
+        is_unrecognized = label == block_name.replace("_", " ").replace("-", " ").strip().upper()
+
+        # Tier 2: If block name didn't match, try INSERT attributes
+        if is_unrecognized:
+            attrs = block_attribs.get(block_name, {})
+            label_from_attribs = _guess_label_from_attribs(attrs) if attrs else None
+            if label_from_attribs:
+                label = label_from_attribs
+                is_unrecognized = False
+                result.log(
+                    "success",
+                    f'"{block_name}" identified as "{label}" from block attributes'
+                )
+
+        # Tier 3: If still unrecognized, try block definition content
+        # (description field, ATTDEFs, internal TEXT/MTEXT)
+        if is_unrecognized and block_name in block_def_labels:
+            label = block_def_labels[block_name]
             result.log(
                 "success",
-                f'"{block_name}" identified as "{label}" from block attributes'
+                f'"{block_name}" identified as "{label}" from block definition content'
             )
 
         # Check if this block is on a fire-related layer
