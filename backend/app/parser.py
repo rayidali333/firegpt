@@ -91,19 +91,18 @@ SYMBOL_COLORS: dict[str, str] = {
 
 DEFAULT_COLOR = "#95A5A6"
 
-# Block names to always skip (AutoCAD internal blocks, dimensions, etc.)
+# Block names to always skip (only truly internal AutoCAD objects)
+# NOTE: We do NOT skip all *-prefixed blocks — anonymous blocks (*U1, *X1)
+# can contain valid dynamic block content in fire alarm drawings.
 SKIP_PATTERNS = [
-    r"^\*",           # AutoCAD anonymous blocks (*D1, *U2, etc.)
-    r"^_",            # Internal blocks
-    r"^A\$C",         # AutoCAD system blocks
-    r"^ACAD",         # AutoCAD system blocks
-    r"^AcDb",         # AutoCAD database objects
-    r"^DIMENSION",    # Dimension blocks
-    r"^LEADER",       # Leader blocks
-    r"^MTEXT",        # MText blocks
-    r"^SOLID",        # Solid blocks
-    r"^HATCH",        # Hatch patterns
-    r"^VIEWPORT",     # Viewport blocks
+    r"^\*Model_Space",    # Model space container
+    r"^\*Paper_Space",    # Paper space containers
+    r"^\*D\d+",           # Dimension blocks (*D1, *D2, ...)
+    r"^\*T\d+",           # Table blocks
+    r"^_",                # Internal blocks
+    r"^A\$C",             # AutoCAD system blocks
+    r"^AcDb",             # AutoCAD database objects
+    r"^ACAD_DSTYLE",      # Dimension style overrides
 ]
 
 
@@ -142,9 +141,9 @@ def parse_dxf_file(filepath: str) -> list[SymbolInfo]:
     """
     Parse a DXF file and count all block references (INSERT entities).
 
-    This is the core accuracy engine. Each INSERT entity in a DXF file
-    represents one placed instance of a symbol (block). Counting INSERTs
-    grouped by block name gives us exact symbol counts.
+    This is the core accuracy engine. Scans ALL layouts (model space AND
+    paper space), then recursively resolves nested block references to
+    get accurate total counts.
     """
     try:
         doc = ezdxf.readfile(filepath)
@@ -153,38 +152,52 @@ def parse_dxf_file(filepath: str) -> list[SymbolInfo]:
     except Exception as e:
         raise HTTPException(400, f"Could not read DXF file: {str(e)}")
 
-    msp = doc.modelspace()
-
-    # Count INSERT entities grouped by block name
     block_counts: dict[str, int] = defaultdict(int)
     block_locations: dict[str, list[tuple[float, float]]] = defaultdict(list)
 
-    for entity in msp:
-        if entity.dxftype() == "INSERT":
-            block_name = entity.dxf.name
-            if _should_skip_block(block_name):
-                continue
-            block_counts[block_name] += 1
-            # Store ALL insertion points for visualization
-            insert_point = entity.dxf.insert
-            block_locations[block_name].append(
-                (round(insert_point.x, 2), round(insert_point.y, 2))
-            )
+    # Phase 1: Scan ALL layouts (model space + all paper space layouts)
+    # Many fire alarm drawings organize content in paper space layouts
+    for layout in doc.layouts:
+        for entity in layout:
+            if entity.dxftype() == "INSERT":
+                block_name = entity.dxf.name
+                if _should_skip_block(block_name):
+                    continue
+                block_counts[block_name] += 1
+                insert_point = entity.dxf.insert
+                block_locations[block_name].append(
+                    (round(insert_point.x, 2), round(insert_point.y, 2))
+                )
 
-    # Also scan nested blocks (blocks within blocks)
+    # Phase 2: Build nested reference map from block definitions
+    # Count how many times each block definition INSERTs other blocks
+    nested_ref_counts: dict[str, dict[str, int]] = {}
     for block in doc.blocks:
         if _should_skip_block(block.name):
             continue
+        refs: dict[str, int] = defaultdict(int)
         for entity in block:
-            if entity.dxftype() == "INSERT":
-                nested_name = entity.dxf.name
-                if _should_skip_block(nested_name):
-                    continue
-                # If the parent block is inserted N times, each nested insert
-                # appears N times total. We track these separately.
-                parent_count = block_counts.get(block.name, 0)
-                if parent_count > 0:
-                    block_counts[nested_name] += parent_count
+            if entity.dxftype() == "INSERT" and not _should_skip_block(entity.dxf.name):
+                refs[entity.dxf.name] += 1
+        if refs:
+            nested_ref_counts[block.name] = dict(refs)
+
+    # Phase 3: Propagate counts through nesting hierarchy (BFS)
+    # If block A (count=N) contains M INSERTs of block B, then B gets N*M additional
+    processed: set[str] = set()
+    queue = list(block_counts.keys())
+    while queue:
+        parent = queue.pop(0)
+        if parent in processed:
+            continue
+        processed.add(parent)
+        if parent not in nested_ref_counts:
+            continue
+        parent_count = block_counts[parent]
+        for child, ref_count in nested_ref_counts[parent].items():
+            block_counts[child] += parent_count * ref_count
+            if child not in processed:
+                queue.append(child)
 
     # Build result sorted by count (most frequent first)
     symbols = []

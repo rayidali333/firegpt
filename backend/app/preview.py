@@ -24,33 +24,14 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
         except Exception:
             return _empty_preview()
 
-    msp = doc.modelspace()
-
     svg_elements: list[str] = []
     all_x: list[float] = []
     all_y: list[float] = []
 
-    for entity in msp:
-        etype = entity.dxftype()
-
-        if etype == "LINE":
-            _handle_line(entity, svg_elements, all_x, all_y)
-        elif etype == "LWPOLYLINE":
-            _handle_lwpolyline(entity, svg_elements, all_x, all_y)
-        elif etype == "POLYLINE":
-            _handle_polyline(entity, svg_elements, all_x, all_y)
-        elif etype == "CIRCLE":
-            _handle_circle(entity, svg_elements, all_x, all_y)
-        elif etype == "ARC":
-            _handle_arc(entity, svg_elements, all_x, all_y)
-        elif etype == "ELLIPSE":
-            _handle_ellipse(entity, svg_elements, all_x, all_y)
-        elif etype == "SPLINE":
-            _handle_spline(entity, svg_elements, all_x, all_y)
-        elif etype == "POINT":
-            x, y = entity.dxf.location.x, entity.dxf.location.y
-            all_x.append(x)
-            all_y.append(-y)
+    # Scan ALL layouts (model space + paper space) for geometry
+    for layout in doc.layouts:
+        for entity in layout:
+            _process_entity(entity, svg_elements, all_x, all_y)
 
     # Include symbol locations in bounds calculation
     for s in symbols:
@@ -99,6 +80,32 @@ def _empty_preview() -> dict:
         "width": 100,
         "height": 100,
     }
+
+
+def _process_entity(entity, elements: list, xs: list, ys: list):
+    """Route an entity to the appropriate SVG handler."""
+    etype = entity.dxftype()
+    if etype == "LINE":
+        _handle_line(entity, elements, xs, ys)
+    elif etype == "LWPOLYLINE":
+        _handle_lwpolyline(entity, elements, xs, ys)
+    elif etype == "POLYLINE":
+        _handle_polyline(entity, elements, xs, ys)
+    elif etype == "CIRCLE":
+        _handle_circle(entity, elements, xs, ys)
+    elif etype == "ARC":
+        _handle_arc(entity, elements, xs, ys)
+    elif etype == "ELLIPSE":
+        _handle_ellipse(entity, elements, xs, ys)
+    elif etype == "SPLINE":
+        _handle_spline(entity, elements, xs, ys)
+    elif etype == "POINT":
+        try:
+            x, y = entity.dxf.location.x, entity.dxf.location.y
+            xs.append(x)
+            ys.append(-y)
+        except Exception:
+            pass
 
 
 def _handle_line(entity, elements: list, xs: list, ys: list):
