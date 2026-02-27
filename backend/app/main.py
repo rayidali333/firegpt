@@ -9,8 +9,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.parser import parse_dxf_file, parse_dwg_file
+from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing
-from app.models import ChatRequest, ChatResponse, ParseResponse, SymbolInfo
+from app.models import (
+    ChatRequest, ChatResponse, ParseResponse, PreviewResponse, SymbolInfo,
+)
 
 load_dotenv()
 
@@ -21,7 +24,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # React build directory (built during deploy)
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-app = FastAPI(title="DrawingIQ", version="1.0.0")
+app = FastAPI(title="FireGPT", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,6 +36,10 @@ app.add_middleware(
 
 # In-memory store for parsed drawings (use a DB in production)
 drawings_store: dict[str, ParseResponse] = {}
+# Store file paths for preview generation
+file_paths_store: dict[str, str] = {}
+# Cache generated previews
+preview_cache: dict[str, dict] = {}
 
 
 @app.get("/api/health")
@@ -78,6 +85,7 @@ async def upload_drawing(file: UploadFile):
         total_symbols=sum(s.count for s in symbols),
     )
     drawings_store[drawing_id] = result
+    file_paths_store[drawing_id] = str(save_path)
     return result
 
 
@@ -88,13 +96,43 @@ def get_drawing(drawing_id: str):
     return drawings_store[drawing_id]
 
 
+@app.get("/api/drawings/{drawing_id}/preview", response_model=PreviewResponse)
+def get_drawing_preview(drawing_id: str):
+    """Generate or return cached SVG preview of the drawing."""
+    if drawing_id not in drawings_store:
+        raise HTTPException(404, "Drawing not found")
+    if drawing_id not in file_paths_store:
+        raise HTTPException(404, "Drawing file not available for preview")
+
+    # Return cached preview if available
+    if drawing_id in preview_cache:
+        return PreviewResponse(**preview_cache[drawing_id])
+
+    drawing = drawings_store[drawing_id]
+    filepath = file_paths_store[drawing_id]
+
+    try:
+        preview_data = generate_drawing_preview(filepath, drawing.symbols)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to generate preview: {str(e)}")
+
+    preview_cache[drawing_id] = preview_data
+    return PreviewResponse(**preview_data)
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     if request.drawing_id not in drawings_store:
         raise HTTPException(404, "Drawing not found. Please upload a drawing first.")
 
     drawing = drawings_store[request.drawing_id]
-    response_text = await chat_with_drawing(request.message, drawing)
+
+    # Build history from request
+    history = None
+    if request.history:
+        history = [{"role": h.role, "content": h.content} for h in request.history]
+
+    response_text = await chat_with_drawing(request.message, drawing, history)
     return ChatResponse(response=response_text)
 
 

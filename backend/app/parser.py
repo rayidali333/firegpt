@@ -56,6 +56,41 @@ KNOWN_SYMBOLS = {
     "WP": "Weatherproof",
 }
 
+# Color assignments by symbol category for drawing visualization
+SYMBOL_COLORS: dict[str, str] = {
+    "Smoke Detector": "#E74C3C",
+    "Heat Detector": "#E67E22",
+    "Duct Detector": "#D35400",
+    "Beam Detector": "#C0392B",
+    "VESDA Detector": "#922B21",
+    "Pull Station": "#F39C12",
+    "Break Glass": "#F1C40F",
+    "Manual Call Point": "#F39C12",
+    "Horn/Strobe": "#3498DB",
+    "Horn": "#2980B9",
+    "Strobe": "#1ABC9C",
+    "Speaker": "#2ECC71",
+    "Notification Appliance Circuit": "#3498DB",
+    "Fire Alarm Control Panel": "#9B59B6",
+    "Annunciator": "#8E44AD",
+    "Monitor Module": "#27AE60",
+    "Control Module": "#16A085",
+    "Monitor/Control Module": "#1ABC9C",
+    "Relay Module": "#2C3E50",
+    "End of Line": "#7F8C8D",
+    "Signaling Line Circuit": "#34495E",
+    "Fire Door Holder": "#795548",
+    "Sprinkler": "#607D8B",
+    "Post Indicator Valve": "#546E7A",
+    "Fire Department Connection": "#455A64",
+    "OS&Y Valve": "#546E7A",
+    "Terminal Box": "#7F8C8D",
+    "Junction Box": "#95A5A6",
+    "Weatherproof": "#607D8B",
+}
+
+DEFAULT_COLOR = "#95A5A6"
+
 # Block names to always skip (AutoCAD internal blocks, dimensions, etc.)
 SKIP_PATTERNS = [
     r"^\*",           # AutoCAD anonymous blocks (*D1, *U2, etc.)
@@ -98,6 +133,11 @@ def _guess_label(block_name: str) -> str:
     return cleaned
 
 
+def _get_symbol_color(label: str) -> str:
+    """Get the visualization color for a symbol based on its label."""
+    return SYMBOL_COLORS.get(label, DEFAULT_COLOR)
+
+
 def parse_dxf_file(filepath: str) -> list[SymbolInfo]:
     """
     Parse a DXF file and count all block references (INSERT entities).
@@ -125,12 +165,11 @@ def parse_dxf_file(filepath: str) -> list[SymbolInfo]:
             if _should_skip_block(block_name):
                 continue
             block_counts[block_name] += 1
-            # Store first 5 insertion points as samples
-            if len(block_locations[block_name]) < 5:
-                insert_point = entity.dxf.insert
-                block_locations[block_name].append(
-                    (round(insert_point.x, 2), round(insert_point.y, 2))
-                )
+            # Store ALL insertion points for visualization
+            insert_point = entity.dxf.insert
+            block_locations[block_name].append(
+                (round(insert_point.x, 2), round(insert_point.y, 2))
+            )
 
     # Also scan nested blocks (blocks within blocks)
     for block in doc.blocks:
@@ -150,12 +189,14 @@ def parse_dxf_file(filepath: str) -> list[SymbolInfo]:
     # Build result sorted by count (most frequent first)
     symbols = []
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
+        label = _guess_label(block_name)
         symbols.append(
             SymbolInfo(
                 block_name=block_name,
-                label=_guess_label(block_name),
+                label=label,
                 count=count,
-                sample_locations=block_locations.get(block_name, []),
+                locations=block_locations.get(block_name, []),
+                color=_get_symbol_color(label),
             )
         )
 

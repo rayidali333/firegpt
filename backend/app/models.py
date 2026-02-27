@@ -5,7 +5,8 @@ class SymbolInfo(BaseModel):
     block_name: str
     label: str  # User-friendly name (e.g., "Smoke Detector")
     count: int
-    sample_locations: list[tuple[float, float]]  # First few (x, y) insertion points
+    locations: list[tuple[float, float]]  # ALL (x, y) insertion points
+    color: str = "#95A5A6"  # Category color for visualization
 
 
 class ParseResponse(BaseModel):
@@ -16,10 +17,23 @@ class ParseResponse(BaseModel):
     total_symbols: int
 
 
+class ChatHistoryMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+
 class ChatRequest(BaseModel):
     drawing_id: str
     message: str
+    history: list[ChatHistoryMessage] = []
 
 
 class ChatResponse(BaseModel):
     response: str
+
+
+class PreviewResponse(BaseModel):
+    svg: str
+    viewBox: str
+    width: float
+    height: float

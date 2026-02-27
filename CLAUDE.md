@@ -136,6 +136,20 @@ git push origin main  # Render auto-deploys from main
 
 ## Change Log
 
+### v1.0.0 - Professional Platform Release
+- **Drawing Visualization**: Interactive SVG preview with zoom/pan, renders DXF geometry (lines, polylines, circles, arcs, ellipses, splines)
+- **Symbol Overlay**: Color-coded markers on drawing preview showing exact symbol placement locations
+- **Bidirectional Highlighting**: Click symbols in table → highlights on drawing, click markers on drawing → highlights in table
+- **Chat History**: Full multi-turn conversation support — Claude remembers the entire conversation context
+- **Cost Estimation**: AI-powered project cost estimates with detailed material + labor breakdowns using real market pricing
+- **Enhanced Chat**: Markdown rendering (tables, bold, code, lists), typing indicator, improved suggestions
+- **Tabbed Content View**: Switch between "Symbols" table and "Drawing View" with tab navigation
+- **Symbol Colors**: Category-based color coding for all 57 symbol types (detectors=red, notification=blue, control=purple, etc.)
+- **Backend Preview API**: New `/api/drawings/{id}/preview` endpoint generates and caches SVG previews
+- **Enhanced System Prompt**: Detailed fire alarm cost estimation guidelines with 2024-2025 US market rates
+- **Sidebar Improvements**: View switching, device/type stats, Flame icon branding
+- **Max tokens**: Increased Claude response limit from 1024 to 4096 tokens
+
 ### v0.2.0 - Retro UI Redesign
 - Complete UI overhaul to retro Mac OS vintage aesthetic
 - Added three-panel layout: sidebar | content | AI chat
