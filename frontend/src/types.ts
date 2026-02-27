@@ -2,7 +2,8 @@ export interface SymbolInfo {
   block_name: string;
   label: string;
   count: number;
-  sample_locations: [number, number][];
+  locations: [number, number][];
+  color: string;
 }
 
 export interface DrawingData {
@@ -16,4 +17,12 @@ export interface DrawingData {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  timestamp: number;
+}
+
+export interface DrawingPreview {
+  svg: string;
+  viewBox: string;
+  width: number;
+  height: number;
 }

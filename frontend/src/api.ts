@@ -1,4 +1,4 @@
-import { DrawingData } from "./types";
+import { DrawingData, DrawingPreview, ChatMessage } from "./types";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
@@ -19,14 +19,34 @@ export async function uploadDrawing(file: File): Promise<DrawingData> {
   return res.json();
 }
 
+export async function getDrawingPreview(
+  drawingId: string
+): Promise<DrawingPreview> {
+  const res = await fetch(`${API_BASE}/api/drawings/${drawingId}/preview`);
+
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ detail: "Preview generation failed" }));
+    throw new Error(err.detail || "Preview generation failed");
+  }
+
+  return res.json();
+}
+
 export async function chatWithDrawing(
   drawingId: string,
-  message: string
+  message: string,
+  history: ChatMessage[] = []
 ): Promise<string> {
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ drawing_id: drawingId, message }),
+    body: JSON.stringify({
+      drawing_id: drawingId,
+      message,
+      history: history.map((m) => ({ role: m.role, content: m.content })),
+    }),
   });
 
   if (!res.ok) {
