@@ -1336,6 +1336,159 @@
   border-color: var(--bevel-light) var(--bevel-dark) var(--bevel-dark) var(--bevel-light);
 }
 
+/* ===== Analysis Log ===== */
+.analysis-log {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.analysis-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--window-bg);
+  border-bottom: 1px solid var(--bevel-dark);
+  box-shadow: inset 0 1px 0 var(--bevel-light);
+  flex-shrink: 0;
+}
+
+.analysis-title {
+  font-size: var(--font-size);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.analysis-summary {
+  display: flex;
+  gap: 4px;
+}
+
+.analysis-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 8px;
+  line-height: 15px;
+}
+
+.analysis-badge-success {
+  background: #D5F5E3;
+  color: #1B7A3D;
+}
+
+.analysis-badge-warning {
+  background: #FEF3CD;
+  color: #856404;
+}
+
+.analysis-badge-error {
+  background: #FADBD8;
+  color: #922B21;
+}
+
+.analysis-subheader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--bevel-mid);
+  font-size: 10px;
+}
+
+.analysis-filename {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.analysis-step-count {
+  color: var(--text-muted);
+}
+
+.analysis-entries {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.analysis-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--panel-bg);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.analysis-entry:hover {
+  background: #F4F7FA;
+}
+
+.analysis-step-num {
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text-disabled);
+  min-width: 16px;
+  text-align: right;
+  padding-top: 1px;
+}
+
+.analysis-icon {
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.analysis-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.analysis-info .analysis-icon {
+  color: var(--accent);
+}
+
+.analysis-success .analysis-icon {
+  color: var(--success);
+}
+
+.analysis-warning .analysis-icon {
+  color: #E67E22;
+}
+
+.analysis-error .analysis-icon {
+  color: var(--danger);
+}
+
+.analysis-message {
+  flex: 1;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.analysis-success .analysis-message {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.analysis-error .analysis-message {
+  color: var(--danger);
+  font-weight: 500;
+}
+
+.analysis-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: var(--font-size);
+}
+
 /* ===== Utility Animation ===== */
 .spin {
   animation: spin 1s linear infinite;

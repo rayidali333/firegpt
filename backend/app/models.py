@@ -9,12 +9,18 @@ class SymbolInfo(BaseModel):
     color: str = "#95A5A6"  # Category color for visualization
 
 
+class AnalysisStep(BaseModel):
+    type: str  # "info", "success", "warning", "error"
+    message: str
+
+
 class ParseResponse(BaseModel):
     drawing_id: str
     filename: str
     file_type: str
     symbols: list[SymbolInfo]
     total_symbols: int
+    analysis: list[AnalysisStep] = []
 
 
 class ChatHistoryMessage(BaseModel):

@@ -1,17 +1,23 @@
 """
 Drawing Preview Generator — Converts DXF geometry to interactive SVG.
 
-Reads DXF entities (LINE, LWPOLYLINE, POLYLINE, CIRCLE, ARC) and converts
-them to SVG elements. Returns the floor plan SVG separately from symbol
-locations so the frontend can render interactive overlays.
+Reads DXF entities (LINE, LWPOLYLINE, POLYLINE, CIRCLE, ARC, INSERT, etc.)
+and converts them to SVG elements. INSERT entities are recursively expanded
+using ezdxf's virtual_entities() so block content (the majority of most
+drawings) is rendered.
+
+Returns the floor plan SVG separately from symbol locations so the frontend
+can render interactive overlays.
 """
 
 import math
-from html import escape
 
 import ezdxf
 
 from app.models import SymbolInfo
+
+# Cap total SVG elements to prevent browser crashes on very complex drawings
+MAX_SVG_ELEMENTS = 80000
 
 
 def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
@@ -27,11 +33,14 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     svg_elements: list[str] = []
     all_x: list[float] = []
     all_y: list[float] = []
+    element_count = [0]  # Mutable counter for tracking element limit
 
     # Scan ALL layouts (model space + paper space) for geometry
     for layout in doc.layouts:
         for entity in layout:
-            _process_entity(entity, svg_elements, all_x, all_y)
+            if element_count[0] >= MAX_SVG_ELEMENTS:
+                break
+            _process_entity(entity, svg_elements, all_x, all_y, element_count)
 
     # Include symbol locations in bounds calculation
     for s in symbols:
@@ -82,23 +91,49 @@ def _empty_preview() -> dict:
     }
 
 
-def _process_entity(entity, elements: list, xs: list, ys: list):
-    """Route an entity to the appropriate SVG handler."""
+def _process_entity(
+    entity, elements: list, xs: list, ys: list,
+    counter: list, depth: int = 0,
+):
+    """Route an entity to the appropriate SVG handler.
+
+    INSERT entities are recursively expanded via virtual_entities() so that
+    block content is fully rendered. Depth is limited to prevent infinite loops.
+    """
+    if counter[0] >= MAX_SVG_ELEMENTS:
+        return
+    if depth > 8:
+        return
+
     etype = entity.dxftype()
+
+    if etype == "INSERT":
+        # Expand block reference: virtual_entities() returns entities from the
+        # block definition with the INSERT's transform (position/rotation/scale)
+        # applied, giving correct world-space coordinates.
+        try:
+            for ve in entity.virtual_entities():
+                if counter[0] >= MAX_SVG_ELEMENTS:
+                    break
+                _process_entity(ve, elements, xs, ys, counter, depth + 1)
+        except Exception:
+            pass
+        return
+
     if etype == "LINE":
-        _handle_line(entity, elements, xs, ys)
+        _handle_line(entity, elements, xs, ys, counter)
     elif etype == "LWPOLYLINE":
-        _handle_lwpolyline(entity, elements, xs, ys)
+        _handle_lwpolyline(entity, elements, xs, ys, counter)
     elif etype == "POLYLINE":
-        _handle_polyline(entity, elements, xs, ys)
+        _handle_polyline(entity, elements, xs, ys, counter)
     elif etype == "CIRCLE":
-        _handle_circle(entity, elements, xs, ys)
+        _handle_circle(entity, elements, xs, ys, counter)
     elif etype == "ARC":
-        _handle_arc(entity, elements, xs, ys)
+        _handle_arc(entity, elements, xs, ys, counter)
     elif etype == "ELLIPSE":
-        _handle_ellipse(entity, elements, xs, ys)
+        _handle_ellipse(entity, elements, xs, ys, counter)
     elif etype == "SPLINE":
-        _handle_spline(entity, elements, xs, ys)
+        _handle_spline(entity, elements, xs, ys, counter)
     elif etype == "POINT":
         try:
             x, y = entity.dxf.location.x, entity.dxf.location.y
@@ -108,7 +143,7 @@ def _process_entity(entity, elements: list, xs: list, ys: list):
             pass
 
 
-def _handle_line(entity, elements: list, xs: list, ys: list):
+def _handle_line(entity, elements: list, xs: list, ys: list, counter: list):
     x1, y1 = entity.dxf.start.x, -entity.dxf.start.y
     x2, y2 = entity.dxf.end.x, -entity.dxf.end.y
     elements.append(
@@ -116,9 +151,10 @@ def _handle_line(entity, elements: list, xs: list, ys: list):
     )
     xs.extend([x1, x2])
     ys.extend([y1, y2])
+    counter[0] += 1
 
 
-def _handle_lwpolyline(entity, elements: list, xs: list, ys: list):
+def _handle_lwpolyline(entity, elements: list, xs: list, ys: list, counter: list):
     try:
         points = list(entity.get_points(format="xy"))
     except Exception:
@@ -131,9 +167,10 @@ def _handle_lwpolyline(entity, elements: list, xs: list, ys: list):
         ys.append(-y)
     tag = "polygon" if entity.closed else "polyline"
     elements.append(f'<{tag} points="{pts_str}"/>')
+    counter[0] += 1
 
 
-def _handle_polyline(entity, elements: list, xs: list, ys: list):
+def _handle_polyline(entity, elements: list, xs: list, ys: list, counter: list):
     try:
         vertices = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
     except Exception:
@@ -147,18 +184,20 @@ def _handle_polyline(entity, elements: list, xs: list, ys: list):
     is_closed = getattr(entity, "is_closed", False)
     tag = "polygon" if is_closed else "polyline"
     elements.append(f'<{tag} points="{pts_str}"/>')
+    counter[0] += 1
 
 
-def _handle_circle(entity, elements: list, xs: list, ys: list):
+def _handle_circle(entity, elements: list, xs: list, ys: list, counter: list):
     cx = entity.dxf.center.x
     cy = -entity.dxf.center.y
     r = entity.dxf.radius
     elements.append(f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}"/>')
     xs.extend([cx - r, cx + r])
     ys.extend([cy - r, cy + r])
+    counter[0] += 1
 
 
-def _handle_arc(entity, elements: list, xs: list, ys: list):
+def _handle_arc(entity, elements: list, xs: list, ys: list, counter: list):
     cx = entity.dxf.center.x
     cy = -entity.dxf.center.y
     r = entity.dxf.radius
@@ -187,9 +226,10 @@ def _handle_arc(entity, elements: list, xs: list, ys: list):
     )
     xs.extend([sx, ex])
     ys.extend([sy, ey])
+    counter[0] += 1
 
 
-def _handle_ellipse(entity, elements: list, xs: list, ys: list):
+def _handle_ellipse(entity, elements: list, xs: list, ys: list, counter: list):
     try:
         center = entity.dxf.center
         cx, cy = center.x, -center.y
@@ -203,11 +243,12 @@ def _handle_ellipse(entity, elements: list, xs: list, ys: list):
         )
         xs.extend([cx - rx, cx + rx])
         ys.extend([cy - ry, cy + ry])
+        counter[0] += 1
     except Exception:
         pass
 
 
-def _handle_spline(entity, elements: list, xs: list, ys: list):
+def _handle_spline(entity, elements: list, xs: list, ys: list, counter: list):
     try:
         # Approximate spline with control points as a polyline
         points = list(entity.control_points)
@@ -221,5 +262,6 @@ def _handle_spline(entity, elements: list, xs: list, ys: list):
         for x, y in pts:
             xs.append(x)
             ys.append(y)
+        counter[0] += 1
     except Exception:
         pass
