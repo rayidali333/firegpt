@@ -1,5 +1,5 @@
 import React, { useRef } from "react";
-import { Upload, FileText } from "lucide-react";
+import { Upload, FileText, MessageSquare, BarChart3 } from "lucide-react";
 import { DrawingData } from "../types";
 
 interface Props {
@@ -26,20 +26,21 @@ export default function Sidebar({ drawing, onUpload, uploading, onReset }: Props
     <aside className="sidebar">
       <div className="sidebar-brand">
         <div className="sidebar-logo">
-          Drawing<span className="sidebar-logo-accent">IQ</span>
+          Fire<span className="sidebar-logo-accent">GPT</span>
+          <span className="sidebar-dropdown-arrow">&#9660;</span>
         </div>
-        <div className="sidebar-tagline">Fire Alarm Symbol Analysis</div>
+        <div className="sidebar-tagline">Fire Alarm Analysis</div>
       </div>
 
       <div className="sidebar-section">
-        <button
-          className="sidebar-upload-btn"
+        <div
+          className="sidebar-nav-item"
           onClick={() => inputRef.current?.click()}
-          disabled={uploading}
+          style={{ cursor: "pointer" }}
         >
           <Upload />
-          {uploading ? "Parsing..." : "Upload Drawing"}
-        </button>
+          <span>{uploading ? "Parsing..." : "Upload Drawing"}</span>
+        </div>
         <input
           ref={inputRef}
           type="file"
@@ -50,22 +51,38 @@ export default function Sidebar({ drawing, onUpload, uploading, onReset }: Props
       </div>
 
       <div className="sidebar-section">
-        <div className="sidebar-section-title">Your Drawings</div>
+        <div className="sidebar-section-title">
+          <span className="sidebar-section-arrow">&#9660;</span>
+          Drawings
+        </div>
         {drawing ? (
-          <div className="sidebar-file-list">
-            <div className="sidebar-file active">
-              <FileText />
-              <span className="sidebar-file-name">{drawing.filename}</span>
-            </div>
+          <div className="sidebar-nav-item active">
+            <FileText />
+            <span className="sidebar-file-name">{drawing.filename}</span>
           </div>
         ) : (
           <div className="sidebar-empty">No drawings yet</div>
         )}
       </div>
 
+      <div className="sidebar-section">
+        <div className="sidebar-section-title">
+          <span className="sidebar-section-arrow">&#9660;</span>
+          Analysis
+        </div>
+        <div className={`sidebar-nav-item ${drawing ? "" : ""}`}>
+          <BarChart3 />
+          <span><span className="nav-prefix">#</span> symbols</span>
+        </div>
+        <div className="sidebar-nav-item">
+          <MessageSquare />
+          <span><span className="nav-prefix">#</span> chat</span>
+        </div>
+      </div>
+
       {drawing && (
-        <div className="sidebar-section sidebar-bottom">
-          <button className="sidebar-reset-btn" onClick={onReset}>
+        <div className="sidebar-bottom">
+          <button className="sidebar-action-btn" onClick={onReset}>
             New Drawing
           </button>
         </div>

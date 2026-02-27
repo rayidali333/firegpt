@@ -22,7 +22,7 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 ### Layout
 ```
 +----------------------------------------------------------+
-| [o][o][o]     DrawingIQ - Fire Alarm Analysis             | <- Title bar
+| [o][o][o]     FireGPT - Fire Alarm Analysis             | <- Title bar
 +----------+----------------------------+------------------+
 | SIDEBAR  |    MAIN CONTENT            |   CHAT PANEL     |
 | 220px    |    flexible                |   340px          |
@@ -47,7 +47,7 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 
 ### components/Sidebar.tsx
 - Left navigation panel (220px fixed width)
-- Brand section: DrawingIQ logo + tagline
+- Brand section: FireGPT logo + tagline
 - Upload button with hidden file input (.dxf, .dwg)
 - "Your Drawings" section with file list
 - "New Drawing" reset button when file loaded
@@ -56,7 +56,7 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 ### components/Header.tsx
 - Retro window title bar (38px height)
 - Traffic light buttons (red, yellow, green circles)
-- Centered title: "DrawingIQ - Fire Alarm Symbol Analysis"
+- Centered title: "FireGPT - Fire Alarm Symbol Analysis"
 - Purely decorative (no functional props needed)
 
 ### components/UploadZone.tsx

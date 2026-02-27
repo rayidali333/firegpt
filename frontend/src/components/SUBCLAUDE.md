@@ -2,7 +2,7 @@
 
 ## Overview
 
-React components for DrawingIQ, styled with retro Mac OS vintage aesthetic.
+React components for FireGPT, styled with retro Mac OS vintage aesthetic.
 
 ## Component Details
 
@@ -16,7 +16,7 @@ React components for DrawingIQ, styled with retro Mac OS vintage aesthetic.
 - **Purpose**: Left navigation panel with branding, upload, file management
 - **Props**: drawing (DrawingData|null), onUpload (file => void), uploading (bool), onReset (() => void)
 - **Features**:
-  - Brand section with DrawingIQ logo + tagline
+  - Brand section with FireGPT logo + tagline
   - Upload button with hidden file input (validates .dxf/.dwg)
   - "Your Drawings" section with active file indicator
   - "New Drawing" reset button (shown when file loaded)

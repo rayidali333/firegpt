@@ -4,13 +4,11 @@ export default function Header() {
   return (
     <div className="titlebar">
       <div className="titlebar-buttons">
-        <span className="titlebar-btn red" />
-        <span className="titlebar-btn yellow" />
-        <span className="titlebar-btn green" />
+        <span className="titlebar-btn close" />
+        <span className="titlebar-btn minimize" />
+        <span className="titlebar-btn zoom" />
       </div>
-      <span className="titlebar-title">
-        DrawingIQ — Fire Alarm Symbol Analysis
-      </span>
+      <span className="titlebar-title">FireGPT</span>
     </div>
   );
 }

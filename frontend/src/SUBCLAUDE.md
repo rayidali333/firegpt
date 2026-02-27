@@ -2,7 +2,7 @@
 
 ## Overview
 
-React 19 + TypeScript source code for DrawingIQ. Uses a retro Mac OS vintage design with three-panel layout.
+React 19 + TypeScript source code for FireGPT. Uses a retro Mac OS vintage design with three-panel layout.
 
 ## Architecture
 

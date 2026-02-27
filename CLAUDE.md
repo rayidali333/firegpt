@@ -1,8 +1,8 @@
-# DrawingIQ (FireGPT)
+# FireGPT
 
 ## Project Overview
 
-DrawingIQ is a full-stack web application built for fire alarm contractors. Users upload construction drawings (DXF/DWG format), the app automatically detects and counts all fire alarm symbols (smoke detectors, heat detectors, pull stations, horn/strobes, etc.), and provides an AI chat interface powered by Claude to ask questions about the extracted data.
+FireGPT is a full-stack web application built for fire alarm contractors. Users upload construction drawings (DXF/DWG format), the app automatically detects and counts all fire alarm symbols (smoke detectors, heat detectors, pull stations, horn/strobes, etc.), and provides an AI chat interface powered by Claude to ask questions about the extracted data.
 
 **Client brief**: Build a tool that lets fire alarm contractors upload CAD drawings, auto-detect all device symbols, get accurate counts, and chat with the data for bidding and takeoff purposes.
 
@@ -63,13 +63,14 @@ DrawingIQ is a full-stack web application built for fire alarm contractors. User
 - Static file serving (React build served by FastAPI)
 
 ### Design System
-The UI uses a retro Mac OS / vintage computing aesthetic:
-- **Color palette**: Warm cream (#F2E8D5), beige (#E5D5BB), brown borders (#B8A080)
-- **Window chrome**: Classic title bar with red/yellow/green traffic light buttons
-- **Typography**: System fonts with monospace for technical data
-- **Layout**: Three-panel (sidebar 220px | flexible content | chat 340px)
-- **Effects**: Inset/raised borders, warm shadows, subtle hover transitions
-- **Responsive**: Stacks vertically on mobile (<768px)
+The UI replicates the classic Mac OS 9 Platinum aesthetic:
+- **Color palette**: Green desktop (#3B9B4A), gray window (#DDDDDD), white content areas
+- **Window chrome**: Classic 3D beveled borders, title bar with filled/outline dots (close/minimize/zoom)
+- **3D borders**: Raised borders (white top-left, gray bottom-right), sunken panels for content areas
+- **Typography**: Lucida Grande/Geneva system fonts, Monaco monospace, 12px base
+- **Layout**: Three-panel (sidebar 200px | flexible content | chat 320px)
+- **Scrollbars**: Classic Mac OS wide scrollbars with button arrows and striped tracks
+- **Responsive**: Stacks vertically on mobile (<900px)
 
 ## API Endpoints
 
