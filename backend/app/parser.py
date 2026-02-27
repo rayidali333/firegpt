@@ -307,6 +307,43 @@ def _get_symbol_color(label: str) -> str:
     return SYMBOL_COLORS.get(label, DEFAULT_COLOR)
 
 
+# Attribute tags that typically describe what a block IS
+_TYPE_ATTRIB_TAGS = {"TYPE", "TIPO", "NAME", "NOMBRE", "DESCRIPTION", "DESCRIPCION",
+                     "DESC", "DEVICE", "DISPOSITIVO", "SYMBOL", "SIMBOLO", "EQUIPO",
+                     "DEVICE_TYPE", "DEVICE TYPE", "EQUIPMENT"}
+
+
+def _guess_label_from_attribs(attrs: dict[str, str]) -> str | None:
+    """Try to identify a symbol from its block attribute values.
+
+    Professional CAD drawings often attach attributes like TYPE="SMOKE DETECTOR"
+    to block references. This catches symbols that have non-standard block names.
+    """
+    # Check type-describing attributes first
+    for tag in _TYPE_ATTRIB_TAGS:
+        if tag in attrs:
+            value = attrs[tag]
+            # Try matching the attribute value against our dictionaries
+            label = _guess_label(value)
+            # If it matched to something meaningful (not just cleaned-up text)
+            if label != value.upper().replace("_", " ").replace("-", " ").strip():
+                return label
+            # Even if no dictionary match, the attribute value itself is descriptive
+            if len(value) > 2:
+                return value.title()
+
+    # Check ALL attribute values for fire alarm keywords
+    all_values = " ".join(attrs.values()).upper()
+    for term, label in KNOWN_SYMBOLS_INTL.items():
+        if term in all_values:
+            return label
+    for abbrev, label in KNOWN_SYMBOLS.items():
+        if abbrev in all_values:
+            return label
+
+    return None
+
+
 def _is_fire_layer(layer_name: str) -> bool:
     """Check if a layer name indicates fire alarm content."""
     name_lower = layer_name.lower()
@@ -374,11 +411,13 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     block_counts: dict[str, int] = defaultdict(int)
     block_locations: dict[str, list[tuple[float, float]]] = defaultdict(list)
     block_layers: dict[str, set[str]] = defaultdict(set)
+    block_attribs: dict[str, dict[str, str]] = {}  # block_name → {tag: value}
     skipped_blocks: dict[str, int] = defaultdict(int)
 
     # Phase 1: Scan ALL layouts (model space + all paper space layouts)
     total_entities = 0
     total_inserts = 0
+    total_attribs_found = 0
 
     for layout in doc.layouts:
         layout_entity_count = 0
@@ -405,6 +444,21 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                 # Track which layer this block is on
                 try:
                     block_layers[block_name].add(entity.dxf.layer)
+                except Exception:
+                    pass
+
+                # Read block attributes (ATTRIB entities attached to INSERT)
+                # These often contain TYPE, NAME, DESCRIPTION, TAG, etc.
+                try:
+                    if hasattr(entity, "attribs") and entity.attribs:
+                        for attrib in entity.attribs:
+                            tag = attrib.dxf.tag.upper().strip()
+                            value = attrib.dxf.text.strip()
+                            if value and block_name not in block_attribs:
+                                block_attribs[block_name] = {}
+                            if value:
+                                block_attribs[block_name][tag] = value
+                                total_attribs_found += 1
                 except Exception:
                     pass
 
@@ -437,6 +491,15 @@ def parse_dxf_file(filepath: str) -> ParseResult:
             f"{n} ({c})" for n, c in sorted(skipped_blocks.items())[:10]
         )
         result.log("info", f"Skipped system blocks: {skip_list}")
+
+    # Log block attributes (critical for non-standard block name identification)
+    if block_attribs:
+        result.log("success", f"Block attributes found on {len(block_attribs)} blocks ({total_attribs_found} total attribute values)")
+        for bname, attrs in list(block_attribs.items())[:10]:
+            attr_str = ", ".join(f'{k}="{v}"' for k, v in attrs.items())
+            result.log("info", f'Block "{bname}" attributes: {attr_str}')
+    else:
+        result.log("info", "No block attributes found (blocks have no ATTRIB data)")
 
     # Log block-to-layer mapping
     if block_layers:
@@ -511,6 +574,18 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     symbols = []
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
         label = _guess_label(block_name)
+
+        # If block name didn't match, try to identify from attributes
+        attrs = block_attribs.get(block_name, {})
+        label_from_attribs = _guess_label_from_attribs(attrs) if attrs else None
+        if label_from_attribs and label == block_name.replace("_", " ").replace("-", " ").strip().upper():
+            # Block name wasn't recognized, but attributes identified it
+            label = label_from_attribs
+            result.log(
+                "success",
+                f'"{block_name}" identified as "{label}" from block attributes'
+            )
+
         # Check if this block is on a fire-related layer
         layers = block_layers.get(block_name, set())
         on_fire_layer = any(_is_fire_layer(l) for l in layers)
