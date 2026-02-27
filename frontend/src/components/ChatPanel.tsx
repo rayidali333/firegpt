@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { MessageSquare, Send, Upload } from "lucide-react";
+import { MessageSquare, Upload } from "lucide-react";
 import { ChatMessage } from "../types";
 
 interface Props {
@@ -65,7 +65,6 @@ export default function ChatPanel({ messages, onSend, disabled }: Props) {
           <Upload />
           <p>
             Upload a construction drawing to start chatting.
-            <br />
             Ask about symbol counts, device types, or get a full takeoff summary.
           </p>
         </div>
@@ -77,7 +76,7 @@ export default function ChatPanel({ messages, onSend, disabled }: Props) {
                 <MessageSquare />
                 <h3>Chat with your drawing</h3>
                 <p>
-                  Ask questions about symbol counts, device types, or get a full
+                  Ask questions about symbol counts, device types, or get a
                   takeoff summary for your bid.
                 </p>
                 <div className="chat-suggestions">
@@ -107,7 +106,7 @@ export default function ChatPanel({ messages, onSend, disabled }: Props) {
               <textarea
                 ref={inputRef}
                 className="chat-input"
-                placeholder="Ask about your drawing..."
+                placeholder="Your message"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
@@ -119,7 +118,7 @@ export default function ChatPanel({ messages, onSend, disabled }: Props) {
                 onClick={handleSubmit}
                 disabled={!input.trim() || sending || disabled}
               >
-                <Send />
+                Send
               </button>
             </div>
           </div>

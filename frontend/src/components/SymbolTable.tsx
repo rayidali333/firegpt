@@ -10,12 +10,12 @@ export default function SymbolTable({ symbols, total }: Props) {
   return (
     <div className="symbol-table">
       <div className="symbol-table-header">
-        <h3 className="symbol-table-title">Detected Symbols</h3>
+        <h3 className="symbol-table-title"># Detected Symbols</h3>
         <span className="symbol-table-count">{total} total</span>
       </div>
       <div className="symbol-list">
         {symbols.length === 0 ? (
-          <p style={{ color: "var(--text-muted)", fontSize: 13, padding: 12 }}>
+          <p style={{ color: "var(--text-muted)", fontSize: 12, padding: 8 }}>
             No symbols detected in this drawing.
           </p>
         ) : (

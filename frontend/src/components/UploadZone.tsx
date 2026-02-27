@@ -69,7 +69,7 @@ export default function UploadZone({ onUpload, uploading, error }: Props) {
             <p className="upload-subtitle">
               Drop your DXF or DWG file here, or click to browse.
               <br />
-              We'll detect and count all fire alarm symbols automatically.
+              FireGPT will detect and count all fire alarm symbols.
             </p>
             <div className="upload-formats">
               <span className="format-badge">.DXF</span>
