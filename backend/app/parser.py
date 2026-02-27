@@ -251,11 +251,24 @@ DXF_VERSIONS = {
 
 
 @dataclass
+class UnrecognizedBlock:
+    """Metadata about a block that couldn't be identified by dictionary matching."""
+    block_name: str
+    count: int
+    layers: list[str] = field(default_factory=list)
+    entity_types: dict[str, int] = field(default_factory=dict)
+    attribs: dict[str, str] = field(default_factory=dict)
+    texts_inside: list[str] = field(default_factory=list)
+    description: str = ""
+
+
+@dataclass
 class ParseResult:
     """Internal result from parsing, includes symbols + analysis log + file path."""
     symbols: list[SymbolInfo] = field(default_factory=list)
     analysis: list[dict] = field(default_factory=list)
     dxf_path: str = ""
+    unrecognized_blocks: list[UnrecognizedBlock] = field(default_factory=list)
 
     def log(self, type: str, message: str):
         self.analysis.append({"type": type, "message": message})
@@ -725,6 +738,46 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                 color=_get_symbol_color(label),
             )
         )
+
+        # Collect unrecognized blocks for potential AI identification
+        if is_unrecognized:
+            # Gather all available metadata for this block
+            texts_inside = []
+            desc = ""
+            try:
+                block_def = doc.blocks.get(block_name)
+                if block_def:
+                    try:
+                        desc = block_def.block.dxf.get("description", "") or ""
+                    except Exception:
+                        pass
+                    for entity in block_def:
+                        etype = entity.dxftype()
+                        if etype == "TEXT":
+                            t = entity.dxf.text.strip()
+                            if t:
+                                texts_inside.append(t)
+                        elif etype == "MTEXT":
+                            try:
+                                t = entity.plain_text().strip()
+                            except Exception:
+                                t = ""
+                            if t:
+                                texts_inside.append(t)
+            except Exception:
+                pass
+
+            result.unrecognized_blocks.append(
+                UnrecognizedBlock(
+                    block_name=block_name,
+                    count=count,
+                    layers=sorted(layers),
+                    entity_types=block_def_entities.get(block_name, {}),
+                    attribs=block_attribs.get(block_name, {}),
+                    texts_inside=texts_inside[:10],
+                    description=desc,
+                )
+            )
 
         # Log if block is on a fire-related layer
         if on_fire_layer:

@@ -8,9 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from app.parser import parse_dxf_file, parse_dwg_file
+from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
 from app.preview import generate_drawing_preview
-from app.chat import chat_with_drawing
+from app.chat import chat_with_drawing, identify_blocks_with_ai
 from app.models import (
     AnalysisStep, ChatRequest, ChatResponse, ParseResponse, PreviewResponse,
     SymbolInfo,
@@ -77,6 +77,46 @@ async def upload_drawing(file: UploadFile):
         raise
     except Exception as e:
         raise HTTPException(500, f"Failed to parse drawing: {str(e)}")
+
+    # Tier 4: AI-powered identification for blocks that tiers 1-3 couldn't recognize
+    if parse_result.unrecognized_blocks:
+        try:
+            # Collect layer names for context
+            layer_names = list({
+                layer
+                for block in parse_result.unrecognized_blocks
+                for layer in block.layers
+            })
+
+            ai_labels = await identify_blocks_with_ai(
+                parse_result.unrecognized_blocks,
+                file.filename,
+                all_layer_names=layer_names,
+            )
+
+            if ai_labels:
+                parse_result.analysis.append({
+                    "type": "success",
+                    "message": f"AI identified {len(ai_labels)} additional blocks: "
+                    + ", ".join(f'"{k}" → {v}' for k, v in list(ai_labels.items())[:8]),
+                })
+
+                # Update symbol labels with AI identifications
+                for symbol in parse_result.symbols:
+                    if symbol.block_name in ai_labels:
+                        symbol.label = ai_labels[symbol.block_name]
+                        symbol.color = _get_symbol_color(symbol.label)
+            else:
+                n = len(parse_result.unrecognized_blocks)
+                parse_result.analysis.append({
+                    "type": "info",
+                    "message": f"{n} blocks remain unrecognized after AI analysis",
+                })
+        except Exception:
+            parse_result.analysis.append({
+                "type": "warning",
+                "message": "AI identification unavailable (no API key or service error)",
+            })
 
     # Convert analysis dicts to AnalysisStep models
     analysis_steps = [
