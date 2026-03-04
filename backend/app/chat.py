@@ -102,17 +102,22 @@ Consider:
 
 Respond with ONLY a JSON object mapping block names to their identified labels.
 Use standard fire alarm terminology in English:
-- "Smoke Detector", "Heat Detector", "Duct Detector", "Beam Detector"
-- "Pull Station", "Manual Call Point"
-- "Horn/Strobe", "Horn", "Strobe", "Speaker"
-- "Fire Alarm Control Panel", "Annunciator"
-- "Monitor Module", "Control Module"
-- "Sprinkler", "Fire Extinguisher", "Emergency Light", "Exit Sign"
-- "Fire Hydrant", "Fire Hose", "Fire Cabinet"
-- etc.
+- Detection: "Smoke Detector", "Heat Detector", "Duct Detector", "Beam Detector", "Aspirating Smoke Detector"
+- Manual: "Pull Station", "Manual Call Point", "Break Glass"
+- Notification: "Horn/Strobe", "Horn", "Strobe", "Speaker", "Alarm Siren"
+- Control: "Fire Alarm Control Panel", "Annunciator", "Monitor Module", "Control Module"
+- Suppression: "Sprinkler", "Fire Extinguisher"
+- Other: "Emergency Light", "Exit Sign", "Fire Hydrant", "Fire Hose", "Fire Cabinet"
+
+IMPORTANT distinctions:
+- "SPK" in fire alarm drawings = Speaker (voice evacuation), NOT Sprinkler
+- "LOUDSPEAKER" / "SPEAKER" = Speaker (voice evacuation / public address)
+- "ALARM SIREN" = Alarm Siren (audible notification device), NOT Strobe
+- "Strobe" = visual-only notification device (flashing light)
+- Blocks containing "SHEET FRAME", "TITLE BLOCK", "PLOT FRAME" are title blocks, NOT devices
 
 If a block is clearly NOT a fire alarm device (e.g., furniture, doors, windows,
-structural elements, title block components), set its value to null.
+structural elements, title block components, sheet frames), set its value to null.
 If you cannot determine what a block is, set its value to null.
 
 RESPOND WITH ONLY THE JSON OBJECT, no explanation:
@@ -222,7 +227,11 @@ Notification Appliances:
 - Horn/Strobe: $40-80 material + $75-120 labor per device
 - Horn only: $30-60 material + $75-100 labor per device
 - Strobe only: $35-65 material + $75-100 labor per device
+- Speaker (ceiling mount): $50-100 material + $100-150 labor per device
+- Speaker (wall mount): $55-110 material + $100-150 labor per device
 - Speaker/Strobe: $60-120 material + $100-150 labor per device
+- Alarm Siren (indoor): $45-85 material + $75-120 labor per device
+- Alarm Siren (outdoor/weatherproof): $65-130 material + $100-150 labor per device
 
 System Components:
 - Fire Alarm Control Panel (small): $2,000-5,000 material + $1,500-3,000 labor

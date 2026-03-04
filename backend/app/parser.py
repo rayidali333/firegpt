@@ -30,6 +30,8 @@ from app.models import SymbolInfo
 # ────────────────────────────────────────────────────────
 
 # English fire alarm abbreviations (most common in US/UK/Canada drawings)
+# NOTE: In fire alarm context, SPK = Speaker (voice evacuation), NOT Sprinkler.
+# Sprinklers live on separate plumbing/sprinkler drawings and use SPRK/SPRINKLER.
 KNOWN_SYMBOLS = {
     "SD": "Smoke Detector",
     "HD": "Heat Detector",
@@ -46,14 +48,24 @@ KNOWN_SYMBOLS = {
     "BG": "Break Glass",
     "MCP": "Manual Call Point",
     "FD": "Fire Door Holder",
-    "SPK": "Sprinkler",
+    "SPK": "Speaker",
     "SPKR": "Speaker",
+    "SPEAKER": "Speaker",
+    "LOUDSPEAKER": "Speaker",
+    "SIREN": "Alarm Siren",
+    "ALARM SIREN": "Alarm Siren",
+    "SPRINKLER": "Sprinkler",
+    "SPRK": "Sprinkler",
+    "SPKL": "Sprinkler",
     "PIV": "Post Indicator Valve",
     "FDC": "Fire Department Connection",
     "OS/Y": "OS&Y Valve",
     "BEAM": "Beam Detector",
     "VESDA": "VESDA Detector",
+    "ASD": "Aspirating Smoke Detector",
     "MODULE": "Monitor/Control Module",
+    "MONITOR MODULE": "Monitor Module",
+    "CONTROL MODULE": "Control Module",
     "MON": "Monitor Module",
     "CM": "Control Module",
     "REL": "Relay Module",
@@ -182,8 +194,10 @@ SYMBOL_COLORS: dict[str, str] = {
     "Horn": "#2980B9",
     "Strobe": "#1ABC9C",
     "Speaker": "#2ECC71",
+    "Alarm Siren": "#E74C3C",
     "Alarm Device": "#3498DB",
     "Fire Alarm": "#3498DB",
+    "Aspirating Smoke Detector": "#922B21",
     "Notification Appliance Circuit": "#3498DB",
     "Fire Alarm Control Panel": "#9B59B6",
     "Fire Panel": "#9B59B6",
@@ -271,6 +285,8 @@ NON_FIRE_KEYWORDS = [
     "DIMENSION", "LEADER", "TAG", "KEYNOTE", "SECTION", "DETAIL",
     "CALLOUT", "REVISION", "MATCHLINE", "BREAK LINE", "CENTERLINE",
     "VIEWPORT", "SCALE BAR", "LEGEND",
+    "SHEET FRAME", "TITLE BLOCK", "TITLEBLOCK", "PLOT FRAME",
+    "DRAWING BORDER", "SHEET BORDER", "SHEET FORMAT",
     # Landscape / site
     "TREE", "PLANT", "SHRUB", "BUSH", "GRASS", "FLOWER", "LANDSCAPE",
     "PAVING", "CURB", "BOLLARD", "FENCE", "GATE",
@@ -368,15 +384,27 @@ def _is_obvious_non_fire(block_name: str, layers: set[str] | None = None) -> boo
     """
     name_normalized = block_name.upper().replace("_", " ").replace("-", " ").strip()
 
+    # Very long block names (>80 chars) are almost certainly annotation/title
+    # block elements, not fire alarm device symbols
+    if len(name_normalized) > 80:
+        return True
+
     # Check prefixes (AR-, FUR-, PFX-, ST-, etc.)
     for prefix in NON_FIRE_PREFIXES:
         if name_normalized.startswith(prefix.upper()):
             return True
 
-    # Check keywords
+    # Check keywords — use word-boundary matching for short keywords (≤5 chars)
+    # to avoid false positives like "DOOR" matching "INDOOR"
     for keyword in NON_FIRE_KEYWORDS:
-        if keyword.upper() in name_normalized:
-            return True
+        kw_upper = keyword.upper().strip()
+        if len(kw_upper) <= 5:
+            pattern = r'(?<![A-Z])' + re.escape(kw_upper) + r'(?![A-Z])'
+            if re.search(pattern, name_normalized):
+                return True
+        else:
+            if kw_upper in name_normalized:
+                return True
 
     return False
 
@@ -401,9 +429,10 @@ def _guess_label(block_name: str) -> str:
         return KNOWN_SYMBOLS_INTL[name_normalized]
 
     # 3. Substring match — English abbreviations
-    # Use word-boundary matching for short abbreviations (≤3 chars) to avoid
-    # false positives like "CM" matching "CWM" or "BG" matching "BACKGROUND"
-    for abbrev, label in KNOWN_SYMBOLS.items():
+    # Sort by key length descending so longer/more specific matches win.
+    # e.g., "SPEAKER" matches before "SPK", "ALARM SIREN" before "ALARM",
+    # "CONTROL MODULE" before "MODULE", "SPRINKLER" before "SPK".
+    for abbrev, label in sorted(KNOWN_SYMBOLS.items(), key=lambda x: -len(x[0])):
         if len(abbrev) <= 3:
             # Word-boundary match: check that abbrev is surrounded by
             # non-alphanumeric chars (or start/end of string)
@@ -415,7 +444,8 @@ def _guess_label(block_name: str) -> str:
                 return label
 
     # 4. Substring match — International terms (against normalized name)
-    for term, label in KNOWN_SYMBOLS_INTL.items():
+    # Sort by length descending so longer terms match first
+    for term, label in sorted(KNOWN_SYMBOLS_INTL.items(), key=lambda x: -len(x[0])):
         if term in name_normalized:
             return label
 
