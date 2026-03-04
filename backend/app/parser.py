@@ -236,6 +236,81 @@ SKIP_PATTERNS = [
     r"^ACAD_DSTYLE",
 ]
 
+# ────────────────────────────────────────────────────────
+# Non-fire-alarm block filters
+# ────────────────────────────────────────────────────────
+# Keywords that indicate a block is NOT a fire alarm device.
+# Applied only to blocks that failed all positive identification methods.
+# Matched against the normalized (uppercased, separators→spaces) block name.
+NON_FIRE_KEYWORDS = [
+    # Furniture
+    "CHAIR", "SOFA", "TABLE", "DESK", "BED ", "BEDS", "CABINET", "SHELF",
+    "BENCH", "STOOL", "WARDROBE", "BOOKCASE", "CREDENZA", "COUCH",
+    "OTTOMAN", "ARMCHAIR", "MATTRESS", "DRESSER", "NIGHTSTAND", "CUSHION",
+    "LOUNGE", "BARSTOOL", "RECLINER", "FUTON", "SIDEBOARD", "HUTCH",
+    "FILING", "CUBICLE", "WORKSTATION",
+    # Plumbing / sanitary
+    "TOILET", "SINK", "DRAIN", "BATHTUB", "SHOWER", "FAUCET", "URINAL",
+    "BIDET", "LAVATORY", "BASIN", "WC FIXTURE", "SANITARY", "TOILET PAPER",
+    "SOAP DISPENSER", "TOWEL", "DURAVIT", "FLUSHING", "WATER CLOSET",
+    "PLUMBING", "SEWER", "WASTE", "CISTERN", "VANITY",
+    # Kitchen / appliances
+    "REFRIGERATOR", "OVEN", "MICROWAVE", "DISHWASHER", "COOKTOP",
+    "RANGE HOOD", "KITCHEN SINK", "COFFEE", "VENDING",
+    # Architectural elements
+    "DOOR", "WINDOW", "RAILING", "STAIR", "CURTAIN WALL", "MULLION",
+    "PARAPET", "CEILING GRID", "FLOOR PATTERN", "TILE", "MOLDING",
+    "BASEBOARD", "THRESHOLD", "GLAZING", "LOUVER", "SHUTTER",
+    "BALUSTRADE", "HANDRAIL", "NEWEL", "TREAD", "RISER", "LANDING",
+    "ELEVATOR", "ESCALATOR", "REVOLVING DOOR",
+    # Structural
+    "FOOTING", "FOUNDATION", "REBAR", "CONCRETE", "STEEL BEAM",
+    "STEEL COLUMN", "TRUSS", "PILE", "SLAB",
+    # Annotation / CAD drafting
+    "GRID", "GRIDLINE", "TITLE", "BORDER", "NORTH", "ARROW",
+    "DIMENSION", "LEADER", "TAG", "KEYNOTE", "SECTION", "DETAIL",
+    "CALLOUT", "REVISION", "MATCHLINE", "BREAK LINE", "CENTERLINE",
+    "VIEWPORT", "SCALE BAR", "LEGEND",
+    # Landscape / site
+    "TREE", "PLANT", "SHRUB", "BUSH", "GRASS", "FLOWER", "LANDSCAPE",
+    "PAVING", "CURB", "BOLLARD", "FENCE", "GATE",
+    # Vehicles / transport
+    "CAR ", "VEHICLE", "PARKING", "BICYCLE", "MOTORCYCLE", "TRUCK",
+    # People / accessibility
+    "PERSON", "PEOPLE", "FIGURE", "WHEELCHAIR", "ACCESSIBLE",
+    # HVAC (non-fire)
+    "DIFFUSER", "VENT", "AIR HANDLING", "AHU", "CHILLER", "BOILER",
+    "RADIATOR", "FCU", "FAN COIL", "THERMOSTAT", "CONDENSING",
+    "COOLING TOWER", "SUPPLY AIR", "RETURN AIR", "EXHAUST FAN",
+    # Electrical (non-fire)
+    "OUTLET", "RECEPTACLE", "LIGHT FIXTURE", "LUMINAIRE", "LAMP",
+    "TRANSFORMER", "PANELBOARD", "SWITCHGEAR", "MOTOR", "GENERATOR",
+    "UPS", "CONDUIT RUN", "CABLE TRAY", "JUNCTION",
+    # IT / data
+    "DATA OUTLET", "TELEPHONE", "CCTV", "CAMERA",
+    "ACCESS POINT", "NETWORK",
+    # Medical
+    "MEDICAL GAS", "NURSE CALL", "BED HEAD",
+    # Misc non-fire
+    "SIGN ", "SIGNAGE", "ARTWORK", "MIRROR", "CLOCK",
+    "COAT HOOK", "UMBRELLA", "TRASH", "WASTE BIN", "RECYCLING",
+]
+
+# Prefixes in block names that typically indicate non-fire-alarm disciplines
+# Matched against the start of the normalized block name
+NON_FIRE_PREFIXES = [
+    "AR ",   # Architectural
+    "AR-",
+    "AR_",
+    "FUR ",  # Furniture
+    "FUR-",
+    "FUR_",
+    "PFX",   # Plumbing Fixtures
+    "ST ",   # Structural
+    "ST-",
+    "ST_",
+]
+
 # DXF version codes to human-readable names
 DXF_VERSIONS = {
     "AC1009": "AutoCAD R12",
@@ -260,6 +335,7 @@ class UnrecognizedBlock:
     attribs: dict[str, str] = field(default_factory=dict)
     texts_inside: list[str] = field(default_factory=list)
     description: str = ""
+    locations: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -279,6 +355,29 @@ def _should_skip_block(block_name: str) -> bool:
     for pattern in SKIP_PATTERNS:
         if re.match(pattern, block_name, re.IGNORECASE):
             return True
+    return False
+
+
+def _is_obvious_non_fire(block_name: str, layers: set[str] | None = None) -> bool:
+    """Check if a block is obviously NOT a fire alarm device.
+
+    Only called for blocks that failed all positive identification methods
+    (dictionary, attribs, block def content). Uses keyword and prefix matching
+    to filter out furniture, plumbing, architectural, and annotation blocks
+    before wasting AI tokens on them.
+    """
+    name_normalized = block_name.upper().replace("_", " ").replace("-", " ").strip()
+
+    # Check prefixes (AR-, FUR-, PFX-, ST-, etc.)
+    for prefix in NON_FIRE_PREFIXES:
+        if name_normalized.startswith(prefix.upper()):
+            return True
+
+    # Check keywords
+    for keyword in NON_FIRE_KEYWORDS:
+        if keyword.upper() in name_normalized:
+            return True
+
     return False
 
 
@@ -302,9 +401,18 @@ def _guess_label(block_name: str) -> str:
         return KNOWN_SYMBOLS_INTL[name_normalized]
 
     # 3. Substring match — English abbreviations
+    # Use word-boundary matching for short abbreviations (≤3 chars) to avoid
+    # false positives like "CM" matching "CWM" or "BG" matching "BACKGROUND"
     for abbrev, label in KNOWN_SYMBOLS.items():
-        if abbrev in name_upper:
-            return label
+        if len(abbrev) <= 3:
+            # Word-boundary match: check that abbrev is surrounded by
+            # non-alphanumeric chars (or start/end of string)
+            pattern = r'(?<![A-Z0-9])' + re.escape(abbrev) + r'(?![A-Z0-9])'
+            if re.search(pattern, name_upper):
+                return label
+        else:
+            if abbrev in name_upper:
+                return label
 
     # 4. Substring match — International terms (against normalized name)
     for term, label in KNOWN_SYMBOLS_INTL.items():
@@ -696,8 +804,12 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     if changed:
         result.log("info", f"Nesting resolved: {', '.join(changed[:8])}")
 
-    # Build result sorted by count (most frequent first)
+    # Build result — WHITELIST approach: only include positively identified fire alarm devices.
+    # Blocks that can't be identified are candidates for AI analysis, not included by default.
     symbols = []
+    skipped_non_fire = 0
+    ai_candidates = 0
+
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
         label = _guess_label(block_name)
 
@@ -720,6 +832,7 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         # (description field, ATTDEFs, internal TEXT/MTEXT)
         if is_unrecognized and block_name in block_def_labels:
             label = block_def_labels[block_name]
+            is_unrecognized = False
             result.log(
                 "success",
                 f'"{block_name}" identified as "{label}" from block definition content'
@@ -729,19 +842,31 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         layers = block_layers.get(block_name, set())
         on_fire_layer = any(_is_fire_layer(l) for l in layers)
 
-        symbols.append(
-            SymbolInfo(
-                block_name=block_name,
-                label=label,
-                count=count,
-                locations=block_locations.get(block_name, []),
-                color=_get_symbol_color(label),
+        if not is_unrecognized:
+            # ✓ Positively identified as a fire alarm device — include it
+            symbols.append(
+                SymbolInfo(
+                    block_name=block_name,
+                    label=label,
+                    count=count,
+                    locations=block_locations.get(block_name, []),
+                    color=_get_symbol_color(label),
+                )
             )
-        )
+            if on_fire_layer:
+                result.log(
+                    "success",
+                    f'"{block_name}" ({label}) is on fire-related layer: '
+                    f'{", ".join(l for l in layers if _is_fire_layer(l))}'
+                )
+        else:
+            # Unrecognized block — check if it's obviously non-fire
+            if _is_obvious_non_fire(block_name, layers):
+                skipped_non_fire += 1
+                continue
 
-        # Collect unrecognized blocks for potential AI identification
-        if is_unrecognized:
-            # Gather all available metadata for this block
+            # Not obviously non-fire — send to AI for identification
+            ai_candidates += 1
             texts_inside = []
             desc = ""
             try:
@@ -776,26 +901,38 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                     attribs=block_attribs.get(block_name, {}),
                     texts_inside=texts_inside[:10],
                     description=desc,
+                    locations=block_locations.get(block_name, []),
                 )
             )
 
-        # Log if block is on a fire-related layer
-        if on_fire_layer:
-            result.log(
-                "success",
-                f'"{block_name}" ({label}) is on fire-related layer: '
-                f'{", ".join(l for l in layers if _is_fire_layer(l))}'
-            )
+    if skipped_non_fire > 0:
+        result.log(
+            "info",
+            f"Filtered out {skipped_non_fire} non-fire-alarm blocks "
+            f"(furniture, plumbing, architectural, annotation, etc.)"
+        )
+
+    if ai_candidates > 0:
+        result.log(
+            "info",
+            f"{ai_candidates} ambiguous blocks queued for AI identification"
+        )
 
     result.symbols = symbols
     total = sum(s.count for s in symbols)
     result.log("success", f"Detection complete: {len(symbols)} symbol types, {total} total devices")
 
-    if total == 0:
+    if total == 0 and not result.unrecognized_blocks:
         result.log(
             "warning",
             "No symbols detected. The drawing may use non-standard block names, "
             "or content may be in an unsupported format (e.g., pure geometry without blocks)."
+        )
+    elif total == 0 and result.unrecognized_blocks:
+        result.log(
+            "info",
+            "No symbols identified by dictionary matching. "
+            "AI analysis will attempt to identify remaining blocks."
         )
     elif len(symbols) < 5 and total < 15:
         result.log(

@@ -30,8 +30,9 @@ function App() {
     setPreviewLoading(true);
     getDrawingPreview(drawing.drawing_id)
       .then(setPreview)
-      .catch(() => {
-        // Preview generation failed silently — drawing viewer will show empty
+      .catch((e) => {
+        console.warn("Preview generation failed:", e);
+        setPreview(null);
       })
       .finally(() => setPreviewLoading(false));
   }, [drawing]);

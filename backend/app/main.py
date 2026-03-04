@@ -78,7 +78,9 @@ async def upload_drawing(file: UploadFile):
     except Exception as e:
         raise HTTPException(500, f"Failed to parse drawing: {str(e)}")
 
-    # Tier 4: AI-powered identification for blocks that tiers 1-3 couldn't recognize
+    # Tier 4: AI-powered identification for blocks that tiers 1-3 couldn't recognize.
+    # These blocks are NOT in parse_result.symbols yet — they only get added
+    # if AI positively identifies them as fire alarm devices.
     if parse_result.unrecognized_blocks:
         try:
             # Collect layer names for context
@@ -101,16 +103,25 @@ async def upload_drawing(file: UploadFile):
                     + ", ".join(f'"{k}" → {v}' for k, v in list(ai_labels.items())[:8]),
                 })
 
-                # Update symbol labels with AI identifications
-                for symbol in parse_result.symbols:
-                    if symbol.block_name in ai_labels:
-                        symbol.label = ai_labels[symbol.block_name]
-                        symbol.color = _get_symbol_color(symbol.label)
+                # Add AI-identified blocks as new symbols
+                for block in parse_result.unrecognized_blocks:
+                    if block.block_name in ai_labels:
+                        label = ai_labels[block.block_name]
+                        parse_result.symbols.append(
+                            SymbolInfo(
+                                block_name=block.block_name,
+                                label=label,
+                                count=block.count,
+                                locations=block.locations,
+                                color=_get_symbol_color(label),
+                            )
+                        )
             else:
                 n = len(parse_result.unrecognized_blocks)
                 parse_result.analysis.append({
                     "type": "info",
-                    "message": f"{n} blocks remain unrecognized after AI analysis",
+                    "message": f"{n} blocks remain unrecognized after AI analysis "
+                    "(likely non-fire-alarm blocks)",
                 })
         except Exception:
             parse_result.analysis.append({
@@ -164,9 +175,12 @@ def get_drawing_preview(drawing_id: str):
     drawing = drawings_store[drawing_id]
     filepath = file_paths_store[drawing_id]
 
+    import logging
+    logger = logging.getLogger(__name__)
     try:
         preview_data = generate_drawing_preview(filepath, drawing.symbols)
     except Exception as e:
+        logger.error(f"Preview generation failed for {drawing_id}: {e}", exc_info=True)
         raise HTTPException(500, f"Failed to generate preview: {str(e)}")
 
     preview_cache[drawing_id] = preview_data
