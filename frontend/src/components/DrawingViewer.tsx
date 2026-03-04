@@ -96,6 +96,10 @@ export default function DrawingViewer({
       <div className="drawing-viewer">
         <div className="drawing-viewer-empty">
           <p>No preview available</p>
+          <p style={{ fontSize: 11, color: "#888", marginTop: 4 }}>
+            DWG files may not generate previews after conversion.
+            For best results, export as DXF from AutoCAD.
+          </p>
         </div>
       </div>
     );

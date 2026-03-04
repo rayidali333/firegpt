@@ -14,6 +14,7 @@ Key features:
 - Element cap at 80K to prevent browser crashes
 """
 
+import logging
 import math
 import re
 from html import escape
@@ -21,6 +22,8 @@ from html import escape
 import ezdxf
 
 from app.models import SymbolInfo
+
+logger = logging.getLogger(__name__)
 
 MAX_SVG_ELEMENTS = 80000
 
@@ -84,12 +87,15 @@ def _resolve_color(entity, doc) -> str:
 
 def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     """Generate an SVG preview of the drawing floor plan."""
+    logger.info(f"Generating preview for: {filepath}")
     try:
         doc = ezdxf.readfile(filepath)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Normal read failed for preview ({e}), trying recovery mode")
         try:
             doc, _ = ezdxf.recover.readfile(filepath)
-        except Exception:
+        except Exception as e2:
+            logger.error(f"Recovery mode also failed for preview: {e2}")
             return _empty_preview()
 
     svg_elements: list[str] = []
