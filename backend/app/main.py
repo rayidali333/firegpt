@@ -1,3 +1,5 @@
+import csv
+import io
 import os
 import uuid
 from pathlib import Path
@@ -6,14 +8,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
 from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai
 from app.models import (
-    AnalysisStep, ChatRequest, ChatResponse, ParseResponse, PreviewResponse,
-    SymbolInfo,
+    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, ParseResponse,
+    PreviewResponse, SymbolInfo, SymbolOverride,
 )
 
 load_dotenv()
@@ -114,8 +116,18 @@ async def upload_drawing(file: UploadFile):
                                 count=block.count,
                                 locations=block.locations,
                                 color=_get_symbol_color(label),
+                                confidence="medium",
+                                source="ai",
                             )
                         )
+                        parse_result.audit.append(AuditEntry(
+                            block_name=block.block_name,
+                            label=label,
+                            count=block.count,
+                            method="ai",
+                            confidence="medium",
+                            layers=block.layers,
+                        ))
             else:
                 n = len(parse_result.ai_candidate_blocks)
                 parse_result.analysis.append({
@@ -145,19 +157,27 @@ async def upload_drawing(file: UploadFile):
             all_locations = []
             for s in group:
                 all_locations.extend(s.locations)
-            # Use the shortest block name as representative, list others in parentheses
             sorted_group = sorted(group, key=lambda s: -s.count)
             block_names = [s.block_name for s in sorted_group]
             if len(block_names) <= 3:
                 combined_name = " + ".join(block_names)
             else:
                 combined_name = f"{block_names[0]} (+{len(block_names)-1} variants)"
+            # Use highest confidence level in group
+            confidence_rank = {"high": 3, "medium": 2, "low": 1}
+            best_confidence = max(group, key=lambda s: confidence_rank.get(s.confidence, 0)).confidence
+            # If any source is dictionary, mark as dictionary; otherwise ai
+            sources = {s.source for s in group}
+            best_source = "dictionary" if "dictionary" in sources else ("ai" if "ai" in sources else "manual")
             consolidated_symbols.append(SymbolInfo(
                 block_name=combined_name,
                 label=label,
                 count=total_count,
                 locations=all_locations,
                 color=group[0].color,
+                confidence=best_confidence,
+                source=best_source,
+                block_variants=block_names,
             ))
 
     # Sort by count descending
@@ -168,6 +188,12 @@ async def upload_drawing(file: UploadFile):
         AnalysisStep(**step) for step in parse_result.analysis
     ]
 
+    # Build audit entries
+    audit_entries = [
+        AuditEntry(**a) if isinstance(a, dict) else a
+        for a in parse_result.audit
+    ]
+
     result = ParseResponse(
         drawing_id=drawing_id,
         filename=file.filename,
@@ -175,6 +201,9 @@ async def upload_drawing(file: UploadFile):
         symbols=consolidated_symbols,
         total_symbols=sum(s.count for s in consolidated_symbols),
         analysis=analysis_steps,
+        audit=audit_entries,
+        xref_warnings=parse_result.xref_warnings,
+        legend_texts=parse_result.legend_texts,
     )
     drawings_store[drawing_id] = result
 
@@ -235,6 +264,59 @@ async def chat(request: ChatRequest):
 
     response_text = await chat_with_drawing(request.message, drawing, history)
     return ChatResponse(response=response_text)
+
+
+@app.patch("/api/drawings/{drawing_id}/symbols/{block_name}")
+def override_symbol(drawing_id: str, block_name: str, override: SymbolOverride):
+    """Manual count override for a symbol. Tracks original count for audit."""
+    if drawing_id not in drawings_store:
+        raise HTTPException(404, "Drawing not found")
+
+    drawing = drawings_store[drawing_id]
+    for sym in drawing.symbols:
+        if sym.block_name == block_name:
+            if sym.original_count is None:
+                sym.original_count = sym.count
+            sym.count = override.count
+            sym.label = override.label
+            sym.confidence = "manual"
+            sym.source = "manual"
+            drawing.total_symbols = sum(s.count for s in drawing.symbols)
+            drawings_store[drawing_id] = drawing
+            return {"status": "ok", "symbol": sym}
+
+    raise HTTPException(404, f"Symbol '{block_name}' not found")
+
+
+@app.get("/api/drawings/{drawing_id}/export")
+def export_drawing_csv(drawing_id: str):
+    """Export symbol data as CSV for device schedule comparison."""
+    if drawing_id not in drawings_store:
+        raise HTTPException(404, "Drawing not found")
+
+    drawing = drawings_store[drawing_id]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Label", "Block Name", "Count", "Confidence", "Source", "Original Count"])
+    for sym in drawing.symbols:
+        writer.writerow([
+            sym.label,
+            sym.block_name,
+            sym.count,
+            sym.confidence,
+            sym.source,
+            sym.original_count if sym.original_count is not None else "",
+        ])
+    writer.writerow([])
+    writer.writerow(["Total Devices", "", drawing.total_symbols, "", "", ""])
+
+    output.seek(0)
+    safe_name = drawing.filename.rsplit(".", 1)[0] if "." in drawing.filename else drawing.filename
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_symbols.csv"'},
+    )
 
 
 @app.get("/api/drawings")

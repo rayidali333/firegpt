@@ -7,6 +7,20 @@ class SymbolInfo(BaseModel):
     count: int
     locations: list[tuple[float, float]]  # ALL (x, y) insertion points
     color: str = "#95A5A6"  # Category color for visualization
+    confidence: str = "high"  # "high" (dictionary) | "medium" (AI) | "manual" (user override)
+    source: str = "dictionary"  # "dictionary" | "ai" | "manual"
+    block_variants: list[str] = []  # Individual block names before consolidation
+    original_count: int | None = None  # Pre-override count (null if never overridden)
+
+
+class AuditEntry(BaseModel):
+    block_name: str
+    label: str
+    count: int
+    method: str  # "exact_match" | "substring_match" | "intl_match" | "ai"
+    confidence: str
+    matched_term: str | None = None  # The dictionary key that triggered the match
+    layers: list[str] = []
 
 
 class AnalysisStep(BaseModel):
@@ -21,6 +35,9 @@ class ParseResponse(BaseModel):
     symbols: list[SymbolInfo]
     total_symbols: int
     analysis: list[AnalysisStep] = []
+    audit: list[AuditEntry] = []
+    xref_warnings: list[str] = []
+    legend_texts: list[str] = []
 
 
 class ChatHistoryMessage(BaseModel):
@@ -43,3 +60,8 @@ class PreviewResponse(BaseModel):
     viewBox: str
     width: float
     height: float
+
+
+class SymbolOverride(BaseModel):
+    label: str
+    count: int

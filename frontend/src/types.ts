@@ -4,6 +4,20 @@ export interface SymbolInfo {
   count: number;
   locations: [number, number][];
   color: string;
+  confidence: "high" | "medium" | "manual";
+  source: "dictionary" | "ai" | "manual";
+  block_variants: string[];
+  original_count: number | null;
+}
+
+export interface AuditEntry {
+  block_name: string;
+  label: string;
+  count: number;
+  method: string;
+  confidence: string;
+  matched_term: string | null;
+  layers: string[];
 }
 
 export interface AnalysisStep {
@@ -18,6 +32,9 @@ export interface DrawingData {
   symbols: SymbolInfo[];
   total_symbols: number;
   analysis: AnalysisStep[];
+  audit: AuditEntry[];
+  xref_warnings: string[];
+  legend_texts: string[];
 }
 
 export interface ChatMessage {
