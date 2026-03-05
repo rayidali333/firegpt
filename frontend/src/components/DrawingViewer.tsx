@@ -76,10 +76,12 @@ export default function DrawingViewer({
     0, 0, 100, 100,
   ];
   const [, , vbW, vbH] = viewBoxParts;
-  const markerRadius = Math.max(vbW, vbH) * 0.005;
-  const selectedRadius = Math.max(vbW, vbH) * 0.008;
+  const maxDim = Math.max(vbW, vbH);
+  const markerRadius = maxDim * 0.004;
+  const selectedRadius = maxDim * 0.012;
   const strokeWidth = markerRadius * 0.35;
-  const fontSize = selectedRadius * 1.4;
+  const selectedStroke = selectedRadius * 0.25;
+  const fontSize = selectedRadius * 1.2;
 
   if (loading) {
     return (
@@ -110,6 +112,16 @@ export default function DrawingViewer({
   const legendItems = symbols
     .filter((s) => s.locations.length > 0)
     .slice(0, 12);
+
+  // Debug: log coordinate info when symbol is selected
+  if (selectedSymbol && preview) {
+    const sym = symbols.find((s) => s.block_name === selectedSymbol);
+    if (sym && sym.locations.length > 0) {
+      const sample = sym.locations.slice(0, 3);
+      console.log(`[DrawingViewer] viewBox="${preview.viewBox}", selectedRadius=${selectedRadius}`);
+      console.log(`[DrawingViewer] ${sym.label}: ${sym.locations.length} locations, sample:`, sample.map(([x,y]) => `(${x}, ${-y})`));
+    }
+  }
 
   return (
     <div className="drawing-viewer">
@@ -171,6 +183,21 @@ export default function DrawingViewer({
               viewBox={preview.viewBox}
               preserveAspectRatio="xMidYMid meet"
             >
+              <defs>
+                <filter id="marker-shadow" x="-50%" y="-50%" width="200%" height="200%">
+                  <feDropShadow dx="0" dy="0" stdDeviation={maxDim * 0.002} floodColor="rgba(0,0,0,0.6)" />
+                </filter>
+              </defs>
+              {/* Debug: center crosshair to verify overlay renders */}
+              <circle
+                cx={viewBoxParts[0] + vbW / 2}
+                cy={viewBoxParts[1] + vbH / 2}
+                r={maxDim * 0.02}
+                fill="red"
+                opacity={0.8}
+                stroke="yellow"
+                strokeWidth={maxDim * 0.005}
+              />
               {selectedSymbol ? (
                 // Selected mode: show only the selected symbol with numbered circles
                 symbols
@@ -187,15 +214,23 @@ export default function DrawingViewer({
                           onSelectSymbol(null);
                         }}
                         style={{ cursor: "pointer" }}
+                        filter="url(#marker-shadow)"
                       >
+                        {/* Dark outline ring for contrast */}
+                        <circle
+                          cx={x}
+                          cy={-y}
+                          r={selectedRadius + selectedStroke}
+                          fill="rgba(0,0,0,0.5)"
+                        />
+                        {/* Main colored circle */}
                         <circle
                           cx={x}
                           cy={-y}
                           r={selectedRadius}
                           fill={symbol.color}
                           stroke="white"
-                          strokeWidth={strokeWidth * 1.5}
-                          opacity={0.9}
+                          strokeWidth={selectedStroke}
                         />
                         <text
                           x={x}
@@ -206,6 +241,9 @@ export default function DrawingViewer({
                           fontSize={fontSize}
                           fontWeight="bold"
                           fontFamily="Arial, sans-serif"
+                          stroke="rgba(0,0,0,0.4)"
+                          strokeWidth={fontSize * 0.08}
+                          paintOrder="stroke"
                           style={{ pointerEvents: "none" }}
                         >
                           {i + 1}
@@ -223,29 +261,35 @@ export default function DrawingViewer({
                     const isHovered = hoveredMarker === symbol.block_name;
                     const r = isHovered ? markerRadius * 1.5 : markerRadius;
                     return (
-                      <circle
-                        key={`${symbol.block_name}-${i}`}
-                        cx={x}
-                        cy={-y}
-                        r={r}
-                        fill={symbol.color}
-                        stroke="white"
-                        strokeWidth={strokeWidth}
-                        opacity={0.75}
-                        className="viewer-marker"
-                        onMouseEnter={() =>
-                          setHoveredMarker(symbol.block_name)
-                        }
-                        onMouseLeave={() => setHoveredMarker(null)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelectSymbol(symbol.block_name);
-                        }}
-                      >
-                        <title>
-                          {symbol.label} ({symbol.count})
-                        </title>
-                      </circle>
+                      <g key={`${symbol.block_name}-${i}`}>
+                        <circle
+                          cx={x}
+                          cy={-y}
+                          r={r + strokeWidth}
+                          fill="rgba(0,0,0,0.4)"
+                        />
+                        <circle
+                          cx={x}
+                          cy={-y}
+                          r={r}
+                          fill={symbol.color}
+                          stroke="white"
+                          strokeWidth={strokeWidth}
+                          className="viewer-marker"
+                          onMouseEnter={() =>
+                            setHoveredMarker(symbol.block_name)
+                          }
+                          onMouseLeave={() => setHoveredMarker(null)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectSymbol(symbol.block_name);
+                          }}
+                        >
+                          <title>
+                            {symbol.label} ({symbol.count})
+                          </title>
+                        </circle>
+                      </g>
                     );
                   })
                 )
