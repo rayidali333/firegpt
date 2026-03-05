@@ -2,15 +2,16 @@
 Drawing Preview Generator — Converts DXF geometry to interactive SVG.
 
 Reads DXF entities (LINE, LWPOLYLINE, POLYLINE, CIRCLE, ARC, INSERT, TEXT,
-MTEXT, etc.) and converts them to SVG elements. INSERT entities are
-recursively expanded using ezdxf's virtual_entities() so block content
-is rendered.
+MTEXT, etc.) and converts them to SVG elements. INSERT entities are expanded
+using ezdxf's virtual_entities() with a manual block definition fallback for
+DWG→DXF converted files where virtual_entities() commonly fails.
 
 Key features:
 - Entity colors from DXF (ACI color index → hex, with BYLAYER resolution)
 - TEXT/MTEXT rendering as SVG text elements
-- Modelspace-first rendering (avoids paper space viewport frame clutter)
-- INSERT recursive expansion (blocks within blocks)
+- Modelspace-only rendering (avoids paper space coordinate system conflicts)
+- INSERT expansion: virtual_entities() first, manual block definition fallback
+- SVG group transforms for manual block expansion (translate + scale + rotate)
 - Element cap at 80K to prevent browser crashes
 """
 
@@ -28,7 +29,6 @@ logger = logging.getLogger(__name__)
 MAX_SVG_ELEMENTS = 80000
 
 # AutoCAD Color Index (ACI) standard colors → hex
-# Full 256-color palette: indices 1-9 are the most common
 ACI_COLORS = {
     1: "#FF0000",   # Red
     2: "#FFFF00",   # Yellow
@@ -52,12 +52,17 @@ ACI_COLORS = {
     254: "#C0C0C0", 255: "#FFFFFF",
 }
 
+# Entity types we can render as SVG
+RENDERABLE_TYPES = {
+    "LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC",
+    "ELLIPSE", "SPLINE", "TEXT", "MTEXT", "POINT", "INSERT",
+}
+
 
 def _aci_to_hex(aci: int) -> str:
     """Convert AutoCAD Color Index to hex color."""
     if aci in ACI_COLORS:
         return ACI_COLORS[aci]
-    # Try ezdxf's built-in color table
     try:
         from ezdxf.colors import DXF_DEFAULT_COLORS
         if 0 < aci < len(DXF_DEFAULT_COLORS):
@@ -79,7 +84,7 @@ def _resolve_color(entity, doc) -> str:
             except Exception:
                 color = 7
         elif color == 0:  # BYBLOCK
-            color = 7  # Default — can't resolve without block context
+            color = 7
         return _aci_to_hex(color)
     except Exception:
         return "#555555"
@@ -103,9 +108,8 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     all_y: list[float] = []
     counter = [0]
 
-    # Strategy: render modelspace first (actual drawing content).
-    # Paper space contains viewport frames, title blocks — not the floor plan.
-    # Fall back to all layouts if modelspace is empty.
+    # Render modelspace ONLY. Paper space uses a different coordinate system
+    # (paper units vs real-world units) which would stretch the viewbox.
     try:
         msp = doc.modelspace()
         for entity in msp:
@@ -115,23 +119,38 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     except Exception:
         pass
 
-    # If modelspace produced very few elements, also scan paper space.
-    # DWG→DXF conversion often puts content in paper space, or modelspace
-    # may only contain unexpandable INSERT references.
-    if len(svg_elements) < 50:
+    # If modelspace produced very few elements, try paper space as fallback.
+    # Some DWG→DXF conversions put content in paper space.
+    if len(svg_elements) < 20:
         for layout in doc.layouts:
             if layout.name == "Model":
-                continue  # Already scanned
+                continue
             for entity in layout:
                 if counter[0] >= MAX_SVG_ELEMENTS:
                     break
                 _process_entity(entity, svg_elements, all_x, all_y, counter, doc=doc)
 
-    # Include symbol locations in bounds
-    for s in symbols:
-        for x, y in s.locations:
-            all_x.append(x)
-            all_y.append(-y)
+    # DO NOT include symbol overlay positions in SVG bounds.
+    # The overlay SVG shares the same viewBox as the floor plan SVG.
+    # Adding symbol positions from the parser (which may include paper space
+    # coordinates from a different scale) would stretch the viewbox and make
+    # the actual floor plan geometry appear as a tiny smudge.
+    # The INSERT fallback positions from our own processing are already in
+    # all_x/all_y and are sufficient for correct bounds.
+
+    if not all_x or not all_y:
+        # No geometry at all — fall back to symbol positions for bounds
+        for s in symbols:
+            for x, y in s.locations:
+                all_x.append(x)
+                all_y.append(-y)
+
+    if not all_x or not all_y:
+        return _empty_preview()
+
+    # Filter outlier coordinates (>3 IQR from median) to prevent
+    # stray points from stretching the viewbox
+    all_x, all_y = _filter_outliers(all_x, all_y)
 
     if not all_x or not all_y:
         return _empty_preview()
@@ -177,6 +196,49 @@ def _empty_preview() -> dict:
     }
 
 
+def _filter_outliers(xs: list[float], ys: list[float]) -> tuple[list[float], list[float]]:
+    """Remove extreme outlier coordinates that would stretch the viewbox.
+
+    Uses IQR-based filtering: points beyond Q1 - 3*IQR or Q3 + 3*IQR
+    are considered outliers. This is robust against skewed distributions
+    and handles the common case of a few paper-space coordinates mixed
+    with model-space data.
+    """
+    if len(xs) < 4:
+        return xs, ys
+
+    def iqr_bounds(vals):
+        s = sorted(vals)
+        n = len(s)
+        q1 = s[n // 4]
+        q3 = s[3 * n // 4]
+        iqr = q3 - q1
+        if iqr <= 0:
+            return min(vals), max(vals)
+        margin = iqr * 3.0
+        return q1 - margin, q3 + margin
+
+    x_lo, x_hi = iqr_bounds(xs)
+    y_lo, y_hi = iqr_bounds(ys)
+
+    filtered_x = []
+    filtered_y = []
+    for x, y in zip(xs, ys):
+        if x_lo <= x <= x_hi and y_lo <= y <= y_hi:
+            filtered_x.append(x)
+            filtered_y.append(y)
+
+    return filtered_x or xs, filtered_y or ys
+
+
+def _block_has_renderable_content(block) -> bool:
+    """Check if a block definition contains any entities we can render."""
+    for entity in block:
+        if entity.dxftype() in RENDERABLE_TYPES:
+            return True
+    return False
+
+
 def _process_entity(
     entity, elements: list, xs: list, ys: list,
     counter: list, depth: int = 0, doc=None,
@@ -188,26 +250,7 @@ def _process_entity(
     etype = entity.dxftype()
 
     if etype == "INSERT":
-        expanded = False
-        try:
-            for ve in entity.virtual_entities():
-                if counter[0] >= MAX_SVG_ELEMENTS:
-                    break
-                _process_entity(ve, elements, xs, ys, counter, depth + 1, doc)
-                expanded = True
-        except Exception:
-            pass
-        # Fallback: if virtual_entities produced nothing (common after DWG→DXF
-        # conversion), at least track the insertion point for bounds calculation
-        # and render a small marker so the block location is visible
-        if not expanded:
-            try:
-                ix = entity.dxf.insert.x
-                iy = -entity.dxf.insert.y
-                xs.append(ix)
-                ys.append(iy)
-            except Exception:
-                pass
+        _handle_insert(entity, elements, xs, ys, counter, depth, doc)
         return
 
     # Resolve entity color
@@ -238,6 +281,152 @@ def _process_entity(
             ys.append(-y)
         except Exception:
             pass
+
+
+def _handle_insert(entity, elements: list, xs: list, ys: list,
+                   counter: list, depth: int, doc):
+    """Expand an INSERT entity into SVG elements.
+
+    Strategy:
+    1. Try ezdxf's virtual_entities() (handles all transforms automatically)
+    2. If that fails, manually expand by reading the block definition and
+       wrapping it in an SVG <g> with the INSERT's transform
+    """
+    expanded = False
+
+    # Strategy 1: virtual_entities() — the official ezdxf way
+    try:
+        for ve in entity.virtual_entities():
+            if counter[0] >= MAX_SVG_ELEMENTS:
+                break
+            try:
+                _process_entity(ve, elements, xs, ys, counter, depth + 1, doc)
+                expanded = True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if expanded:
+        return
+
+    # Strategy 2: Manual block definition expansion with SVG transform.
+    # After DWG→DXF conversion, virtual_entities() often fails because block
+    # definitions are incomplete or contain unsupported entity types. But the
+    # basic geometry (lines, polylines, circles) is usually preserved.
+    if doc is not None:
+        try:
+            block_name = entity.dxf.name
+            block = doc.blocks.get(block_name)
+            if block is not None and _block_has_renderable_content(block):
+                expanded = _manual_expand_block(
+                    entity, block, elements, xs, ys, counter, depth, doc
+                )
+        except Exception:
+            pass
+
+    # Last resort: record insertion point for bounds calculation
+    if not expanded:
+        try:
+            ix = entity.dxf.insert.x
+            iy = -entity.dxf.insert.y
+            xs.append(ix)
+            ys.append(iy)
+        except Exception:
+            pass
+
+
+def _manual_expand_block(entity, block, elements: list, xs: list, ys: list,
+                         counter: list, depth: int, doc) -> bool:
+    """Manually expand a block definition into SVG elements using SVG transforms.
+
+    The key insight: sub-entities are processed normally (with Y-flip in each handler),
+    then wrapped in an SVG <g> with the INSERT's translate/rotate/scale. The math works
+    because:
+    - Sub-entity at block-local (bx, by) renders as SVG (bx, -by)
+    - SVG transform="translate(ix,-iy) rotate(-rot) scale(sx,sy)" applies:
+      1. scale: (bx*sx, -by*sy)
+      2. rotate(-rot): correct rotation in screen coords
+      3. translate(ix,-iy): move to insertion point
+    - Final position matches DXF coordinate math exactly.
+    """
+    # Get INSERT transform parameters
+    ix = entity.dxf.insert.x
+    iy = entity.dxf.insert.y
+    sx = entity.dxf.get('xscale', 1.0)
+    sy = entity.dxf.get('yscale', 1.0)
+    rot = entity.dxf.get('rotation', 0.0)
+
+    # Build SVG transform string
+    transform_parts = [f"translate({ix:.2f},{-iy:.2f})"]
+    if abs(rot) > 0.01:
+        transform_parts.append(f"rotate({-rot:.2f})")
+    if abs(sx - 1.0) > 0.001 or abs(sy - 1.0) > 0.001:
+        transform_parts.append(f"scale({sx:.4f},{sy:.4f})")
+
+    transform = " ".join(transform_parts)
+
+    # Render sub-entities into a temporary list
+    sub_elements: list[str] = []
+    sub_xs: list[float] = []
+    sub_ys: list[float] = []
+
+    for sub_entity in block:
+        if counter[0] >= MAX_SVG_ELEMENTS:
+            break
+        try:
+            _process_entity(sub_entity, sub_elements, sub_xs, sub_ys,
+                            counter, depth + 1, doc)
+        except Exception:
+            continue
+
+    if not sub_elements:
+        return False
+
+    # Wrap in SVG group with transform
+    elements.append(f'<g transform="{transform}">')
+    elements.extend(sub_elements)
+    elements.append('</g>')
+
+    # Transform bounds: apply INSERT transform to sub-entity bounding box
+    if sub_xs and sub_ys:
+        _transform_bounds(ix, iy, sx, sy, rot, sub_xs, sub_ys, xs, ys)
+
+    return True
+
+
+def _transform_bounds(ix: float, iy: float, sx: float, sy: float, rot: float,
+                      sub_xs: list[float], sub_ys: list[float],
+                      xs: list[float], ys: list[float]):
+    """Transform sub-entity bounds through the INSERT transform and add to parent bounds.
+
+    sub_xs/sub_ys are in SVG coordinates (Y already flipped).
+    We need to apply the SVG transform to get final screen coordinates.
+    """
+    cos_r = math.cos(math.radians(-rot)) if abs(rot) > 0.01 else 1.0
+    sin_r = math.sin(math.radians(-rot)) if abs(rot) > 0.01 else 0.0
+
+    # Transform the four corners of the bounding box
+    bx_min, bx_max = min(sub_xs), max(sub_xs)
+    by_min, by_max = min(sub_ys), max(sub_ys)
+
+    corners = [
+        (bx_min, by_min), (bx_max, by_min),
+        (bx_min, by_max), (bx_max, by_max),
+    ]
+
+    for bx, by in corners:
+        # Apply scale
+        px = bx * sx
+        py = by * sy
+        # Apply rotation
+        rx = px * cos_r - py * sin_r
+        ry = px * sin_r + py * cos_r
+        # Apply translation
+        fx = rx + ix
+        fy = ry + (-iy)
+        xs.append(fx)
+        ys.append(fy)
 
 
 def _handle_line(entity, elements: list, xs: list, ys: list, counter: list, color: str):
