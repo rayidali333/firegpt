@@ -1,13 +1,13 @@
 """
-Chat module — LLM-powered Q&A about parsed drawing data.
+Chat module — LLM-powered Q&A and AI-first block classification.
 
 The parsed symbol data is tiny (~2-5KB JSON), so we inject it directly
 into the system prompt. No RAG or vector DB needed.
 
-Supports full conversation history for multi-turn chat sessions.
-
-Also provides AI-powered block identification for symbols that can't be
-recognized by dictionary matching alone.
+AI Classification: Instead of relying on hardcoded dictionaries and regex,
+we send ALL ambiguous blocks to Claude with full drawing context — block names,
+layers, attributes, legend text, geometry info — and let it classify them.
+This works robustly across any naming convention, language, or CAD standard.
 """
 
 import json
@@ -35,29 +35,43 @@ def _get_client() -> AsyncAnthropic:
     return client
 
 
-async def identify_blocks_with_ai(
-    unrecognized_blocks: list,
+async def classify_blocks_with_ai(
+    ai_candidate_blocks: list,
     filename: str,
-    all_layer_names: list[str] | None = None,
+    all_block_names: list[str],
+    all_layer_names: list[str],
+    fire_layers: list[str],
+    legend_texts: list[str],
+    fast_path_labels: dict[str, str],
 ) -> dict[str, str]:
-    """Use Claude to identify unrecognized CAD blocks from their metadata.
+    """Use Claude to classify blocks that dictionary matching couldn't identify.
 
-    Sends block metadata (name, layer, entity types, attributes, text content)
-    to Claude and asks it to identify fire alarm devices.
+    This is the PRIMARY classification method for non-obvious blocks. It receives
+    full drawing context so Claude can understand the naming convention used in
+    this specific drawing and make informed decisions.
 
-    Returns a dict of block_name → identified_label for blocks Claude could identify.
-    Returns empty dict if API key is missing or on any error (graceful degradation).
+    Args:
+        ai_candidate_blocks: Blocks with full metadata that need classification
+        filename: Original drawing filename
+        all_block_names: Every block name in the drawing (for naming pattern context)
+        all_layer_names: Every layer name (for understanding drawing organization)
+        fire_layers: Layers identified as fire-alarm related
+        legend_texts: Text from drawing legends/schedules
+        fast_path_labels: Blocks already identified by dictionary (for context)
+
+    Returns:
+        dict mapping block_name -> label for blocks identified as fire alarm devices.
+        Blocks identified as non-fire-alarm return empty dict entry (excluded).
     """
-    if not unrecognized_blocks:
+    if not ai_candidate_blocks:
         return {}
 
-    # Check if API key is available — skip AI if not configured
     if not os.getenv("ANTHROPIC_API_KEY"):
         return {}
 
-    # Build a structured summary for each unrecognized block
+    # Build structured metadata for each candidate block
     blocks_data = []
-    for block in unrecognized_blocks:
+    for block in ai_candidate_blocks:
         entry = {
             "block_name": block.block_name,
             "count": block.count,
@@ -66,7 +80,9 @@ async def identify_blocks_with_ai(
         if block.entity_types:
             entry["geometry_inside"] = block.entity_types
         if block.attribs:
-            entry["attributes"] = block.attribs
+            entry["insert_attributes"] = block.attribs
+        if block.attdef_tags:
+            entry["definition_attributes"] = block.attdef_tags
         if block.texts_inside:
             entry["text_labels_inside"] = block.texts_inside
         if block.description:
@@ -75,59 +91,82 @@ async def identify_blocks_with_ai(
 
     blocks_json = json.dumps(blocks_data, indent=2)
 
-    layer_context = ""
+    # Build rich drawing context
+    context_parts = []
+
+    context_parts.append(f'Drawing file: "{filename}"')
+
+    if fast_path_labels:
+        context_parts.append(
+            f"\nALREADY IDENTIFIED (by standard abbreviations):\n"
+            + "\n".join(f'  - "{name}" = {label}' for name, label in fast_path_labels.items())
+        )
+
     if all_layer_names:
-        layer_context = f"\nAll layers in drawing: {', '.join(all_layer_names)}\n"
+        context_parts.append(f"\nALL LAYERS ({len(all_layer_names)}):\n{', '.join(all_layer_names)}")
 
-    prompt = f"""You are a fire alarm and building systems expert analyzing a CAD drawing.
+    if fire_layers:
+        context_parts.append(f"\nFIRE-RELATED LAYERS: {', '.join(fire_layers)}")
 
-The drawing file is: "{filename}"
-{layer_context}
-The following blocks could NOT be identified by their names alone. For each block,
-I'm providing all available metadata: the block name, how many times it appears,
-which layers it's on, what geometry/entities are inside its definition, any text
-labels drawn inside it, and any attribute data attached to it.
+    if all_block_names:
+        context_parts.append(f"\nALL BLOCK NAMES ({len(all_block_names)}):\n{', '.join(all_block_names)}")
 
-UNRECOGNIZED BLOCKS:
+    if legend_texts:
+        context_parts.append(
+            f"\nLEGEND/SCHEDULE TEXT FROM DRAWING ({len(legend_texts)} items):\n"
+            + "\n".join(f'  "{t}"' for t in legend_texts[:30])
+        )
+
+    drawing_context = "\n".join(context_parts)
+
+    prompt = f"""You are a fire alarm systems expert analyzing a CAD construction drawing.
+
+Your job: classify each unidentified block as either a fire alarm / building safety device,
+or as NOT a fire alarm device (furniture, plumbing, structural, annotation, etc.).
+
+DRAWING CONTEXT:
+{drawing_context}
+
+BLOCKS TO CLASSIFY:
 {blocks_json}
 
-For each block, determine if it is a fire alarm or building safety device.
-Consider:
-- Layer names (e.g., "INCENDIO", "FIRE", "ALARM" indicate fire alarm content)
-- Text labels inside the block (e.g., "SD" = Smoke Detector, "HS" = Horn/Strobe)
-- Attribute values (may describe the device type)
-- Block name patterns (e.g., "*U" prefix = AutoCAD anonymous dynamic block)
-- Geometry patterns (circle = detector, triangle = alarm device)
-- The block description field
+CLASSIFICATION GUIDELINES:
+1. Use the drawing's naming convention — look at already-identified blocks and layer names
+   to understand patterns (e.g., if "FA-SD" = Smoke Detector, then "FA-HS" is likely Horn/Strobe)
+2. Layer names are strong signals: blocks on "FIRE ALARM" or "FA-" layers are likely fire devices
+3. Legend/schedule text maps symbol names to descriptions — use this as ground truth
+4. Text labels inside blocks (like "SD", "HD") are definitive identifiers
+5. Block attributes (TYPE, DEVICE, NAME) often contain the device identity
+6. Block description fields are reliable when present
+7. Geometry alone is NOT sufficient — many non-fire blocks also use circles/lines
+8. When in doubt, classify as null (not a fire device). False negatives are better than false positives.
 
-Respond with ONLY a JSON object mapping block names to their identified labels.
-Use standard fire alarm terminology in English:
-- Detection: "Smoke Detector", "Heat Detector", "Duct Detector", "Beam Detector", "Aspirating Smoke Detector"
+STANDARD FIRE ALARM LABELS (use these exact strings):
+- Detection: "Smoke Detector", "Heat Detector", "Duct Detector", "Beam Detector",
+  "Aspirating Smoke Detector", "Multi-Sensor Detector", "Fire Detector"
 - Manual: "Pull Station", "Manual Call Point", "Break Glass"
 - Notification: "Horn/Strobe", "Horn", "Strobe", "Speaker", "Alarm Siren"
-- Control: "Fire Alarm Control Panel", "Annunciator", "Monitor Module", "Control Module"
-- Suppression: "Sprinkler", "Fire Extinguisher"
-- Other: "Emergency Light", "Exit Sign", "Fire Hydrant", "Fire Hose", "Fire Cabinet"
+- Control: "Fire Alarm Control Panel", "Annunciator", "Monitor Module",
+  "Control Module", "Relay Module", "Monitor/Control Module"
+- Suppression: "Sprinkler", "Fire Extinguisher", "Fire Cabinet"
+- Infrastructure: "Junction Box", "Terminal Box", "End of Line"
+- Safety: "Emergency Light", "Exit Sign", "Emergency Exit Sign",
+  "Fire Door Holder", "Fire Hydrant", "Fire Hose", "Fire Pump"
 
-IMPORTANT distinctions:
-- "SPK" in fire alarm drawings = Speaker (voice evacuation), NOT Sprinkler
-- "LOUDSPEAKER" / "SPEAKER" = Speaker (voice evacuation / public address)
-- "ALARM SIREN" = Alarm Siren (audible notification device), NOT Strobe
-- "Strobe" = visual-only notification device (flashing light)
-- Blocks containing "SHEET FRAME", "TITLE BLOCK", "PLOT FRAME" are title blocks, NOT devices
+IMPORTANT:
+- "SPK" in fire alarm context = Speaker (voice evacuation), NOT Sprinkler
+- Title blocks, sheet frames, borders = null
+- Furniture, doors, windows, plumbing = null
+- If a block appears hundreds of times and is NOT on a fire layer, it's likely NOT fire alarm
 
-If a block is clearly NOT a fire alarm device (e.g., furniture, doors, windows,
-structural elements, title block components, sheet frames), set its value to null.
-If you cannot determine what a block is, set its value to null.
-
-RESPOND WITH ONLY THE JSON OBJECT, no explanation:
-{{"block_name_1": "Identified Label", "block_name_2": null, ...}}"""
+Respond with ONLY a JSON object. Fire devices get their label, everything else gets null:
+{{"block_name_1": "Smoke Detector", "block_name_2": null, ...}}"""
 
     try:
         api_client = _get_client()
         response = await api_client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1024,
+            max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
 
@@ -135,7 +174,6 @@ RESPOND WITH ONLY THE JSON OBJECT, no explanation:
 
         # Extract JSON from response (handle markdown code blocks)
         if response_text.startswith("```"):
-            # Strip ```json ... ``` wrapper
             lines = response_text.split("\n")
             json_lines = []
             in_block = False
@@ -151,7 +189,7 @@ RESPOND WITH ONLY THE JSON OBJECT, no explanation:
 
         result = json.loads(response_text)
 
-        # Filter out null values and return only identified blocks
+        # Filter out null values — only return positively identified blocks
         identified = {}
         for block_name, label in result.items():
             if label and isinstance(label, str) and len(label.strip()) > 1:
@@ -160,10 +198,10 @@ RESPOND WITH ONLY THE JSON OBJECT, no explanation:
         return identified
 
     except json.JSONDecodeError:
-        logger.warning("AI block identification returned invalid JSON")
+        logger.warning("AI block classification returned invalid JSON")
         return {}
     except Exception as e:
-        logger.warning(f"AI block identification failed: {e}")
+        logger.warning(f"AI block classification failed: {e}")
         return {}
 
 
@@ -176,7 +214,6 @@ def _build_system_prompt(drawing: ParseResponse) -> str:
             "label": s.label,
             "count": s.count,
         }
-        # Include up to 5 sample locations for spatial context
         if s.locations:
             entry["sample_locations"] = s.locations[:5]
         symbol_data.append(entry)
@@ -268,7 +305,6 @@ async def chat_with_drawing(
     """Send a message to the LLM with drawing context and return the response."""
     api_client = _get_client()
 
-    # Build message list with conversation history
     messages = []
     if history:
         for h in history:

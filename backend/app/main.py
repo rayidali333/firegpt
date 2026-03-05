@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 
 from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
 from app.preview import generate_drawing_preview
-from app.chat import chat_with_drawing, identify_blocks_with_ai
+from app.chat import chat_with_drawing, classify_blocks_with_ai
 from app.models import (
     AnalysisStep, ChatRequest, ChatResponse, ParseResponse, PreviewResponse,
     SymbolInfo,
@@ -78,33 +78,33 @@ async def upload_drawing(file: UploadFile):
     except Exception as e:
         raise HTTPException(500, f"Failed to parse drawing: {str(e)}")
 
-    # Tier 4: AI-powered identification for blocks that tiers 1-3 couldn't recognize.
-    # These blocks are NOT in parse_result.symbols yet — they only get added
-    # if AI positively identifies them as fire alarm devices.
-    if parse_result.unrecognized_blocks:
+    # AI-first classification: send all ambiguous blocks to Claude with full
+    # drawing context (layers, legend text, all block names, already-identified symbols).
+    if parse_result.ai_candidate_blocks:
         try:
-            # Collect layer names for context
-            layer_names = list({
-                layer
-                for block in parse_result.unrecognized_blocks
-                for layer in block.layers
-            })
+            # Build context of what fast-path already identified
+            fast_path_labels = {
+                s.block_name: s.label for s in parse_result.fast_path_symbols
+            }
 
-            ai_labels = await identify_blocks_with_ai(
-                parse_result.unrecognized_blocks,
-                file.filename,
-                all_layer_names=layer_names,
+            ai_labels = await classify_blocks_with_ai(
+                ai_candidate_blocks=parse_result.ai_candidate_blocks,
+                filename=file.filename,
+                all_block_names=parse_result.all_block_names,
+                all_layer_names=parse_result.all_layer_names,
+                fire_layers=parse_result.fire_layers,
+                legend_texts=parse_result.legend_texts,
+                fast_path_labels=fast_path_labels,
             )
 
             if ai_labels:
                 parse_result.analysis.append({
                     "type": "success",
-                    "message": f"AI identified {len(ai_labels)} additional blocks: "
+                    "message": f"AI classified {len(ai_labels)} fire alarm devices: "
                     + ", ".join(f'"{k}" → {v}' for k, v in list(ai_labels.items())[:8]),
                 })
 
-                # Add AI-identified blocks as new symbols
-                for block in parse_result.unrecognized_blocks:
+                for block in parse_result.ai_candidate_blocks:
                     if block.block_name in ai_labels:
                         label = ai_labels[block.block_name]
                         parse_result.symbols.append(
@@ -117,16 +117,15 @@ async def upload_drawing(file: UploadFile):
                             )
                         )
             else:
-                n = len(parse_result.unrecognized_blocks)
+                n = len(parse_result.ai_candidate_blocks)
                 parse_result.analysis.append({
                     "type": "info",
-                    "message": f"{n} blocks remain unrecognized after AI analysis "
-                    "(likely non-fire-alarm blocks)",
+                    "message": f"AI analyzed {n} blocks — none identified as fire alarm devices",
                 })
         except Exception:
             parse_result.analysis.append({
                 "type": "warning",
-                "message": "AI identification unavailable (no API key or service error)",
+                "message": "AI classification unavailable (no API key or service error)",
             })
 
     # Convert analysis dicts to AnalysisStep models
