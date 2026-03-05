@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { DrawingData, DrawingPreview, ChatMessage } from "./types";
-import { uploadDrawing, getDrawingPreview, chatWithDrawing } from "./api";
+import { uploadDrawing, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
@@ -106,6 +106,43 @@ function App() {
     []
   );
 
+  const handleOverride = useCallback(
+    async (blockName: string, label: string, count: number) => {
+      if (!drawing) return;
+      try {
+        await overrideSymbol(drawing.drawing_id, blockName, label, count);
+        setDrawing((prev) => {
+          if (!prev) return prev;
+          const updated = {
+            ...prev,
+            symbols: prev.symbols.map((s) =>
+              s.block_name === blockName
+                ? {
+                    ...s,
+                    label,
+                    count,
+                    confidence: "manual" as const,
+                    source: "manual" as const,
+                    original_count: s.original_count ?? s.count,
+                  }
+                : s
+            ),
+          };
+          updated.total_symbols = updated.symbols.reduce((sum, s) => sum + s.count, 0);
+          return updated;
+        });
+      } catch (e: any) {
+        console.error("Override failed:", e);
+      }
+    },
+    [drawing]
+  );
+
+  const handleExport = useCallback(() => {
+    if (!drawing) return;
+    window.open(getExportUrl(drawing.drawing_id), "_blank");
+  }, [drawing]);
+
   return (
     <div className="desktop">
       <div className="window">
@@ -165,6 +202,9 @@ function App() {
                       total={drawing.total_symbols}
                       selectedSymbol={selectedSymbol}
                       onSelectSymbol={handleSelectSymbol}
+                      onOverride={handleOverride}
+                      onExport={handleExport}
+                      xrefWarnings={drawing.xref_warnings}
                     />
                   ) : activeTab === "drawing" ? (
                     <DrawingViewer

@@ -22,7 +22,7 @@ from pathlib import Path
 import ezdxf
 from fastapi import HTTPException
 
-from app.models import SymbolInfo
+from app.models import AuditEntry, SymbolInfo
 
 # ────────────────────────────────────────────────────────
 # Fast-path dictionary: only high-confidence exact matches
@@ -261,6 +261,14 @@ FIRE_LAYER_KEYWORDS = [
 
 
 @dataclass
+class MatchResult:
+    """Result from dictionary matching with full audit metadata."""
+    label: str
+    method: str  # "exact_match", "substring_match", "intl_exact", "intl_substring"
+    matched_term: str  # The dictionary key that triggered the match
+
+
+@dataclass
 class BlockInfo:
     """All metadata about a block found in the drawing."""
     block_name: str
@@ -289,6 +297,8 @@ class ParseResult:
     all_layer_names: list[str] = field(default_factory=list)
     fire_layers: list[str] = field(default_factory=list)
     legend_texts: list[str] = field(default_factory=list)
+    audit: list[AuditEntry] = field(default_factory=list)
+    xref_warnings: list[str] = field(default_factory=list)
 
     def log(self, type: str, message: str):
         self.analysis.append({"type": type, "message": message})
@@ -302,10 +312,10 @@ def _should_skip_block(block_name: str) -> bool:
     return False
 
 
-def _fast_path_label(block_name: str) -> str | None:
+def _fast_path_label(block_name: str) -> MatchResult | None:
     """Try to match a block name to a known fire alarm symbol using dictionaries.
 
-    Returns the label if confidently matched, None if uncertain.
+    Returns a MatchResult with label + audit metadata, or None if uncertain.
     This is the fast path — only high-confidence matches.
     """
     name_upper = block_name.upper().strip()
@@ -315,11 +325,11 @@ def _fast_path_label(block_name: str) -> str | None:
 
     # 1. Exact match — English abbreviations
     if name_upper in KNOWN_SYMBOLS:
-        return KNOWN_SYMBOLS[name_upper]
+        return MatchResult(KNOWN_SYMBOLS[name_upper], "exact_match", name_upper)
 
     # 2. Exact match — International terms
     if name_normalized in KNOWN_SYMBOLS_INTL:
-        return KNOWN_SYMBOLS_INTL[name_normalized]
+        return MatchResult(KNOWN_SYMBOLS_INTL[name_normalized], "intl_exact", name_normalized)
 
     # 3. Substring match — English (longer/more specific first)
     # Match against normalized name so "MONITOR_MODULE" matches "MONITOR MODULE"
@@ -328,15 +338,15 @@ def _fast_path_label(block_name: str) -> str | None:
             # Short abbreviations need word boundary guards to avoid false positives
             pattern = r'(?<![A-Z0-9])' + re.escape(abbrev) + r'(?![A-Z0-9])'
             if re.search(pattern, name_normalized):
-                return label
+                return MatchResult(label, "substring_match", abbrev)
         else:
             if abbrev in name_normalized:
-                return label
+                return MatchResult(label, "substring_match", abbrev)
 
     # 4. Substring match — International terms
     for term, label in sorted(KNOWN_SYMBOLS_INTL.items(), key=lambda x: -len(x[0])):
         if term in name_normalized:
-            return label
+            return MatchResult(label, "intl_substring", term)
 
     return None
 
@@ -521,6 +531,7 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         layout_entity_count = 0
         layout_insert_count = 0
         layout_types: dict[str, int] = defaultdict(int)
+        is_model_space = layout.name == "Model"
 
         for entity in layout:
             total_entities += 1
@@ -535,6 +546,13 @@ def parse_dxf_file(filepath: str) -> ParseResult:
 
                 if _should_skip_block(block_name):
                     skipped_blocks[block_name] += 1
+                    continue
+
+                # Only count and collect data from model space.
+                # Paper space contains legends, title blocks, and viewports —
+                # not real device placements. Counting paper space inserts
+                # would inflate device counts (e.g., legend sample symbols).
+                if not is_model_space:
                     continue
 
                 block_counts[block_name] += 1
@@ -632,26 +650,60 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     if changed:
         result.log("info", f"Nesting resolved: {', '.join(changed[:8])}")
 
-    # Step 8: Classify blocks — fast path vs AI candidates
+    # Step 8: Detect XREFs (external references)
+    try:
+        for block in doc.blocks:
+            if hasattr(block, 'is_xref') and block.is_xref:
+                result.xref_warnings.append(
+                    f"External reference (XREF) detected: \"{block.name}\" — "
+                    "devices in XREFs are not counted. Resolve XREFs in AutoCAD "
+                    "and re-export for complete counts."
+                )
+            elif hasattr(block, 'block') and hasattr(block.block, 'dxf'):
+                flags = block.block.dxf.get('flags', 0)
+                if flags & 4:  # Bit 2 = XREF
+                    result.xref_warnings.append(
+                        f"External reference (XREF) detected: \"{block.name}\" — "
+                        "devices in XREFs are not counted."
+                    )
+    except Exception:
+        pass
+
+    if result.xref_warnings:
+        result.log("warning", f"{len(result.xref_warnings)} external references (XREFs) detected — devices in referenced files are not counted")
+
+    # Step 9: Classify blocks — fast path vs AI candidates
     result.all_block_names = sorted(block_counts.keys())
     fast_path_count = 0
     ai_candidate_count = 0
 
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
-        label = _fast_path_label(block_name)
+        match = _fast_path_label(block_name)
 
-        if label is not None:
+        if match is not None:
             # Fast path: dictionary matched with high confidence
             fast_path_count += 1
+            layers = sorted(block_layers.get(block_name, set()))
             symbol = SymbolInfo(
                 block_name=block_name,
-                label=label,
+                label=match.label,
                 count=count,
                 locations=block_locations.get(block_name, []),
-                color=_get_symbol_color(label),
+                color=_get_symbol_color(match.label),
+                confidence="high",
+                source="dictionary",
             )
             result.fast_path_symbols.append(symbol)
             result.symbols.append(symbol)
+            result.audit.append(AuditEntry(
+                block_name=block_name,
+                label=match.label,
+                count=count,
+                method=match.method,
+                confidence="high",
+                matched_term=match.matched_term,
+                layers=layers,
+            ))
         else:
             # Collect full metadata for AI classification
             ai_candidate_count += 1
@@ -687,6 +739,21 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     return result
 
 
+def _merge_dxf_result(result: ParseResult, dxf_result: ParseResult, dxf_path: str):
+    """Copy all parse data from a DXF parse into the DWG result."""
+    result.analysis.extend(dxf_result.analysis)
+    result.symbols = dxf_result.symbols
+    result.fast_path_symbols = dxf_result.fast_path_symbols
+    result.ai_candidate_blocks = dxf_result.ai_candidate_blocks
+    result.all_block_names = dxf_result.all_block_names
+    result.all_layer_names = dxf_result.all_layer_names
+    result.fire_layers = dxf_result.fire_layers
+    result.legend_texts = dxf_result.legend_texts
+    result.audit = dxf_result.audit
+    result.xref_warnings = dxf_result.xref_warnings
+    result.dxf_path = dxf_path
+
+
 def parse_dwg_file(filepath: str) -> ParseResult:
     """Parse a DWG file by converting to DXF first, then parsing."""
     result = ParseResult()
@@ -699,46 +766,13 @@ def parse_dwg_file(filepath: str) -> ParseResult:
         "For best results, export DXF directly from AutoCAD or BricsCAD."
     )
 
-    # Strategy 1: LibreDWG dwg2dxf
-    dwg2dxf_path = _find_dwg2dxf()
-    if dwg2dxf_path:
-        result.log("info", f"Using LibreDWG converter: {dwg2dxf_path}")
-        try:
-            dxf_path = _convert_with_libredwg(filepath, dwg2dxf_path, result)
-            dxf_result = parse_dxf_file(dxf_path)
-            result.analysis.extend(dxf_result.analysis)
-            result.symbols = dxf_result.symbols
-            result.fast_path_symbols = dxf_result.fast_path_symbols
-            result.ai_candidate_blocks = dxf_result.ai_candidate_blocks
-            result.all_block_names = dxf_result.all_block_names
-            result.all_layer_names = dxf_result.all_layer_names
-            result.fire_layers = dxf_result.fire_layers
-            result.legend_texts = dxf_result.legend_texts
-            result.dxf_path = dxf_path
-            return result
-        except HTTPException:
-            raise
-        except Exception as e:
-            result.log("error", f"LibreDWG conversion failed: {str(e)}")
-    else:
-        result.log("warning", "LibreDWG converter not found on system")
-
-    # Strategy 2: ODA File Converter
+    # Strategy 1: ODA File Converter (preferred — better fidelity for modern DWG)
     oda_path = _find_oda_converter()
     if oda_path:
         result.log("info", f"Using ODA File Converter: {oda_path}")
         try:
             dxf_path = _convert_with_oda(filepath, oda_path, result)
-            dxf_result = parse_dxf_file(dxf_path)
-            result.analysis.extend(dxf_result.analysis)
-            result.symbols = dxf_result.symbols
-            result.fast_path_symbols = dxf_result.fast_path_symbols
-            result.ai_candidate_blocks = dxf_result.ai_candidate_blocks
-            result.all_block_names = dxf_result.all_block_names
-            result.all_layer_names = dxf_result.all_layer_names
-            result.fire_layers = dxf_result.fire_layers
-            result.legend_texts = dxf_result.legend_texts
-            result.dxf_path = dxf_path
+            _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
             return result
         except HTTPException:
             raise
@@ -747,7 +781,22 @@ def parse_dwg_file(filepath: str) -> ParseResult:
     else:
         result.log("info", "ODA File Converter not available")
 
-    # Strategy 3: ezdxf recovery mode
+    # Strategy 2: LibreDWG dwg2dxf (fallback — open source, less reliable for 2018+)
+    dwg2dxf_path = _find_dwg2dxf()
+    if dwg2dxf_path:
+        result.log("info", f"Using LibreDWG converter: {dwg2dxf_path}")
+        try:
+            dxf_path = _convert_with_libredwg(filepath, dwg2dxf_path, result)
+            _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            result.log("error", f"LibreDWG conversion failed: {str(e)}")
+    else:
+        result.log("warning", "LibreDWG converter not found on system")
+
+    # Strategy 3: ezdxf recovery mode (last resort)
     result.log("info", "Attempting ezdxf recovery mode (last resort)...")
     try:
         doc, auditor = ezdxf.recover.readfile(filepath)
@@ -766,16 +815,7 @@ def parse_dwg_file(filepath: str) -> ParseResult:
     try:
         doc.saveas(dxf_path)
         result.log("success", f"Saved recovered DXF ({Path(dxf_path).stat().st_size / 1024:.0f} KB)")
-        dxf_result = parse_dxf_file(dxf_path)
-        result.analysis.extend(dxf_result.analysis)
-        result.symbols = dxf_result.symbols
-        result.fast_path_symbols = dxf_result.fast_path_symbols
-        result.ai_candidate_blocks = dxf_result.ai_candidate_blocks
-        result.all_block_names = dxf_result.all_block_names
-        result.all_layer_names = dxf_result.all_layer_names
-        result.fire_layers = dxf_result.fire_layers
-        result.legend_texts = dxf_result.legend_texts
-        result.dxf_path = dxf_path
+        _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
         return result
     except Exception as e:
         result.log("error", f"Could not save recovered file: {str(e)}")

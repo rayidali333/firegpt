@@ -57,3 +57,28 @@ export async function chatWithDrawing(
   const data = await res.json();
   return data.response;
 }
+
+export async function overrideSymbol(
+  drawingId: string,
+  blockName: string,
+  label: string,
+  count: number
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/api/drawings/${drawingId}/symbols/${encodeURIComponent(blockName)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label, count }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Override failed" }));
+    throw new Error(err.detail || "Override failed");
+  }
+}
+
+export function getExportUrl(drawingId: string): string {
+  return `${API_BASE}/api/drawings/${drawingId}/export`;
+}
