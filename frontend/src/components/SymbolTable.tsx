@@ -12,6 +12,19 @@ interface Props {
   xrefWarnings?: string[];
 }
 
+function shortBlockName(name: string): string {
+  // For combined names like "A + B + C" or "A (+4 variants)", show first block only
+  const first = name.split(" + ")[0].split(" (+")[0];
+  // Strip long DXF path noise: take the meaningful prefix before numeric IDs and layer paths
+  // e.g. "IT-DVC-DET-Detectors - SMOKE DETECTOR-3159778-FIRE ALARM..." → "IT-DVC-DET-Detectors"
+  const parts = first.split(" - ");
+  if (parts.length > 1) {
+    return parts[0].trim();
+  }
+  // Truncate if still long
+  return first.length > 40 ? first.slice(0, 37) + "..." : first;
+}
+
 const CONFIDENCE_BADGE: Record<string, { label: string; className: string; title: string }> = {
   high: { label: "Dict", className: "badge-high", title: "Matched via dictionary — high confidence" },
   medium: { label: "AI", className: "badge-medium", title: "Classified by AI — verify if critical" },
@@ -124,10 +137,10 @@ export default function SymbolTable({
                   ) : (
                     <span className="symbol-label">{s.label}</span>
                   )}
-                  <span className="symbol-block-name">
-                    {s.block_name}
+                  <span className="symbol-block-name" title={s.block_name}>
+                    {shortBlockName(s.block_name)}
                     {s.block_variants && s.block_variants.length > 1 && (
-                      <span className="variant-count" title={s.block_variants.join(", ")}>
+                      <span className="variant-count" title={s.block_variants.map(v => shortBlockName(v)).join("\n")}>
                         {" "}({s.block_variants.length} variants)
                       </span>
                     )}

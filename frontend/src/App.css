@@ -791,7 +791,7 @@
   color: var(--text-muted);
   border-radius: 3px;
   flex-shrink: 0;
-  opacity: 0;
+  opacity: 0.45;
   transition: opacity 0.15s;
 }
 
