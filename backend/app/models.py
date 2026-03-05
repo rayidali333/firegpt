@@ -60,6 +60,7 @@ class PreviewResponse(BaseModel):
     viewBox: str
     width: float
     height: float
+    symbol_positions: dict[str, list[list[float]]] = {}  # block_name → [[x, y], ...] in SVG space
 
 
 class SymbolOverride(BaseModel):
