@@ -1035,6 +1035,33 @@
   font-size: var(--font-size);
 }
 
+/* Selection info bar */
+.viewer-selection-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  color: white;
+  font-size: 11px;
+  font-weight: 500;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.viewer-selection-clear {
+  background: rgba(255, 255, 255, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: white;
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.viewer-selection-clear:hover {
+  background: rgba(255, 255, 255, 0.4);
+}
+
 /* Viewer Legend */
 .viewer-legend {
   display: flex;

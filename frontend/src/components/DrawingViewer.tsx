@@ -77,8 +77,9 @@ export default function DrawingViewer({
   ];
   const [, , vbW, vbH] = viewBoxParts;
   const markerRadius = Math.max(vbW, vbH) * 0.005;
-  const selectedRadius = markerRadius * 1.6;
+  const selectedRadius = Math.max(vbW, vbH) * 0.008;
   const strokeWidth = markerRadius * 0.35;
+  const fontSize = selectedRadius * 1.4;
 
   if (loading) {
     return (
@@ -170,46 +171,108 @@ export default function DrawingViewer({
               viewBox={preview.viewBox}
               preserveAspectRatio="xMidYMid meet"
             >
-              {symbols.map((symbol) =>
-                symbol.locations.map(([x, y], i) => {
-                  const isSelected = selectedSymbol === symbol.block_name;
-                  const isHovered = hoveredMarker === symbol.block_name;
-                  const r = isSelected || isHovered ? selectedRadius : markerRadius;
-                  return (
-                    <circle
-                      key={`${symbol.block_name}-${i}`}
-                      cx={x}
-                      cy={-y}
-                      r={r}
-                      fill={isSelected ? "#FFD700" : symbol.color}
-                      stroke={isSelected ? "#B8860B" : "white"}
-                      strokeWidth={strokeWidth}
-                      opacity={
-                        selectedSymbol && !isSelected ? 0.3 : 0.85
-                      }
-                      className="viewer-marker"
-                      onMouseEnter={() =>
-                        setHoveredMarker(symbol.block_name)
-                      }
-                      onMouseLeave={() => setHoveredMarker(null)}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectSymbol(
-                          isSelected ? null : symbol.block_name
-                        );
-                      }}
-                    >
-                      <title>
-                        {symbol.label} ({symbol.block_name})
-                      </title>
-                    </circle>
-                  );
-                })
+              {selectedSymbol ? (
+                // Selected mode: show only the selected symbol with numbered circles
+                symbols
+                  .filter((s) => s.block_name === selectedSymbol)
+                  .map((symbol) =>
+                    symbol.locations.map(([x, y], i) => (
+                      <g
+                        key={`${symbol.block_name}-${i}`}
+                        className="viewer-marker"
+                        onMouseEnter={() => setHoveredMarker(`${symbol.block_name}-${i}`)}
+                        onMouseLeave={() => setHoveredMarker(null)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectSymbol(null);
+                        }}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <circle
+                          cx={x}
+                          cy={-y}
+                          r={selectedRadius}
+                          fill={symbol.color}
+                          stroke="white"
+                          strokeWidth={strokeWidth * 1.5}
+                          opacity={0.9}
+                        />
+                        <text
+                          x={x}
+                          y={-y}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          fill="white"
+                          fontSize={fontSize}
+                          fontWeight="bold"
+                          fontFamily="Arial, sans-serif"
+                          style={{ pointerEvents: "none" }}
+                        >
+                          {i + 1}
+                        </text>
+                        <title>
+                          {symbol.label} #{i + 1}
+                        </title>
+                      </g>
+                    ))
+                  )
+              ) : (
+                // Default mode: show all symbols as small dots
+                symbols.map((symbol) =>
+                  symbol.locations.map(([x, y], i) => {
+                    const isHovered = hoveredMarker === symbol.block_name;
+                    const r = isHovered ? markerRadius * 1.5 : markerRadius;
+                    return (
+                      <circle
+                        key={`${symbol.block_name}-${i}`}
+                        cx={x}
+                        cy={-y}
+                        r={r}
+                        fill={symbol.color}
+                        stroke="white"
+                        strokeWidth={strokeWidth}
+                        opacity={0.75}
+                        className="viewer-marker"
+                        onMouseEnter={() =>
+                          setHoveredMarker(symbol.block_name)
+                        }
+                        onMouseLeave={() => setHoveredMarker(null)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectSymbol(symbol.block_name);
+                        }}
+                      >
+                        <title>
+                          {symbol.label} ({symbol.count})
+                        </title>
+                      </circle>
+                    );
+                  })
+                )
               )}
             </svg>
           )}
         </div>
       </div>
+
+      {/* Selected symbol info bar */}
+      {selectedSymbol && showMarkers && (() => {
+        const sym = symbols.find((s) => s.block_name === selectedSymbol);
+        if (!sym) return null;
+        return (
+          <div className="viewer-selection-bar" style={{ backgroundColor: sym.color }}>
+            <span>
+              Showing <strong>{sym.locations.length}</strong> {sym.label} locations
+              {sym.locations.length !== sym.count && (
+                <> (of {sym.count} total — {sym.count - sym.locations.length} without coordinates)</>
+              )}
+            </span>
+            <button onClick={() => onSelectSymbol(null)} className="viewer-selection-clear">
+              Clear
+            </button>
+          </div>
+        );
+      })()}
 
       {/* Legend */}
       {showMarkers && legendItems.length > 0 && (
