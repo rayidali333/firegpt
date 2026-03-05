@@ -107,6 +107,8 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     all_x: list[float] = []
     all_y: list[float] = []
     counter = [0]
+    # Collect SVG-space positions for every INSERT block (block_name → [(x, y), ...])
+    insert_positions: dict[str, list[tuple[float, float]]] = {}
 
     # Render modelspace ONLY. Paper space uses a different coordinate system
     # (paper units vs real-world units) which would stretch the viewbox.
@@ -115,7 +117,8 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
         for entity in msp:
             if counter[0] >= MAX_SVG_ELEMENTS:
                 break
-            _process_entity(entity, svg_elements, all_x, all_y, counter, doc=doc)
+            _process_entity(entity, svg_elements, all_x, all_y, counter, doc=doc,
+                            insert_positions=insert_positions)
     except Exception:
         pass
 
@@ -128,7 +131,8 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
             for entity in layout:
                 if counter[0] >= MAX_SVG_ELEMENTS:
                     break
-                _process_entity(entity, svg_elements, all_x, all_y, counter, doc=doc)
+                _process_entity(entity, svg_elements, all_x, all_y, counter, doc=doc,
+                                insert_positions=insert_positions)
 
     # DO NOT include symbol overlay positions in SVG bounds.
     # The overlay SVG shares the same viewBox as the floor plan SVG.
@@ -179,11 +183,39 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
         f'</g></svg>'
     )
 
+    # Map SVG-space insert positions to consolidated symbol block names.
+    # The symbols list uses consolidated names ("A + B (+N variants)"),
+    # while insert_positions uses raw DXF block names.
+    symbol_svg_positions: dict[str, list[list[float]]] = {}
+    for sym in symbols:
+        positions = []
+        # Check the consolidated block_name itself
+        if sym.block_name in insert_positions:
+            positions.extend(insert_positions[sym.block_name])
+        # Check each variant block name
+        for variant in (sym.block_variants or []):
+            if variant in insert_positions:
+                positions.extend(insert_positions[variant])
+        if positions:
+            # Deduplicate (in case block_name == a variant)
+            seen = set()
+            unique = []
+            for p in positions:
+                key = (p[0], p[1])
+                if key not in seen:
+                    seen.add(key)
+                    unique.append([p[0], p[1]])
+            symbol_svg_positions[sym.block_name] = unique
+
+    logger.info(f"Preview: {len(insert_positions)} block types with positions, "
+                f"mapped {len(symbol_svg_positions)} symbol types")
+
     return {
         "svg": svg,
         "viewBox": viewbox,
         "width": round(vb_w, 2),
         "height": round(vb_h, 2),
+        "symbol_positions": symbol_svg_positions,
     }
 
 
@@ -193,6 +225,7 @@ def _empty_preview() -> dict:
         "viewBox": "0 0 100 100",
         "width": 100,
         "height": 100,
+        "symbol_positions": {},
     }
 
 
@@ -242,6 +275,7 @@ def _block_has_renderable_content(block) -> bool:
 def _process_entity(
     entity, elements: list, xs: list, ys: list,
     counter: list, depth: int = 0, doc=None,
+    insert_positions: dict | None = None,
 ):
     """Route an entity to the appropriate SVG handler."""
     if counter[0] >= MAX_SVG_ELEMENTS or depth > 8:
@@ -250,7 +284,8 @@ def _process_entity(
     etype = entity.dxftype()
 
     if etype == "INSERT":
-        _handle_insert(entity, elements, xs, ys, counter, depth, doc)
+        _handle_insert(entity, elements, xs, ys, counter, depth, doc,
+                        insert_positions=insert_positions)
         return
 
     # Resolve entity color
@@ -284,7 +319,8 @@ def _process_entity(
 
 
 def _handle_insert(entity, elements: list, xs: list, ys: list,
-                   counter: list, depth: int, doc):
+                   counter: list, depth: int, doc,
+                   insert_positions: dict | None = None):
     """Expand an INSERT entity into SVG elements.
 
     Strategy:
@@ -293,6 +329,11 @@ def _handle_insert(entity, elements: list, xs: list, ys: list,
        wrapping it in an SVG <g> with the INSERT's transform
     """
     expanded = False
+    block_name = entity.dxf.name
+
+    # Track geometry bounds for this specific INSERT to compute SVG position
+    local_xs: list[float] = []
+    local_ys: list[float] = []
 
     # Strategy 1: virtual_entities() — the official ezdxf way
     try:
@@ -300,7 +341,7 @@ def _handle_insert(entity, elements: list, xs: list, ys: list,
             if counter[0] >= MAX_SVG_ELEMENTS:
                 break
             try:
-                _process_entity(ve, elements, xs, ys, counter, depth + 1, doc)
+                _process_entity(ve, elements, local_xs, local_ys, counter, depth + 1, doc)
                 expanded = True
             except Exception:
                 continue
@@ -308,6 +349,14 @@ def _handle_insert(entity, elements: list, xs: list, ys: list,
         pass
 
     if expanded:
+        # Add local bounds to global bounds
+        xs.extend(local_xs)
+        ys.extend(local_ys)
+        # Record SVG-space centroid for this INSERT (depth 0 = top-level modelspace)
+        if insert_positions is not None and depth == 0 and local_xs and local_ys:
+            cx = (min(local_xs) + max(local_xs)) / 2
+            cy = (min(local_ys) + max(local_ys)) / 2
+            insert_positions.setdefault(block_name, []).append((round(cx, 2), round(cy, 2)))
         return
 
     # Strategy 2: Manual block definition expansion with SVG transform.
@@ -316,12 +365,17 @@ def _handle_insert(entity, elements: list, xs: list, ys: list,
     # basic geometry (lines, polylines, circles) is usually preserved.
     if doc is not None:
         try:
-            block_name = entity.dxf.name
             block = doc.blocks.get(block_name)
             if block is not None and _block_has_renderable_content(block):
                 expanded = _manual_expand_block(
                     entity, block, elements, xs, ys, counter, depth, doc
                 )
+                # For manual expansion, SVG position is the translate point
+                if expanded and insert_positions is not None and depth == 0:
+                    svg_x = entity.dxf.insert.x
+                    svg_y = -entity.dxf.insert.y
+                    insert_positions.setdefault(block_name, []).append(
+                        (round(svg_x, 2), round(svg_y, 2)))
         except Exception:
             pass
 
@@ -332,6 +386,9 @@ def _handle_insert(entity, elements: list, xs: list, ys: list,
             iy = -entity.dxf.insert.y
             xs.append(ix)
             ys.append(iy)
+            if insert_positions is not None and depth == 0:
+                insert_positions.setdefault(block_name, []).append(
+                    (round(ix, 2), round(iy, 2)))
         except Exception:
             pass
 

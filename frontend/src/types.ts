@@ -48,4 +48,5 @@ export interface DrawingPreview {
   viewBox: string;
   width: number;
   height: number;
+  symbol_positions: Record<string, [number, number][]>;
 }

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useMemo } from "react";
 import { ZoomIn, ZoomOut, Maximize2, Loader } from "lucide-react";
 import { DrawingPreview, SymbolInfo } from "../types";
 
@@ -71,7 +71,7 @@ export default function DrawingViewer({
     setZoom((z) => Math.max(0.1, z / 1.3));
   }, []);
 
-  // Parse viewBox for marker overlay
+  // Parse viewBox for marker sizing
   const viewBoxParts = preview?.viewBox.split(" ").map(Number) || [
     0, 0, 100, 100,
   ];
@@ -82,6 +82,17 @@ export default function DrawingViewer({
   const strokeWidth = markerRadius * 0.35;
   const selectedStroke = selectedRadius * 0.25;
   const fontSize = selectedRadius * 1.2;
+
+  // Build symbols with SVG-space positions from preview data
+  const symbolsWithPositions = useMemo(() => {
+    if (!preview?.symbol_positions) return [];
+    return symbols
+      .map((s) => ({
+        ...s,
+        svgPositions: (preview.symbol_positions[s.block_name] || []) as [number, number][],
+      }))
+      .filter((s) => s.svgPositions.length > 0);
+  }, [symbols, preview]);
 
   if (loading) {
     return (
@@ -108,20 +119,8 @@ export default function DrawingViewer({
     );
   }
 
-  // Build unique legend items from symbols that have locations
-  const legendItems = symbols
-    .filter((s) => s.locations.length > 0)
-    .slice(0, 12);
-
-  // Debug: log coordinate info when symbol is selected
-  if (selectedSymbol && preview) {
-    const sym = symbols.find((s) => s.block_name === selectedSymbol);
-    if (sym && sym.locations.length > 0) {
-      const sample = sym.locations.slice(0, 3);
-      console.log(`[DrawingViewer] viewBox="${preview.viewBox}", selectedRadius=${selectedRadius}`);
-      console.log(`[DrawingViewer] ${sym.label}: ${sym.locations.length} locations, sample:`, sample.map(([x,y]) => `(${x}, ${-y})`));
-    }
-  }
+  // Legend items: symbols that have SVG positions
+  const legendItems = symbolsWithPositions.slice(0, 12);
 
   return (
     <div className="drawing-viewer">
@@ -188,22 +187,12 @@ export default function DrawingViewer({
                   <feDropShadow dx="0" dy="0" stdDeviation={maxDim * 0.002} floodColor="rgba(0,0,0,0.6)" />
                 </filter>
               </defs>
-              {/* Debug: center crosshair to verify overlay renders */}
-              <circle
-                cx={viewBoxParts[0] + vbW / 2}
-                cy={viewBoxParts[1] + vbH / 2}
-                r={maxDim * 0.02}
-                fill="red"
-                opacity={0.8}
-                stroke="yellow"
-                strokeWidth={maxDim * 0.005}
-              />
               {selectedSymbol ? (
                 // Selected mode: show only the selected symbol with numbered circles
-                symbols
+                symbolsWithPositions
                   .filter((s) => s.block_name === selectedSymbol)
                   .map((symbol) =>
-                    symbol.locations.map(([x, y], i) => (
+                    symbol.svgPositions.map(([cx, cy], i) => (
                       <g
                         key={`${symbol.block_name}-${i}`}
                         className="viewer-marker"
@@ -218,23 +207,23 @@ export default function DrawingViewer({
                       >
                         {/* Dark outline ring for contrast */}
                         <circle
-                          cx={x}
-                          cy={-y}
+                          cx={cx}
+                          cy={cy}
                           r={selectedRadius + selectedStroke}
                           fill="rgba(0,0,0,0.5)"
                         />
                         {/* Main colored circle */}
                         <circle
-                          cx={x}
-                          cy={-y}
+                          cx={cx}
+                          cy={cy}
                           r={selectedRadius}
                           fill={symbol.color}
                           stroke="white"
                           strokeWidth={selectedStroke}
                         />
                         <text
-                          x={x}
-                          y={-y}
+                          x={cx}
+                          y={cy}
                           textAnchor="middle"
                           dominantBaseline="central"
                           fill="white"
@@ -256,21 +245,21 @@ export default function DrawingViewer({
                   )
               ) : (
                 // Default mode: show all symbols as small dots
-                symbols.map((symbol) =>
-                  symbol.locations.map(([x, y], i) => {
+                symbolsWithPositions.map((symbol) =>
+                  symbol.svgPositions.map(([cx, cy], i) => {
                     const isHovered = hoveredMarker === symbol.block_name;
                     const r = isHovered ? markerRadius * 1.5 : markerRadius;
                     return (
                       <g key={`${symbol.block_name}-${i}`}>
                         <circle
-                          cx={x}
-                          cy={-y}
+                          cx={cx}
+                          cy={cy}
                           r={r + strokeWidth}
                           fill="rgba(0,0,0,0.4)"
                         />
                         <circle
-                          cx={x}
-                          cy={-y}
+                          cx={cx}
+                          cy={cy}
                           r={r}
                           fill={symbol.color}
                           stroke="white"
@@ -301,14 +290,14 @@ export default function DrawingViewer({
 
       {/* Selected symbol info bar */}
       {selectedSymbol && showMarkers && (() => {
-        const sym = symbols.find((s) => s.block_name === selectedSymbol);
+        const sym = symbolsWithPositions.find((s) => s.block_name === selectedSymbol);
         if (!sym) return null;
         return (
           <div className="viewer-selection-bar" style={{ backgroundColor: sym.color }}>
             <span>
-              Showing <strong>{sym.locations.length}</strong> {sym.label} locations
-              {sym.locations.length !== sym.count && (
-                <> (of {sym.count} total — {sym.count - sym.locations.length} without coordinates)</>
+              Showing <strong>{sym.svgPositions.length}</strong> {sym.label} locations
+              {sym.svgPositions.length !== sym.count && (
+                <> (of {sym.count} total — {sym.count - sym.svgPositions.length} without coordinates)</>
               )}
             </span>
             <button onClick={() => onSelectSymbol(null)} className="viewer-selection-clear">
