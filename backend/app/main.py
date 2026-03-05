@@ -269,6 +269,11 @@ async def chat(request: ChatRequest):
 @app.patch("/api/drawings/{drawing_id}/symbols/{block_name}")
 def override_symbol(drawing_id: str, block_name: str, override: SymbolOverride):
     """Manual count override for a symbol. Tracks original count for audit."""
+    if override.count < 0:
+        raise HTTPException(400, "Count cannot be negative")
+    if not override.label or not override.label.strip():
+        raise HTTPException(400, "Label cannot be empty")
+
     if drawing_id not in drawings_store:
         raise HTTPException(404, "Drawing not found")
 
