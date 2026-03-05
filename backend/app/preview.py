@@ -115,8 +115,10 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     except Exception:
         pass
 
-    # If modelspace produced very little, also scan paper space
-    if len(svg_elements) < 10:
+    # If modelspace produced very few elements, also scan paper space.
+    # DWG→DXF conversion often puts content in paper space, or modelspace
+    # may only contain unexpandable INSERT references.
+    if len(svg_elements) < 50:
         for layout in doc.layouts:
             if layout.name == "Model":
                 continue  # Already scanned
@@ -186,13 +188,26 @@ def _process_entity(
     etype = entity.dxftype()
 
     if etype == "INSERT":
+        expanded = False
         try:
             for ve in entity.virtual_entities():
                 if counter[0] >= MAX_SVG_ELEMENTS:
                     break
                 _process_entity(ve, elements, xs, ys, counter, depth + 1, doc)
+                expanded = True
         except Exception:
             pass
+        # Fallback: if virtual_entities produced nothing (common after DWG→DXF
+        # conversion), at least track the insertion point for bounds calculation
+        # and render a small marker so the block location is visible
+        if not expanded:
+            try:
+                ix = entity.dxf.insert.x
+                iy = -entity.dxf.insert.y
+                xs.append(ix)
+                ys.append(iy)
+            except Exception:
+                pass
         return
 
     # Resolve entity color
