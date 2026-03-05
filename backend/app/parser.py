@@ -309,7 +309,9 @@ def _fast_path_label(block_name: str) -> str | None:
     This is the fast path — only high-confidence matches.
     """
     name_upper = block_name.upper().strip()
-    name_normalized = name_upper.replace("_", " ").replace("-", " ").strip()
+    # Normalize all separators (underscores, hyphens, dots) to spaces for matching.
+    # CAD block names use inconsistent separators: MONITOR_MODULE, MONITOR-MODULE, etc.
+    name_normalized = re.sub(r'[_\-./\\]+', ' ', name_upper).strip()
 
     # 1. Exact match — English abbreviations
     if name_upper in KNOWN_SYMBOLS:
@@ -320,13 +322,15 @@ def _fast_path_label(block_name: str) -> str | None:
         return KNOWN_SYMBOLS_INTL[name_normalized]
 
     # 3. Substring match — English (longer/more specific first)
+    # Match against normalized name so "MONITOR_MODULE" matches "MONITOR MODULE"
     for abbrev, label in sorted(KNOWN_SYMBOLS.items(), key=lambda x: -len(x[0])):
         if len(abbrev) <= 3:
+            # Short abbreviations need word boundary guards to avoid false positives
             pattern = r'(?<![A-Z0-9])' + re.escape(abbrev) + r'(?![A-Z0-9])'
-            if re.search(pattern, name_upper):
+            if re.search(pattern, name_normalized):
                 return label
         else:
-            if abbrev in name_upper:
+            if abbrev in name_normalized:
                 return label
 
     # 4. Substring match — International terms
@@ -599,6 +603,12 @@ def parse_dxf_file(filepath: str) -> ParseResult:
             block_def_metadata[block.name] = _collect_block_metadata(block, doc)
 
     # Step 7: Propagate counts through nesting hierarchy (BFS)
+    # IMPORTANT: Only propagate to blocks that were directly inserted on the
+    # drawing. Without this guard, the BFS creates hundreds of phantom entries
+    # for sub-components (scale rects, structural columns, text frames) that
+    # were never placed as independent symbols — they're just internal parts
+    # of other block definitions.
+    directly_inserted = set(block_counts.keys())
     pre_bfs = dict(block_counts)
     processed: set[str] = set()
     queue = list(block_counts.keys())
@@ -611,9 +621,8 @@ def parse_dxf_file(filepath: str) -> ParseResult:
             continue
         parent_count = block_counts[parent]
         for child, ref_count in nested_ref_counts[parent].items():
-            block_counts[child] += parent_count * ref_count
-            if child not in processed:
-                queue.append(child)
+            if child in directly_inserted:
+                block_counts[child] += parent_count * ref_count
 
     changed = [
         f"{k}: {pre_bfs.get(k, 0)} -> {v}"

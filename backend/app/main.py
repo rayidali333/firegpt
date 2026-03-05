@@ -128,6 +128,41 @@ async def upload_drawing(file: UploadFile):
                 "message": "AI classification unavailable (no API key or service error)",
             })
 
+    # Consolidate symbols by label — merge different block names that map to
+    # the same device type (e.g., 4 different "Control Module" block variants
+    # become one "Control Module" row with combined counts and locations).
+    # Contractors need to see "Control Module: 35" not 4 separate rows.
+    label_groups: dict[str, list[SymbolInfo]] = {}
+    for sym in parse_result.symbols:
+        label_groups.setdefault(sym.label, []).append(sym)
+
+    consolidated_symbols = []
+    for label, group in label_groups.items():
+        if len(group) == 1:
+            consolidated_symbols.append(group[0])
+        else:
+            total_count = sum(s.count for s in group)
+            all_locations = []
+            for s in group:
+                all_locations.extend(s.locations)
+            # Use the shortest block name as representative, list others in parentheses
+            sorted_group = sorted(group, key=lambda s: -s.count)
+            block_names = [s.block_name for s in sorted_group]
+            if len(block_names) <= 3:
+                combined_name = " + ".join(block_names)
+            else:
+                combined_name = f"{block_names[0]} (+{len(block_names)-1} variants)"
+            consolidated_symbols.append(SymbolInfo(
+                block_name=combined_name,
+                label=label,
+                count=total_count,
+                locations=all_locations,
+                color=group[0].color,
+            ))
+
+    # Sort by count descending
+    consolidated_symbols.sort(key=lambda s: -s.count)
+
     # Convert analysis dicts to AnalysisStep models
     analysis_steps = [
         AnalysisStep(**step) for step in parse_result.analysis
@@ -137,8 +172,8 @@ async def upload_drawing(file: UploadFile):
         drawing_id=drawing_id,
         filename=file.filename,
         file_type=ext.lstrip("."),
-        symbols=parse_result.symbols,
-        total_symbols=sum(s.count for s in parse_result.symbols),
+        symbols=consolidated_symbols,
+        total_symbols=sum(s.count for s in consolidated_symbols),
         analysis=analysis_steps,
     )
     drawings_store[drawing_id] = result
