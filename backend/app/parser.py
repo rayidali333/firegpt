@@ -538,6 +538,13 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                     skipped_blocks[block_name] += 1
                     continue
 
+                # Only count and collect data from model space.
+                # Paper space contains legends, title blocks, and viewports —
+                # not real device placements. Counting paper space inserts
+                # would inflate device counts (e.g., legend sample symbols).
+                if not is_model_space:
+                    continue
+
                 block_counts[block_name] += 1
 
                 try:
@@ -557,17 +564,13 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                 except Exception:
                     pass
 
-                # Only collect locations from model space. Paper space uses
-                # a different coordinate system (paper units) which would
-                # corrupt the drawing preview overlay positioning.
-                if is_model_space:
-                    try:
-                        insert_point = entity.dxf.insert
-                        block_locations[block_name].append(
-                            (round(insert_point.x, 2), round(insert_point.y, 2))
-                        )
-                    except Exception:
-                        pass
+                try:
+                    insert_point = entity.dxf.insert
+                    block_locations[block_name].append(
+                        (round(insert_point.x, 2), round(insert_point.y, 2))
+                    )
+                except Exception:
+                    pass
 
         top_types = sorted(layout_types.items(), key=lambda x: -x[1])[:8]
         types_str = ", ".join(f"{t}: {c}" for t, c in top_types)
