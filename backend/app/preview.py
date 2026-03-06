@@ -134,6 +134,15 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
                 _process_entity(entity, svg_elements, all_x, all_y, counter, doc=doc,
                                 insert_positions=insert_positions)
 
+    logger.info(f"SVG rendering: {counter[0]} elements, {len(insert_positions)} block types with positions")
+
+    # ── Second pass: collect positions for fire alarm symbol blocks ──
+    # The SVG rendering loop above is capped at MAX_SVG_ELEMENTS to prevent
+    # browser crashes. On complex drawings (e.g., 628 INSERTs × 100+ sub-entities
+    # each), the cap is hit before fire alarm symbol INSERTs are processed.
+    # This second pass focuses ONLY on symbol blocks with no counter limit.
+    _collect_symbol_positions(doc, symbols, insert_positions)
+
     # DO NOT include symbol overlay positions in SVG bounds.
     # The overlay SVG shares the same viewBox as the floor plan SVG.
     # Adding symbol positions from the parser (which may include paper space
@@ -228,6 +237,102 @@ def _empty_preview() -> dict:
         "height": 100,
         "symbol_positions": {},
     }
+
+
+def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
+                              insert_positions: dict[str, list[tuple[float, float]]]):
+    """Collect SVG-space positions for fire alarm symbol INSERT entities.
+
+    This runs as a separate pass over modelspace with NO element counter limit.
+    It's needed because the SVG rendering loop caps at MAX_SVG_ELEMENTS, which
+    on complex architectural drawings is often reached before fire alarm symbol
+    INSERTs are processed.
+
+    Strategy for computing SVG-space position:
+    1. Try virtual_entities() to get actual rendered geometry centroid
+    2. Fall back to base_point-adjusted insertion point
+    """
+    # Build set of raw block names we need positions for
+    target_blocks: set[str] = set()
+    for sym in symbols:
+        # Single-block symbols: block_name IS the raw DXF name
+        target_blocks.add(sym.block_name)
+        # Consolidated multi-block symbols: each variant is a raw DXF name
+        for v in (sym.block_variants or []):
+            target_blocks.add(v)
+
+    # Remove blocks we already have positions for (from the SVG rendering pass)
+    target_blocks -= set(insert_positions.keys())
+
+    if not target_blocks:
+        logger.info("Position collection: all symbol blocks already have positions")
+        return
+
+    logger.info(f"Position collection: need positions for {len(target_blocks)} block types: "
+                f"{list(target_blocks)[:5]}")
+
+    try:
+        msp = doc.modelspace()
+    except Exception:
+        return
+
+    found = 0
+    for entity in msp:
+        if entity.dxftype() != "INSERT":
+            continue
+        block_name = entity.dxf.name
+        if block_name not in target_blocks:
+            continue
+
+        pos = _compute_insert_svg_position(entity, block_name, doc)
+        if pos:
+            insert_positions.setdefault(block_name, []).append(pos)
+            found += 1
+
+    logger.info(f"Position collection: found {found} INSERT positions "
+                f"across {sum(1 for b in target_blocks if b in insert_positions)} block types")
+
+
+def _compute_insert_svg_position(entity, block_name: str, doc) -> tuple[float, float] | None:
+    """Compute the SVG-space (x, -y) position of an INSERT entity.
+
+    Tries virtual_entities centroid first (most accurate), then falls back
+    to base_point-adjusted insertion point.
+    """
+    # Method 1: Get centroid from virtual_entities expansion
+    try:
+        pts_x: list[float] = []
+        pts_y: list[float] = []
+        count = 0
+        for ve in entity.virtual_entities():
+            count += 1
+            if count > 200:  # Limit to prevent slowness on huge blocks
+                break
+            try:
+                dxf = ve.dxf
+                if hasattr(dxf, 'insert'):
+                    pts_x.append(dxf.insert.x)
+                    pts_y.append(-dxf.insert.y)
+                elif hasattr(dxf, 'location'):
+                    pts_x.append(dxf.location.x)
+                    pts_y.append(-dxf.location.y)
+                elif hasattr(dxf, 'center'):
+                    pts_x.append(dxf.center.x)
+                    pts_y.append(-dxf.center.y)
+                elif hasattr(dxf, 'start'):
+                    pts_x.append(dxf.start.x)
+                    pts_y.append(-dxf.start.y)
+            except Exception:
+                continue
+        if pts_x and pts_y:
+            cx = (min(pts_x) + max(pts_x)) / 2
+            cy = (min(pts_y) + max(pts_y)) / 2
+            return (round(cx, 2), round(cy, 2))
+    except Exception:
+        pass
+
+    # Method 2: Base_point-adjusted insertion point
+    return _get_adjusted_insert_position(entity, block_name, doc)
 
 
 def _filter_outliers(xs: list[float], ys: list[float]) -> tuple[list[float], list[float]]:
