@@ -250,45 +250,6 @@ def get_drawing_preview(drawing_id: str):
     return PreviewResponse(**preview_data)
 
 
-@app.get("/api/drawings/{drawing_id}/debug-positions")
-def debug_positions(drawing_id: str):
-    """Temporary debug endpoint to diagnose symbol position tracking."""
-    if drawing_id not in drawings_store:
-        raise HTTPException(404, "Drawing not found")
-
-    drawing = drawings_store[drawing_id]
-    preview = preview_cache.get(drawing_id)
-
-    # Symbol info from parser
-    symbol_info = []
-    for sym in drawing.symbols:
-        symbol_info.append({
-            "block_name": sym.block_name,
-            "label": sym.label,
-            "count": sym.count,
-            "block_variants": sym.block_variants or [],
-            "locations_sample": sym.locations[:3] if sym.locations else [],
-            "locations_count": len(sym.locations),
-        })
-
-    # Preview position info
-    preview_info = None
-    if preview:
-        sp = preview.get("symbol_positions", {})
-        preview_info = {
-            "viewBox": preview.get("viewBox"),
-            "symbol_positions_keys": list(sp.keys()),
-            "symbol_positions_counts": {k: len(v) for k, v in sp.items()},
-            "symbol_positions_samples": {k: v[:3] for k, v in sp.items()},
-        }
-
-    return {
-        "drawing_id": drawing_id,
-        "symbols": symbol_info,
-        "preview": preview_info,
-    }
-
-
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     if request.drawing_id not in drawings_store:

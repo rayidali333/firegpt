@@ -85,44 +85,13 @@ export default function DrawingViewer({
 
   // Build symbols with SVG-space positions from preview data
   const symbolsWithPositions = useMemo(() => {
-    if (!preview?.symbol_positions) {
-      console.warn("[DrawingViewer] preview.symbol_positions is empty/undefined", {
-        hasPreview: !!preview,
-        previewKeys: preview ? Object.keys(preview) : [],
-      });
-      return [];
-    }
-    const spKeys = Object.keys(preview.symbol_positions);
-    const symNames = symbols.map(s => s.block_name);
-    console.log("[DrawingViewer] Matching symbols to positions:", {
-      symbol_positions_keys: spKeys,
-      symbol_positions_counts: Object.fromEntries(spKeys.map(k => [k, preview.symbol_positions[k]?.length])),
-      symbol_block_names: symNames,
-      viewBox: preview.viewBox,
-    });
-    // Check for matches
-    for (const s of symbols) {
-      const positions = preview.symbol_positions[s.block_name];
-      if (positions) {
-        console.log(`  MATCH: "${s.block_name}" → ${positions.length} positions, sample:`, positions.slice(0, 2));
-      } else {
-        console.log(`  NO MATCH: "${s.block_name}"`);
-        // Try fuzzy matching to diagnose
-        for (const k of spKeys) {
-          if (k.includes(s.block_name.slice(0, 20)) || s.block_name.includes(k.slice(0, 20))) {
-            console.log(`    Possible fuzzy match: "${k}"`);
-          }
-        }
-      }
-    }
-    const result = symbols
+    if (!preview?.symbol_positions) return [];
+    return symbols
       .map((s) => ({
         ...s,
         svgPositions: (preview.symbol_positions[s.block_name] || []) as [number, number][],
       }))
       .filter((s) => s.svgPositions.length > 0);
-    console.log("[DrawingViewer] Final symbolsWithPositions:", result.length, "symbols with positions");
-    return result;
   }, [symbols, preview]);
 
   if (loading) {
@@ -218,24 +187,6 @@ export default function DrawingViewer({
                   <feDropShadow dx="0" dy="0" stdDeviation={maxDim * 0.002} floodColor="rgba(0,0,0,0.6)" />
                 </filter>
               </defs>
-              {/* DEBUG: Red test marker at viewBox center to prove overlay renders */}
-              <circle
-                cx={viewBoxParts[0] + vbW / 2}
-                cy={viewBoxParts[1] + vbH / 2}
-                r={maxDim * 0.015}
-                fill="red"
-                opacity={0.8}
-              />
-              <text
-                x={viewBoxParts[0] + vbW / 2}
-                y={viewBoxParts[1] + vbH / 2 + maxDim * 0.04}
-                textAnchor="middle"
-                fill="red"
-                fontSize={maxDim * 0.015}
-                fontFamily="Arial"
-              >
-                DEBUG OVERLAY TEST
-              </text>
               {selectedSymbol ? (
                 // Selected mode: show only the selected symbol with numbered circles
                 symbolsWithPositions
@@ -355,22 +306,6 @@ export default function DrawingViewer({
           </div>
         );
       })()}
-
-      {/* DEBUG INFO - TEMPORARY - shows what's actually happening with symbol positions */}
-      {showMarkers && preview && (
-        <div style={{
-          position: 'absolute', bottom: legendItems.length > 0 ? 50 : 8, left: 8, right: 8,
-          background: 'rgba(0,0,0,0.85)', color: '#0f0', padding: '8px 12px',
-          fontSize: 11, fontFamily: 'Monaco, monospace', borderRadius: 4, zIndex: 100,
-          maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap',
-        }}>
-          {`symbol_positions keys (${Object.keys(preview.symbol_positions || {}).length}): ${JSON.stringify(Object.keys(preview.symbol_positions || {}).map(k => k.slice(0,40)+'…'))}\n`}
-          {`symbol_positions counts: ${JSON.stringify(Object.fromEntries(Object.entries(preview.symbol_positions || {}).map(([k,v]) => [k.slice(0,25), v.length])))}\n`}
-          {`symbol block_names (${symbols.length}): ${JSON.stringify(symbols.map(s => s.block_name.slice(0,40)+'…'))}\n`}
-          {`matched: ${symbolsWithPositions.length} symbols | viewBox: ${preview.viewBox}`}
-          {symbolsWithPositions.length > 0 && ` | sample pos: ${JSON.stringify(symbolsWithPositions[0].svgPositions.slice(0,2))}`}
-        </div>
-      )}
 
       {/* Legend */}
       {showMarkers && legendItems.length > 0 && (
