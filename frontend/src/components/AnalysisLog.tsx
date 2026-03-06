@@ -5,9 +5,10 @@ import { AnalysisStep } from "../types";
 interface Props {
   analysis: AnalysisStep[];
   filename: string;
+  positionDebug?: string[];
 }
 
-export default function AnalysisLog({ analysis, filename }: Props) {
+export default function AnalysisLog({ analysis, filename, positionDebug }: Props) {
   if (analysis.length === 0) {
     return (
       <div className="analysis-log">
@@ -72,6 +73,30 @@ export default function AnalysisLog({ analysis, filename }: Props) {
           </div>
         ))}
       </div>
+
+      {positionDebug && positionDebug.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <h3 className="analysis-title">Position Debug</h3>
+          <div
+            style={{
+              background: "#1a1a2e",
+              color: "#0f0",
+              fontFamily: "Monaco, monospace",
+              fontSize: 11,
+              padding: 10,
+              borderRadius: 4,
+              maxHeight: 300,
+              overflowY: "auto",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+            }}
+          >
+            {positionDebug.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

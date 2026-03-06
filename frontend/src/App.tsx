@@ -29,7 +29,17 @@ function App() {
     }
     setPreviewLoading(true);
     getDrawingPreview(drawing.drawing_id)
-      .then(setPreview)
+      .then((p) => {
+        console.log("[FireGPT] Preview loaded. symbol_positions keys:", Object.keys(p.symbol_positions || {}));
+        console.log("[FireGPT] Position counts:", Object.fromEntries(
+          Object.entries(p.symbol_positions || {}).map(([k, v]) => [k, (v as any[]).length])
+        ));
+        if (p.position_debug?.length) {
+          console.log("[FireGPT] Position debug:");
+          p.position_debug.forEach((line: string) => console.log("  ", line));
+        }
+        setPreview(p);
+      })
       .catch((e) => {
         console.warn("Preview generation failed:", e);
         setPreview(null);
@@ -218,6 +228,7 @@ function App() {
                     <AnalysisLog
                       analysis={drawing.analysis || []}
                       filename={drawing.filename}
+                      positionDebug={preview?.position_debug}
                     />
                   )}
                 </div>

@@ -49,4 +49,5 @@ export interface DrawingPreview {
   width: number;
   height: number;
   symbol_positions: Record<string, [number, number][]>;
+  position_debug: string[];
 }

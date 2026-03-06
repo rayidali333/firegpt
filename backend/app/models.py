@@ -61,6 +61,7 @@ class PreviewResponse(BaseModel):
     width: float
     height: float
     symbol_positions: dict[str, list[list[float]]] = {}  # block_name → [[x, y], ...] in SVG space
+    position_debug: list[str] = []  # Diagnostic info for symbol position tracking
 
 
 class SymbolOverride(BaseModel):
