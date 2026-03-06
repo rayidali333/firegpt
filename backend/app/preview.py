@@ -333,6 +333,43 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
     _collect_nested_symbol_positions(doc, all_target_blocks, insert_positions, debug)
 
 
+def _strip_xref_prefix(name: str) -> str:
+    """Strip bound XREF prefix from a block name.
+
+    AutoCAD renames blocks when binding XREFs: XREFNAME$0$ORIGINAL_NAME.
+    Multiple binding levels produce: OUTER$0$INNER$0$NAME.
+    """
+    idx = name.rfind('$0$')
+    if idx >= 0:
+        return name[idx + 3:]
+    return name
+
+
+def _match_target_block(child_name: str, all_target_blocks: set[str]) -> str | None:
+    """Match an INSERT block name against target blocks, handling XREF prefixes.
+
+    Returns the matched target block name, or None if no match.
+    """
+    # Exact match
+    if child_name in all_target_blocks:
+        return child_name
+
+    # Strip XREF binding prefix and try again
+    stripped = _strip_xref_prefix(child_name)
+    if stripped != child_name and stripped in all_target_blocks:
+        return stripped
+
+    # Check if any target name is a suffix of the child name (handles
+    # multi-level XREF prefixes or unusual naming)
+    for target in all_target_blocks:
+        if child_name.endswith(target) and len(child_name) > len(target):
+            sep = child_name[-(len(target) + 1)]
+            if sep in ('$', '_', '-'):
+                return target
+
+    return None
+
+
 def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
                                      insert_positions: dict[str, list[tuple[float, float]]],
                                      debug: list[str]):
@@ -345,6 +382,7 @@ def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
 
     This function:
     1. Scans all block definitions for target fire alarm INSERT entities
+       (including XREF-prefixed names like XREFNAME$0$BLOCKNAME)
     2. Builds a hierarchy of container blocks
     3. For each container found in modelspace, recursively transforms nested
        target positions to WCS
@@ -352,8 +390,9 @@ def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
     SKIP_PREFIXES = ("*Model_Space", "*Paper_Space")
 
     # Step 1: Find block definitions that directly contain target INSERTs
-    # direct_targets[container_name] = [(child_block_name, insert_x, insert_y), ...]
+    # direct_targets[container_name] = [(matched_target_name, insert_x, insert_y), ...]
     direct_targets: dict[str, list[tuple[str, float, float]]] = {}
+    xref_matches: int = 0
 
     for block in doc.blocks:
         bn = block.name
@@ -365,16 +404,33 @@ def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
             if ent.dxftype() != "INSERT":
                 continue
             child_name = ent.dxf.name
-            if child_name not in all_target_blocks:
+            matched = _match_target_block(child_name, all_target_blocks)
+            if matched is None:
                 continue
+            if matched != child_name:
+                xref_matches += 1
             try:
                 direct_targets.setdefault(bn, []).append(
-                    (child_name, ent.dxf.insert.x, ent.dxf.insert.y))
+                    (matched, ent.dxf.insert.x, ent.dxf.insert.y))
             except Exception:
                 pass
 
     if not direct_targets:
-        debug.append("Nested scan: no container blocks found")
+        # Log diagnostic info about what blocks contain INSERT entities
+        insert_blocks = []
+        for block in doc.blocks:
+            bn = block.name
+            if any(bn.startswith(p) for p in SKIP_PREFIXES):
+                continue
+            insert_count = sum(1 for e in block if e.dxftype() == "INSERT")
+            if insert_count > 5:
+                insert_blocks.append((bn, insert_count))
+        insert_blocks.sort(key=lambda x: -x[1])
+        if insert_blocks:
+            debug.append(f"Nested scan: no container blocks found. "
+                         f"Blocks with INSERTs: {', '.join(f'{n[:40]}({c})' for n, c in insert_blocks[:5])}")
+        else:
+            debug.append("Nested scan: no container blocks found (no blocks contain INSERT entities)")
         return
 
     # Step 2: Find higher-level containers (blocks that contain the direct containers)
@@ -411,7 +467,8 @@ def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
             break
 
     debug.append(f"Nested scan: {len(direct_targets)} direct containers, "
-                 f"{len(reachable)} total reachable blocks")
+                 f"{len(reachable)} total reachable blocks"
+                 f"{f', {xref_matches} XREF-prefixed matches' if xref_matches else ''}")
     for cn in list(direct_targets.keys())[:5]:
         debug.append(f"  Container '{cn[:60]}': {len(direct_targets[cn])} target INSERTs")
 
@@ -532,14 +589,62 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
                               debug: list[str]):
     """Fix symbol positions systematically offset from the viewBox.
 
-    Common in drawings where fire alarm symbols are placed near the DXF origin
-    while architectural XREFs render the building at a large coordinate offset.
-    Detects this per-dimension and shifts out-of-bounds positions to align.
+    Handles two cases:
+    1. **Schedule positions**: INSERTs arranged in a vertical/horizontal line
+       (device schedule or legend). These are NOT floor plan placements and
+       should be removed entirely.
+    2. **Offset positions**: Real placements that are simply offset from the
+       viewBox due to XREF coordinate transforms. These can be shifted.
     """
     if not symbol_positions:
         return
 
-    # Classify all positions as in-bounds or out-of-bounds
+    # ── Step 1: Detect and remove schedule-like (degenerate) positions ──
+    # Per symbol type: if out-of-viewBox positions form a line (all same X or
+    # all same Y), they're from a device schedule, not floor plan placements.
+    schedule_removed = 0
+    for block_name in list(symbol_positions.keys()):
+        positions = symbol_positions[block_name]
+        if len(positions) < 3:
+            continue
+
+        in_vb = []
+        out_vb = []
+        for p in positions:
+            if vb_x <= p[0] <= vb_x + vb_w and vb_y <= p[1] <= vb_y + vb_h:
+                in_vb.append(p)
+            else:
+                out_vb.append(p)
+
+        if len(out_vb) < 3:
+            continue
+
+        # Check if out-of-viewBox positions are degenerate (form a line)
+        out_xs = [p[0] for p in out_vb]
+        out_ys = [p[1] for p in out_vb]
+        x_range = max(out_xs) - min(out_xs)
+        y_range = max(out_ys) - min(out_ys)
+        max_range = max(x_range, y_range, 1.0)
+        min_range = min(x_range, y_range)
+
+        if min_range / max_range < 0.02:
+            # Degenerate: all positions at nearly the same X (or Y)
+            # These are schedule/legend entries, not floor plan placements
+            if in_vb:
+                symbol_positions[block_name] = in_vb
+                debug.append(f"  Schedule fix: removed {len(out_vb)} schedule positions "
+                             f"for {block_name[:50]}, kept {len(in_vb)} floor plan positions")
+            else:
+                del symbol_positions[block_name]
+                debug.append(f"  Schedule fix: removed all {len(positions)} schedule positions "
+                             f"for {block_name[:50]} (x_range={x_range:.0f}, y_range={y_range:.0f})")
+            schedule_removed += len(out_vb)
+
+    if schedule_removed:
+        debug.append(f"Schedule detection: removed {schedule_removed} schedule/legend positions total")
+
+    # ── Step 2: For remaining non-degenerate out-of-bounds positions, ──
+    # ── try to shift them into the viewBox ──
     in_bounds: list[tuple[float, float]] = []
     out_bounds: list[tuple[float, float]] = []
 
@@ -558,14 +663,12 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
     if out_ratio < 0.15:
         return  # Only a few outliers, not a systematic offset
 
-    # Compute per-dimension offset.
-    # Only shift a dimension if the out-of-bounds centroid is outside the viewBox.
+    # Compute per-dimension offset
     out_xs = [x for x, _ in out_bounds]
     out_ys = [y for _, y in out_bounds]
     out_cx = sum(out_xs) / len(out_xs)
     out_cy = sum(out_ys) / len(out_ys)
 
-    # Determine anchor: use in-bounds centroid if available, else viewBox center
     if in_bounds:
         anchor_x = sum(x for x, _ in in_bounds) / len(in_bounds)
         anchor_y = sum(y for _, y in in_bounds) / len(in_bounds)
@@ -573,23 +676,14 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
         anchor_x = vb_x + vb_w / 2
         anchor_y = vb_y + vb_h / 2
 
-    # X offset: only apply if out-of-bounds centroid X is outside viewBox
-    offset_x = 0.0
-    if out_cx < vb_x or out_cx > vb_x + vb_w:
-        offset_x = anchor_x - out_cx
-
-    # Y offset: only apply if out-of-bounds centroid Y is outside viewBox
-    offset_y = 0.0
-    if out_cy < vb_y or out_cy > vb_y + vb_h:
-        offset_y = anchor_y - out_cy
+    offset_x = (anchor_x - out_cx) if (out_cx < vb_x or out_cx > vb_x + vb_w) else 0.0
+    offset_y = (anchor_y - out_cy) if (out_cy < vb_y or out_cy > vb_y + vb_h) else 0.0
 
     if abs(offset_x) < 100 and abs(offset_y) < 100:
-        return  # Offset too small to matter
+        return
 
-    # Validate: check that applying this offset brings most out-of-bounds
-    # positions into (or near) the viewBox. Use 10% margin for tolerance.
-    margin_x = vb_w * 0.1
-    margin_y = vb_h * 0.1
+    # Validate offset brings most positions into viewBox
+    margin_x, margin_y = vb_w * 0.1, vb_h * 0.1
     test_in = sum(
         1 for x, y in out_bounds
         if (vb_x - margin_x <= x + offset_x <= vb_x + vb_w + margin_x and
@@ -601,21 +695,16 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
                      f"only fixes {test_in}/{len(out_bounds)}, skipping")
         return
 
-    # Apply offset to out-of-bounds positions
+    # Apply offset to remaining out-of-bounds positions
     fixed = 0
-    for block_name, positions in symbol_positions.items():
+    for positions in symbol_positions.values():
         for i, pos in enumerate(positions):
             x, y = pos[0], pos[1]
             if vb_x <= x <= vb_x + vb_w and vb_y <= y <= vb_y + vb_h:
-                continue  # Already in bounds
-
-            new_x = x + offset_x
-            new_y = y + offset_y
-            positions[i] = [round(new_x, 2), round(new_y, 2)]
+                continue
+            positions[i] = [round(x + offset_x, 2), round(y + offset_y, 2)]
             fixed += 1
 
-    logger.info(f"Coordinate offset fix: shifted {fixed}/{len(out_bounds)} positions "
-                f"by ({offset_x:.0f}, {offset_y:.0f})")
     debug.append(f"Coordinate offset fix: shifted {fixed}/{len(out_bounds)} positions "
                  f"by ({offset_x:.0f}, {offset_y:.0f})")
 
