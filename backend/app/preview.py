@@ -134,14 +134,12 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
                 _process_entity(entity, svg_elements, all_x, all_y, counter, doc=doc,
                                 insert_positions=insert_positions)
 
-    logger.info(f"SVG rendering: {counter[0]} elements, {len(insert_positions)} block types with positions")
+    position_debug: list[str] = []
+    position_debug.append(f"SVG rendering: {counter[0]} elements (limit {MAX_SVG_ELEMENTS}), "
+                          f"{len(insert_positions)} block types with positions from SVG pass")
 
     # ── Second pass: collect positions for fire alarm symbol blocks ──
-    # The SVG rendering loop above is capped at MAX_SVG_ELEMENTS to prevent
-    # browser crashes. On complex drawings (e.g., 628 INSERTs × 100+ sub-entities
-    # each), the cap is hit before fire alarm symbol INSERTs are processed.
-    # This second pass focuses ONLY on symbol blocks with no counter limit.
-    _collect_symbol_positions(doc, symbols, insert_positions)
+    _collect_symbol_positions(doc, symbols, insert_positions, position_debug)
 
     # DO NOT include symbol overlay positions in SVG bounds.
     # The overlay SVG shares the same viewBox as the floor plan SVG.
@@ -220,12 +218,28 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     logger.info(f"Preview: {len(insert_positions)} block types, {total_inserts} total INSERT positions, "
                 f"mapped {len(symbol_svg_positions)} symbol types")
 
+    # Add per-symbol mapping debug info
+    for sym in symbols:
+        sp = symbol_svg_positions.get(sym.block_name)
+        if sp:
+            # Check if positions are within viewBox
+            in_vb = sum(1 for px, py in sp
+                        if vb_x <= px <= vb_x + vb_w and vb_y <= py <= vb_y + vb_h)
+            unique_pts = len(set((p[0], p[1]) for p in sp))
+            position_debug.append(
+                f"→ {sym.label}: {len(sp)} positions ({in_vb} in viewBox, {unique_pts} unique)")
+        else:
+            position_debug.append(f"→ {sym.label}: 0 positions (NO MATCH in symbol_positions)")
+
+    position_debug.append(f"viewBox: x={vb_x:.0f} y={vb_y:.0f} w={vb_w:.0f} h={vb_h:.0f}")
+
     return {
         "svg": svg,
         "viewBox": viewbox,
         "width": round(vb_w, 2),
         "height": round(vb_h, 2),
         "symbol_positions": symbol_svg_positions,
+        "position_debug": position_debug,
     }
 
 
@@ -236,11 +250,13 @@ def _empty_preview() -> dict:
         "width": 100,
         "height": 100,
         "symbol_positions": {},
+        "position_debug": [],
     }
 
 
 def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
-                              insert_positions: dict[str, list[tuple[float, float]]]):
+                              insert_positions: dict[str, list[tuple[float, float]]],
+                              debug: list[str]):
     """Collect SVG-space positions for fire alarm symbol INSERT entities.
 
     This runs as a separate pass over modelspace with NO element counter limit.
@@ -250,32 +266,33 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
 
     Strategy for computing SVG-space position:
     1. Try virtual_entities() to get actual rendered geometry centroid
-    2. Fall back to base_point-adjusted insertion point
+    2. Fall back to ATTRIB instances (WCS coordinates)
+    3. Fall back to base_point-adjusted insertion point
     """
     # Build set of raw block names we need positions for
     target_blocks: set[str] = set()
     for sym in symbols:
-        # Single-block symbols: block_name IS the raw DXF name
         target_blocks.add(sym.block_name)
-        # Consolidated multi-block symbols: each variant is a raw DXF name
         for v in (sym.block_variants or []):
             target_blocks.add(v)
 
-    # Remove blocks we already have positions for (from the SVG rendering pass)
-    target_blocks -= set(insert_positions.keys())
+    already_have = target_blocks & set(insert_positions.keys())
+    target_blocks -= already_have
+
+    debug.append(f"Position pass: {len(already_have)} block types from SVG pass, "
+                 f"{len(target_blocks)} need 2nd pass")
 
     if not target_blocks:
-        logger.info("Position collection: all symbol blocks already have positions")
         return
-
-    logger.info(f"Position collection: need positions for {len(target_blocks)} block types: "
-                f"{list(target_blocks)[:5]}")
 
     try:
         msp = doc.modelspace()
     except Exception:
+        debug.append("ERROR: Cannot access modelspace for 2nd pass")
         return
 
+    # Track which method succeeded for each block type
+    method_stats: dict[str, dict[str, int]] = {}  # block_name → {method → count}
     found = 0
     for entity in msp:
         if entity.dxftype() != "INSERT":
@@ -284,44 +301,157 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
         if block_name not in target_blocks:
             continue
 
-        pos = _compute_insert_svg_position(entity, block_name, doc)
+        pos, method = _compute_insert_svg_position_debug(entity, block_name, doc)
         if pos:
             insert_positions.setdefault(block_name, []).append(pos)
+            method_stats.setdefault(block_name, {})
+            method_stats[block_name][method] = method_stats[block_name].get(method, 0) + 1
             found += 1
 
-    logger.info(f"Position collection: found {found} INSERT positions "
-                f"across {sum(1 for b in target_blocks if b in insert_positions)} block types")
+    # Build debug info per block type
+    for bn, methods in method_stats.items():
+        total = sum(methods.values())
+        methods_str = ", ".join(f"{m}:{c}" for m, c in methods.items())
+        sample = insert_positions[bn][0] if bn in insert_positions else "N/A"
+        debug.append(f"  {bn[:50]}: {total} positions [{methods_str}] sample={sample}")
+
+    # Report blocks with zero positions
+    for bn in target_blocks:
+        if bn not in insert_positions:
+            debug.append(f"  {bn[:50]}: 0 positions (NO METHOD WORKED)")
+
+    logger.info(f"Position collection: found {found} positions, "
+                f"{sum(1 for b in target_blocks if b in insert_positions)} block types")
 
 
-def _compute_insert_svg_position(entity, block_name: str, doc) -> tuple[float, float] | None:
-    """Compute the SVG-space (x, -y) position of an INSERT entity.
-
-    Tries virtual_entities centroid first (most accurate), then falls back
-    to base_point-adjusted insertion point.
-    """
-    # Method 1: Get centroid from virtual_entities expansion
+def _compute_insert_svg_position_debug(entity, block_name: str, doc) -> tuple[tuple[float, float] | None, str]:
+    """Like _compute_insert_svg_position but also returns which method was used."""
+    # Method 1: Centroid from renderable virtual entities
+    POSITION_TYPES = {
+        "LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC",
+        "ELLIPSE", "SPLINE", "TEXT", "MTEXT", "POINT",
+    }
     try:
         pts_x: list[float] = []
         pts_y: list[float] = []
         count = 0
         for ve in entity.virtual_entities():
             count += 1
-            if count > 200:  # Limit to prevent slowness on huge blocks
+            if count > 500:
                 break
+            vtype = ve.dxftype()
+            if vtype not in POSITION_TYPES:
+                continue
             try:
                 dxf = ve.dxf
-                if hasattr(dxf, 'insert'):
-                    pts_x.append(dxf.insert.x)
-                    pts_y.append(-dxf.insert.y)
-                elif hasattr(dxf, 'location'):
-                    pts_x.append(dxf.location.x)
-                    pts_y.append(-dxf.location.y)
-                elif hasattr(dxf, 'center'):
-                    pts_x.append(dxf.center.x)
-                    pts_y.append(-dxf.center.y)
-                elif hasattr(dxf, 'start'):
+                if vtype == "LINE":
+                    pts_x.append(dxf.start.x); pts_y.append(-dxf.start.y)
+                elif vtype in ("CIRCLE", "ARC"):
+                    pts_x.append(dxf.center.x); pts_y.append(-dxf.center.y)
+                elif vtype in ("TEXT", "MTEXT"):
+                    pts_x.append(dxf.insert.x); pts_y.append(-dxf.insert.y)
+                elif vtype == "POINT":
+                    pts_x.append(dxf.location.x); pts_y.append(-dxf.location.y)
+                elif vtype in ("ELLIPSE", "SPLINE"):
+                    if hasattr(dxf, 'center'):
+                        pts_x.append(dxf.center.x); pts_y.append(-dxf.center.y)
+                elif vtype in ("LWPOLYLINE", "POLYLINE"):
+                    try:
+                        if vtype == "LWPOLYLINE":
+                            points = list(ve.get_points(format="xy"))
+                        else:
+                            points = [(v.dxf.location.x, v.dxf.location.y) for v in ve.vertices]
+                        if points:
+                            pts_x.append(points[0][0]); pts_y.append(-points[0][1])
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+        if pts_x and pts_y:
+            cx = (min(pts_x) + max(pts_x)) / 2
+            cy = (min(pts_y) + max(pts_y)) / 2
+            return (round(cx, 2), round(cy, 2)), "renderable_geom"
+    except Exception:
+        pass
+
+    # Method 2: ATTRIB instances (WCS coordinates)
+    try:
+        if hasattr(entity, 'attribs'):
+            attrib_x: list[float] = []
+            attrib_y: list[float] = []
+            for attrib in entity.attribs:
+                try:
+                    attrib_x.append(attrib.dxf.insert.x)
+                    attrib_y.append(-attrib.dxf.insert.y)
+                except Exception:
+                    continue
+            if attrib_x and attrib_y:
+                cx = (min(attrib_x) + max(attrib_x)) / 2
+                cy = (min(attrib_y) + max(attrib_y)) / 2
+                return (round(cx, 2), round(cy, 2)), "attrib_wcs"
+    except Exception:
+        pass
+
+    # Method 3: Base_point-adjusted insertion point
+    pos = _get_adjusted_insert_position(entity, block_name, doc)
+    return pos, "base_point_adj"
+
+
+def _compute_insert_svg_position(entity, block_name: str, doc) -> tuple[float, float] | None:
+    """Compute the SVG-space (x, -y) position of an INSERT entity.
+
+    Strategy:
+    1. virtual_entities centroid from RENDERABLE types only (LINE, CIRCLE, etc.)
+       These are correctly transformed to WCS by ezdxf.
+       EXCLUDES ATTDEF entities which stay in block-local space.
+    2. ATTRIB instances attached to the INSERT (these ARE in WCS)
+    3. Base_point-adjusted insertion point as last resort
+    """
+    # Method 1: Centroid from renderable virtual entities only
+    POSITION_TYPES = {
+        "LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC",
+        "ELLIPSE", "SPLINE", "TEXT", "MTEXT", "POINT",
+    }
+    try:
+        pts_x: list[float] = []
+        pts_y: list[float] = []
+        count = 0
+        for ve in entity.virtual_entities():
+            count += 1
+            if count > 500:
+                break
+            vtype = ve.dxftype()
+            if vtype not in POSITION_TYPES:
+                continue  # Skip ATTDEF, ATTRIB from virtual_entities (block-local coords)
+            try:
+                dxf = ve.dxf
+                if vtype == "LINE":
                     pts_x.append(dxf.start.x)
                     pts_y.append(-dxf.start.y)
+                elif vtype in ("CIRCLE", "ARC"):
+                    pts_x.append(dxf.center.x)
+                    pts_y.append(-dxf.center.y)
+                elif vtype in ("TEXT", "MTEXT"):
+                    pts_x.append(dxf.insert.x)
+                    pts_y.append(-dxf.insert.y)
+                elif vtype == "POINT":
+                    pts_x.append(dxf.location.x)
+                    pts_y.append(-dxf.location.y)
+                elif vtype in ("ELLIPSE", "SPLINE"):
+                    if hasattr(dxf, 'center'):
+                        pts_x.append(dxf.center.x)
+                        pts_y.append(-dxf.center.y)
+                elif vtype in ("LWPOLYLINE", "POLYLINE"):
+                    try:
+                        if vtype == "LWPOLYLINE":
+                            points = list(ve.get_points(format="xy"))
+                        else:
+                            points = [(v.dxf.location.x, v.dxf.location.y) for v in ve.vertices]
+                        if points:
+                            pts_x.append(points[0][0])
+                            pts_y.append(-points[0][1])
+                    except Exception:
+                        pass
             except Exception:
                 continue
         if pts_x and pts_y:
@@ -331,7 +461,27 @@ def _compute_insert_svg_position(entity, block_name: str, doc) -> tuple[float, f
     except Exception:
         pass
 
-    # Method 2: Base_point-adjusted insertion point
+    # Method 2: ATTRIB instances attached to the INSERT entity
+    # ATTRIBs (unlike ATTDEFs from virtual_entities) have WCS coordinates
+    # that are unique per INSERT instance
+    try:
+        if hasattr(entity, 'attribs'):
+            attrib_x: list[float] = []
+            attrib_y: list[float] = []
+            for attrib in entity.attribs:
+                try:
+                    attrib_x.append(attrib.dxf.insert.x)
+                    attrib_y.append(-attrib.dxf.insert.y)
+                except Exception:
+                    continue
+            if attrib_x and attrib_y:
+                cx = (min(attrib_x) + max(attrib_x)) / 2
+                cy = (min(attrib_y) + max(attrib_y)) / 2
+                return (round(cx, 2), round(cy, 2))
+    except Exception:
+        pass
+
+    # Method 3: Base_point-adjusted insertion point
     return _get_adjusted_insert_position(entity, block_name, doc)
 
 
