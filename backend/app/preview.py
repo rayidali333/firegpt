@@ -300,20 +300,29 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
         return
 
     # ── Direct scan: find target INSERTs in modelspace ──
+    # Uses both exact matching and XREF-prefix fuzzy matching.
+    # Also handles MINSERT entities (arrayed block insertions).
     method_stats: dict[str, dict[str, int]] = {}
     found = 0
+    xref_matched = 0
     for entity in msp:
-        if entity.dxftype() != "INSERT":
+        if entity.dxftype() not in ("INSERT", "MINSERT"):
             continue
         block_name = entity.dxf.name
-        if block_name not in target_blocks:
-            continue
+        if block_name in target_blocks:
+            matched_name = block_name
+        else:
+            # Fuzzy match: handles XREF-prefixed names (XREFNAME$0$TARGETBLOCK)
+            matched_name = _match_target_block(block_name, target_blocks)
+            if matched_name is None:
+                continue
+            xref_matched += 1
 
         pos, method = _compute_insert_svg_position_debug(entity, block_name, doc)
         if pos:
-            insert_positions.setdefault(block_name, []).append(pos)
-            method_stats.setdefault(block_name, {})
-            method_stats[block_name][method] = method_stats[block_name].get(method, 0) + 1
+            insert_positions.setdefault(matched_name, []).append(pos)
+            method_stats.setdefault(matched_name, {})
+            method_stats[matched_name][method] = method_stats[matched_name].get(method, 0) + 1
             found += 1
 
     for bn, methods in method_stats.items():
@@ -327,7 +336,33 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
             debug.append(f"  {bn[:50]}: 0 positions (NO METHOD WORKED)")
 
     logger.info(f"Direct scan: found {found} positions, "
-                f"{sum(1 for b in target_blocks if b in insert_positions)} block types")
+                f"{sum(1 for b in target_blocks if b in insert_positions)} block types"
+                f"{f', {xref_matched} XREF-prefix matches' if xref_matched else ''}")
+
+    # ── Diagnostic: find fire-alarm-keyword INSERTs in modelspace that weren't matched ──
+    _FA_KEYWORDS = {"DETECTOR", "SMOKE", "HEAT", "SPEAKER", "STROBE", "SIREN",
+                    "HORN", "PULL STATION", "MANUAL STATION", "MONITOR MODULE",
+                    "CONTROL MODULE", "FIRE ALARM"}
+    unmatched_fa: dict[str, list] = {}
+    for entity in msp:
+        if entity.dxftype() not in ("INSERT", "MINSERT"):
+            continue
+        bn = entity.dxf.name
+        if bn in all_target_blocks or bn in insert_positions:
+            continue
+        bn_upper = bn.upper()
+        if any(kw in bn_upper for kw in _FA_KEYWORDS):
+            if bn not in unmatched_fa:
+                try:
+                    x, y = entity.dxf.insert.x, entity.dxf.insert.y
+                    unmatched_fa[bn] = [0, x, y]
+                except Exception:
+                    unmatched_fa[bn] = [0, 0, 0]
+            unmatched_fa[bn][0] += 1
+    if unmatched_fa:
+        debug.append("Unmatched fire-alarm INSERTs in modelspace:")
+        for bn, (cnt, sx, sy) in sorted(unmatched_fa.items(), key=lambda x: -x[1][0])[:10]:
+            debug.append(f"  {bn[:70]}: {cnt} at sample=({sx:.1f}, {sy:.1f})")
 
     # ── Nested scan: find target INSERTs inside container blocks (XREFs) ──
     _collect_nested_symbol_positions(doc, all_target_blocks, insert_positions, debug)
@@ -338,10 +373,17 @@ def _strip_xref_prefix(name: str) -> str:
 
     AutoCAD renames blocks when binding XREFs: XREFNAME$0$ORIGINAL_NAME.
     Multiple binding levels produce: OUTER$0$INNER$0$NAME.
+    ODA File Converter may use other formats: XREF|NAME, XREF`NAME.
     """
+    # AutoCAD standard: last $0$ separator
     idx = name.rfind('$0$')
     if idx >= 0:
         return name[idx + 3:]
+    # ODA/other converters
+    for sep in ('|', '`'):
+        idx = name.rfind(sep)
+        if idx > 0:
+            return name[idx + 1:]
     return name
 
 
@@ -349,6 +391,9 @@ def _match_target_block(child_name: str, all_target_blocks: set[str]) -> str | N
     """Match an INSERT block name against target blocks, handling XREF prefixes.
 
     Returns the matched target block name, or None if no match.
+    Handles multiple XREF binding formats:
+    - AutoCAD: XREFNAME$0$ORIGINAL_NAME (possibly multi-level)
+    - ODA/other: XREFNAME|ORIGINAL_NAME, XREFNAME`ORIGINAL_NAME
     """
     # Exact match
     if child_name in all_target_blocks:
@@ -359,12 +404,35 @@ def _match_target_block(child_name: str, all_target_blocks: set[str]) -> str | N
     if stripped != child_name and stripped in all_target_blocks:
         return stripped
 
+    # Try all $0$ split positions (multi-level XREF: A$0$B$0$C)
+    if '$0$' in child_name:
+        parts = child_name.split('$0$')
+        for i in range(1, len(parts)):
+            suffix = '$0$'.join(parts[i:])
+            if suffix in all_target_blocks:
+                return suffix
+
+    # Try other common XREF separator formats (ODA, BricsCAD, etc.)
+    for sep in ('|', '`', '$'):
+        idx = child_name.rfind(sep)
+        if idx > 0:
+            suffix = child_name[idx + len(sep):]
+            if suffix in all_target_blocks:
+                return suffix
+
+    # Case-insensitive match after stripping prefix
+    if stripped != child_name:
+        stripped_upper = stripped.upper()
+        for target in all_target_blocks:
+            if target.upper() == stripped_upper:
+                return target
+
     # Check if any target name is a suffix of the child name (handles
     # multi-level XREF prefixes or unusual naming)
     for target in all_target_blocks:
         if child_name.endswith(target) and len(child_name) > len(target):
-            sep = child_name[-(len(target) + 1)]
-            if sep in ('$', '_', '-'):
+            sep_char = child_name[-(len(target) + 1)]
+            if sep_char in ('$', '_', '-', '|', '`'):
                 return target
 
     return None
@@ -401,7 +469,7 @@ def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
         if bn in all_target_blocks:
             continue
         for ent in block:
-            if ent.dxftype() != "INSERT":
+            if ent.dxftype() not in ("INSERT", "MINSERT"):
                 continue
             child_name = ent.dxf.name
             matched = _match_target_block(child_name, all_target_blocks)
@@ -431,6 +499,46 @@ def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
                          f"Blocks with INSERTs: {', '.join(f'{n[:40]}({c})' for n, c in insert_blocks[:5])}")
         else:
             debug.append("Nested scan: no container blocks found (no blocks contain INSERT entities)")
+
+        # Enhanced diagnostic: check if XREF blocks contain fire-alarm-keyword INSERTs
+        _FA_KW_NESTED = {"DETECTOR", "SMOKE", "HEAT", "SPEAKER", "STROBE", "SIREN",
+                         "HORN", "PULL", "MANUAL", "MONITOR", "FIRE ALARM", "MODULE"}
+        fa_in_blocks = False
+        for block in doc.blocks:
+            bn = block.name
+            if any(bn.startswith(p) for p in SKIP_PREFIXES):
+                continue
+            fa_inserts: dict[str, int] = {}
+            for e in block:
+                if e.dxftype() != "INSERT":
+                    continue
+                cn = e.dxf.name
+                cn_upper = cn.upper()
+                if any(kw in cn_upper for kw in _FA_KW_NESTED):
+                    fa_inserts[cn] = fa_inserts.get(cn, 0) + 1
+            if fa_inserts:
+                fa_in_blocks = True
+                debug.append(f"  Block '{bn[:50]}' has fire-alarm INSERTs:")
+                for n, c in sorted(fa_inserts.items(), key=lambda x: -x[1])[:5]:
+                    debug.append(f"    {n[:70]}: {c}")
+        if not fa_in_blocks:
+            debug.append("  No fire-alarm-keyword INSERTs found in ANY block definition")
+
+            # Last resort: dump ALL unique INSERT names from top XREF blocks
+            for bn, cnt in insert_blocks[:3]:
+                try:
+                    blk = doc.blocks.get(bn)
+                    if blk:
+                        sample_names: dict[str, int] = {}
+                        for e in blk:
+                            if e.dxftype() == "INSERT":
+                                sample_names[e.dxf.name] = sample_names.get(e.dxf.name, 0) + 1
+                        top_names = sorted(sample_names.items(), key=lambda x: -x[1])[:8]
+                        debug.append(f"  Block '{bn[:40]}' top INSERT names:")
+                        for n, c in top_names:
+                            debug.append(f"    {n[:70]}: {c}")
+                except Exception:
+                    pass
         return
 
     # Step 2: Find higher-level containers (blocks that contain the direct containers)
@@ -448,7 +556,7 @@ def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
             if bn in reachable or bn in all_target_blocks:
                 continue
             for ent in block:
-                if ent.dxftype() != "INSERT" or ent.dxf.name not in reachable:
+                if ent.dxftype() not in ("INSERT", "MINSERT") or ent.dxf.name not in reachable:
                     continue
                 try:
                     container_links.setdefault(bn, []).append((
@@ -481,7 +589,7 @@ def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
 
     nested_count = 0
     for entity in msp:
-        if entity.dxftype() != "INSERT":
+        if entity.dxftype() not in ("INSERT", "MINSERT"):
             continue
         bn = entity.dxf.name
         if bn not in reachable:
