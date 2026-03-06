@@ -296,32 +296,58 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
 def _compute_insert_svg_position(entity, block_name: str, doc) -> tuple[float, float] | None:
     """Compute the SVG-space (x, -y) position of an INSERT entity.
 
-    Tries virtual_entities centroid first (most accurate), then falls back
-    to base_point-adjusted insertion point.
+    Strategy:
+    1. virtual_entities centroid from RENDERABLE types only (LINE, CIRCLE, etc.)
+       These are correctly transformed to WCS by ezdxf.
+       EXCLUDES ATTDEF entities which stay in block-local space.
+    2. ATTRIB instances attached to the INSERT (these ARE in WCS)
+    3. Base_point-adjusted insertion point as last resort
     """
-    # Method 1: Get centroid from virtual_entities expansion
+    # Method 1: Centroid from renderable virtual entities only
+    POSITION_TYPES = {
+        "LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC",
+        "ELLIPSE", "SPLINE", "TEXT", "MTEXT", "POINT",
+    }
     try:
         pts_x: list[float] = []
         pts_y: list[float] = []
         count = 0
         for ve in entity.virtual_entities():
             count += 1
-            if count > 200:  # Limit to prevent slowness on huge blocks
+            if count > 500:
                 break
+            vtype = ve.dxftype()
+            if vtype not in POSITION_TYPES:
+                continue  # Skip ATTDEF, ATTRIB from virtual_entities (block-local coords)
             try:
                 dxf = ve.dxf
-                if hasattr(dxf, 'insert'):
-                    pts_x.append(dxf.insert.x)
-                    pts_y.append(-dxf.insert.y)
-                elif hasattr(dxf, 'location'):
-                    pts_x.append(dxf.location.x)
-                    pts_y.append(-dxf.location.y)
-                elif hasattr(dxf, 'center'):
-                    pts_x.append(dxf.center.x)
-                    pts_y.append(-dxf.center.y)
-                elif hasattr(dxf, 'start'):
+                if vtype == "LINE":
                     pts_x.append(dxf.start.x)
                     pts_y.append(-dxf.start.y)
+                elif vtype in ("CIRCLE", "ARC"):
+                    pts_x.append(dxf.center.x)
+                    pts_y.append(-dxf.center.y)
+                elif vtype in ("TEXT", "MTEXT"):
+                    pts_x.append(dxf.insert.x)
+                    pts_y.append(-dxf.insert.y)
+                elif vtype == "POINT":
+                    pts_x.append(dxf.location.x)
+                    pts_y.append(-dxf.location.y)
+                elif vtype in ("ELLIPSE", "SPLINE"):
+                    if hasattr(dxf, 'center'):
+                        pts_x.append(dxf.center.x)
+                        pts_y.append(-dxf.center.y)
+                elif vtype in ("LWPOLYLINE", "POLYLINE"):
+                    try:
+                        if vtype == "LWPOLYLINE":
+                            points = list(ve.get_points(format="xy"))
+                        else:
+                            points = [(v.dxf.location.x, v.dxf.location.y) for v in ve.vertices]
+                        if points:
+                            pts_x.append(points[0][0])
+                            pts_y.append(-points[0][1])
+                    except Exception:
+                        pass
             except Exception:
                 continue
         if pts_x and pts_y:
@@ -331,7 +357,27 @@ def _compute_insert_svg_position(entity, block_name: str, doc) -> tuple[float, f
     except Exception:
         pass
 
-    # Method 2: Base_point-adjusted insertion point
+    # Method 2: ATTRIB instances attached to the INSERT entity
+    # ATTRIBs (unlike ATTDEFs from virtual_entities) have WCS coordinates
+    # that are unique per INSERT instance
+    try:
+        if hasattr(entity, 'attribs'):
+            attrib_x: list[float] = []
+            attrib_y: list[float] = []
+            for attrib in entity.attribs:
+                try:
+                    attrib_x.append(attrib.dxf.insert.x)
+                    attrib_y.append(-attrib.dxf.insert.y)
+                except Exception:
+                    continue
+            if attrib_x and attrib_y:
+                cx = (min(attrib_x) + max(attrib_x)) / 2
+                cy = (min(attrib_y) + max(attrib_y)) / 2
+                return (round(cx, 2), round(cy, 2))
+    except Exception:
+        pass
+
+    # Method 3: Base_point-adjusted insertion point
     return _get_adjusted_insert_position(entity, block_name, doc)
 
 
