@@ -218,6 +218,13 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     logger.info(f"Preview: {len(insert_positions)} block types, {total_inserts} total INSERT positions, "
                 f"mapped {len(symbol_svg_positions)} symbol types")
 
+    # ── Fix-up: correct XREF coordinate offset ──
+    # Some drawings place fire alarm symbols near the DXF origin while
+    # architectural XREFs render the building at a large coordinate offset.
+    # This detects the pattern and shifts out-of-bounds positions to align.
+    _fixup_coordinate_offset(symbol_svg_positions, vb_x, vb_y, vb_w, vb_h,
+                             position_debug)
+
     # Add per-symbol mapping debug info
     for sym in symbols:
         sp = symbol_svg_positions.get(sym.block_name)
@@ -517,6 +524,100 @@ def _apply_insert_transform(cx: float, cy: float,
         rx, ry = slx, sly
 
     return tx + rx, ty + ry
+
+
+def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
+                              vb_x: float, vb_y: float,
+                              vb_w: float, vb_h: float,
+                              debug: list[str]):
+    """Fix symbol positions systematically offset from the viewBox.
+
+    Common in drawings where fire alarm symbols are placed near the DXF origin
+    while architectural XREFs render the building at a large coordinate offset.
+    Detects this per-dimension and shifts out-of-bounds positions to align.
+    """
+    if not symbol_positions:
+        return
+
+    # Classify all positions as in-bounds or out-of-bounds
+    in_bounds: list[tuple[float, float]] = []
+    out_bounds: list[tuple[float, float]] = []
+
+    for positions in symbol_positions.values():
+        for x, y in positions:
+            if vb_x <= x <= vb_x + vb_w and vb_y <= y <= vb_y + vb_h:
+                in_bounds.append((x, y))
+            else:
+                out_bounds.append((x, y))
+
+    total = len(in_bounds) + len(out_bounds)
+    if total == 0 or len(out_bounds) == 0:
+        return
+
+    out_ratio = len(out_bounds) / total
+    if out_ratio < 0.15:
+        return  # Only a few outliers, not a systematic offset
+
+    # Compute per-dimension offset.
+    # Only shift a dimension if the out-of-bounds centroid is outside the viewBox.
+    out_xs = [x for x, _ in out_bounds]
+    out_ys = [y for _, y in out_bounds]
+    out_cx = sum(out_xs) / len(out_xs)
+    out_cy = sum(out_ys) / len(out_ys)
+
+    # Determine anchor: use in-bounds centroid if available, else viewBox center
+    if in_bounds:
+        anchor_x = sum(x for x, _ in in_bounds) / len(in_bounds)
+        anchor_y = sum(y for _, y in in_bounds) / len(in_bounds)
+    else:
+        anchor_x = vb_x + vb_w / 2
+        anchor_y = vb_y + vb_h / 2
+
+    # X offset: only apply if out-of-bounds centroid X is outside viewBox
+    offset_x = 0.0
+    if out_cx < vb_x or out_cx > vb_x + vb_w:
+        offset_x = anchor_x - out_cx
+
+    # Y offset: only apply if out-of-bounds centroid Y is outside viewBox
+    offset_y = 0.0
+    if out_cy < vb_y or out_cy > vb_y + vb_h:
+        offset_y = anchor_y - out_cy
+
+    if abs(offset_x) < 100 and abs(offset_y) < 100:
+        return  # Offset too small to matter
+
+    # Validate: check that applying this offset brings most out-of-bounds
+    # positions into (or near) the viewBox. Use 10% margin for tolerance.
+    margin_x = vb_w * 0.1
+    margin_y = vb_h * 0.1
+    test_in = sum(
+        1 for x, y in out_bounds
+        if (vb_x - margin_x <= x + offset_x <= vb_x + vb_w + margin_x and
+            vb_y - margin_y <= y + offset_y <= vb_y + vb_h + margin_y)
+    )
+
+    if test_in < len(out_bounds) * 0.5:
+        debug.append(f"Coordinate offset fix: offset ({offset_x:.0f}, {offset_y:.0f}) "
+                     f"only fixes {test_in}/{len(out_bounds)}, skipping")
+        return
+
+    # Apply offset to out-of-bounds positions
+    fixed = 0
+    for block_name, positions in symbol_positions.items():
+        for i, pos in enumerate(positions):
+            x, y = pos[0], pos[1]
+            if vb_x <= x <= vb_x + vb_w and vb_y <= y <= vb_y + vb_h:
+                continue  # Already in bounds
+
+            new_x = x + offset_x
+            new_y = y + offset_y
+            positions[i] = [round(new_x, 2), round(new_y, 2)]
+            fixed += 1
+
+    logger.info(f"Coordinate offset fix: shifted {fixed}/{len(out_bounds)} positions "
+                f"by ({offset_x:.0f}, {offset_y:.0f})")
+    debug.append(f"Coordinate offset fix: shifted {fixed}/{len(out_bounds)} positions "
+                 f"by ({offset_x:.0f}, {offset_y:.0f})")
 
 
 def _compute_insert_svg_position_debug(entity, block_name: str, doc) -> tuple[tuple[float, float] | None, str]:
