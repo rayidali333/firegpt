@@ -207,7 +207,8 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
                     unique.append([p[0], p[1]])
             symbol_svg_positions[sym.block_name] = unique
 
-    logger.info(f"Preview: {len(insert_positions)} block types with positions, "
+    total_inserts = sum(len(v) for v in insert_positions.values())
+    logger.info(f"Preview: {len(insert_positions)} block types, {total_inserts} total INSERT positions, "
                 f"mapped {len(symbol_svg_positions)} symbol types")
 
     return {
@@ -352,11 +353,23 @@ def _handle_insert(entity, elements: list, xs: list, ys: list,
         # Add local bounds to global bounds
         xs.extend(local_xs)
         ys.extend(local_ys)
-        # Record SVG-space centroid for this INSERT (depth 0 = top-level modelspace)
-        if insert_positions is not None and depth == 0 and local_xs and local_ys:
-            cx = (min(local_xs) + max(local_xs)) / 2
-            cy = (min(local_ys) + max(local_ys)) / 2
-            insert_positions.setdefault(block_name, []).append((round(cx, 2), round(cy, 2)))
+        # Record SVG-space position for this INSERT (depth 0 = top-level modelspace)
+        if insert_positions is not None and depth == 0:
+            if local_xs and local_ys:
+                # Use centroid of expanded geometry
+                cx = (min(local_xs) + max(local_xs)) / 2
+                cy = (min(local_ys) + max(local_ys)) / 2
+                insert_positions.setdefault(block_name, []).append((round(cx, 2), round(cy, 2)))
+            else:
+                # virtual_entities() "succeeded" but produced no renderable geometry
+                # (common for blocks with only ATTRIB/ATTDEF entities).
+                # Fall back to the raw insertion point in SVG space.
+                try:
+                    ix = entity.dxf.insert.x
+                    iy = -entity.dxf.insert.y
+                    insert_positions.setdefault(block_name, []).append((round(ix, 2), round(iy, 2)))
+                except Exception:
+                    pass
         return
 
     # Strategy 2: Manual block definition expansion with SVG transform.
