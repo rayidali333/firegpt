@@ -264,18 +264,19 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
     on complex architectural drawings is often reached before fire alarm symbol
     INSERTs are processed.
 
-    Strategy for computing SVG-space position:
-    1. Try virtual_entities() to get actual rendered geometry centroid
-    2. Fall back to ATTRIB instances (WCS coordinates)
-    3. Fall back to base_point-adjusted insertion point
+    Two scanning strategies:
+    1. Direct scan: find target INSERTs directly in modelspace
+    2. Nested scan: find target INSERTs inside container blocks (XREFs, etc.)
+       and transform their positions to WCS
     """
-    # Build set of raw block names we need positions for
-    target_blocks: set[str] = set()
+    # Build full set of raw block names we need positions for
+    all_target_blocks: set[str] = set()
     for sym in symbols:
-        target_blocks.add(sym.block_name)
+        all_target_blocks.add(sym.block_name)
         for v in (sym.block_variants or []):
-            target_blocks.add(v)
+            all_target_blocks.add(v)
 
+    target_blocks = all_target_blocks.copy()
     already_have = target_blocks & set(insert_positions.keys())
     target_blocks -= already_have
 
@@ -291,8 +292,8 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
         debug.append("ERROR: Cannot access modelspace for 2nd pass")
         return
 
-    # Track which method succeeded for each block type
-    method_stats: dict[str, dict[str, int]] = {}  # block_name → {method → count}
+    # ── Direct scan: find target INSERTs in modelspace ──
+    method_stats: dict[str, dict[str, int]] = {}
     found = 0
     for entity in msp:
         if entity.dxftype() != "INSERT":
@@ -308,20 +309,214 @@ def _collect_symbol_positions(doc, symbols: list[SymbolInfo],
             method_stats[block_name][method] = method_stats[block_name].get(method, 0) + 1
             found += 1
 
-    # Build debug info per block type
     for bn, methods in method_stats.items():
         total = sum(methods.values())
         methods_str = ", ".join(f"{m}:{c}" for m, c in methods.items())
         sample = insert_positions[bn][0] if bn in insert_positions else "N/A"
         debug.append(f"  {bn[:50]}: {total} positions [{methods_str}] sample={sample}")
 
-    # Report blocks with zero positions
     for bn in target_blocks:
         if bn not in insert_positions:
             debug.append(f"  {bn[:50]}: 0 positions (NO METHOD WORKED)")
 
-    logger.info(f"Position collection: found {found} positions, "
+    logger.info(f"Direct scan: found {found} positions, "
                 f"{sum(1 for b in target_blocks if b in insert_positions)} block types")
+
+    # ── Nested scan: find target INSERTs inside container blocks (XREFs) ──
+    _collect_nested_symbol_positions(doc, all_target_blocks, insert_positions, debug)
+
+
+def _collect_nested_symbol_positions(doc, all_target_blocks: set[str],
+                                     insert_positions: dict[str, list[tuple[float, float]]],
+                                     debug: list[str]):
+    """Find fire alarm INSERTs nested inside container blocks (XREFs, etc.)
+    and compute their WCS positions.
+
+    Many DXF/DWG files place fire alarm symbols inside XREFs or other container
+    blocks. The direct modelspace scan finds INSERTs at block-local coords (near 0),
+    but the actual visible positions are at the XREF's insertion point + local offset.
+
+    This function:
+    1. Scans all block definitions for target fire alarm INSERT entities
+    2. Builds a hierarchy of container blocks
+    3. For each container found in modelspace, recursively transforms nested
+       target positions to WCS
+    """
+    SKIP_PREFIXES = ("*Model_Space", "*Paper_Space")
+
+    # Step 1: Find block definitions that directly contain target INSERTs
+    # direct_targets[container_name] = [(child_block_name, insert_x, insert_y), ...]
+    direct_targets: dict[str, list[tuple[str, float, float]]] = {}
+
+    for block in doc.blocks:
+        bn = block.name
+        if any(bn.startswith(p) for p in SKIP_PREFIXES):
+            continue
+        if bn in all_target_blocks:
+            continue
+        for ent in block:
+            if ent.dxftype() != "INSERT":
+                continue
+            child_name = ent.dxf.name
+            if child_name not in all_target_blocks:
+                continue
+            try:
+                direct_targets.setdefault(bn, []).append(
+                    (child_name, ent.dxf.insert.x, ent.dxf.insert.y))
+            except Exception:
+                pass
+
+    if not direct_targets:
+        debug.append("Nested scan: no container blocks found")
+        return
+
+    # Step 2: Find higher-level containers (blocks that contain the direct containers)
+    # This handles multi-level nesting: Outer XREF → Inner XREF → Fire alarm block
+    # container_links[outer_name] = [(inner_name, x, y, xscale, yscale, rotation), ...]
+    reachable: set[str] = set(direct_targets.keys())
+    container_links: dict[str, list[tuple[str, float, float, float, float, float]]] = {}
+
+    for _level in range(3):
+        found_new = False
+        for block in doc.blocks:
+            bn = block.name
+            if any(bn.startswith(p) for p in SKIP_PREFIXES):
+                continue
+            if bn in reachable or bn in all_target_blocks:
+                continue
+            for ent in block:
+                if ent.dxftype() != "INSERT" or ent.dxf.name not in reachable:
+                    continue
+                try:
+                    container_links.setdefault(bn, []).append((
+                        ent.dxf.name,
+                        ent.dxf.insert.x, ent.dxf.insert.y,
+                        ent.dxf.get("xscale", 1.0),
+                        ent.dxf.get("yscale", 1.0),
+                        ent.dxf.get("rotation", 0.0),
+                    ))
+                    if bn not in reachable:
+                        reachable.add(bn)
+                        found_new = True
+                except Exception:
+                    pass
+        if not found_new:
+            break
+
+    debug.append(f"Nested scan: {len(direct_targets)} direct containers, "
+                 f"{len(reachable)} total reachable blocks")
+    for cn in list(direct_targets.keys())[:5]:
+        debug.append(f"  Container '{cn[:60]}': {len(direct_targets[cn])} target INSERTs")
+
+    # Step 3: Scan modelspace for container INSERTs and resolve nested targets
+    try:
+        msp = doc.modelspace()
+    except Exception:
+        debug.append("Nested scan: ERROR cannot access modelspace")
+        return
+
+    nested_count = 0
+    for entity in msp:
+        if entity.dxftype() != "INSERT":
+            continue
+        bn = entity.dxf.name
+        if bn not in reachable:
+            continue
+
+        try:
+            tx = entity.dxf.insert.x
+            ty = entity.dxf.insert.y
+            sx = entity.dxf.get("xscale", 1.0)
+            sy = entity.dxf.get("yscale", 1.0)
+            rot = entity.dxf.get("rotation", 0.0)
+        except Exception:
+            continue
+
+        nested_count += _resolve_nested_targets(
+            doc, bn, direct_targets, container_links, insert_positions,
+            tx, ty, sx, sy, rot, depth=0)
+
+    debug.append(f"Nested scan: {nested_count} positions from nested INSERTs")
+
+
+def _resolve_nested_targets(doc, block_name: str,
+                            direct_targets: dict, container_links: dict,
+                            insert_positions: dict,
+                            tx: float, ty: float,
+                            sx: float, sy: float, rot_deg: float,
+                            depth: int) -> int:
+    """Recursively resolve target INSERT positions inside a container block."""
+    if depth > 5:
+        return 0
+
+    # Get this block's base_point
+    bp_x = bp_y = 0.0
+    try:
+        blk = doc.blocks.get(block_name)
+        if blk:
+            bp_x, bp_y = blk.base_point.x, blk.base_point.y
+    except Exception:
+        pass
+
+    count = 0
+
+    # Process direct target children in this block
+    if block_name in direct_targets:
+        for child_name, cx, cy in direct_targets[block_name]:
+            wcs_x, wcs_y = _apply_insert_transform(
+                cx, cy, tx, ty, sx, sy, rot_deg, bp_x, bp_y)
+            svg_pos = (round(wcs_x, 2), round(-wcs_y, 2))
+            insert_positions.setdefault(child_name, []).append(svg_pos)
+            count += 1
+
+    # Process container children (blocks that themselves contain targets)
+    if block_name in container_links:
+        for child_name, cx, cy, csx, csy, crot in container_links[block_name]:
+            # Transform this child container's position to WCS
+            child_wcs_x, child_wcs_y = _apply_insert_transform(
+                cx, cy, tx, ty, sx, sy, rot_deg, bp_x, bp_y)
+            # Cumulative scale and rotation
+            cum_sx = sx * csx
+            cum_sy = sy * csy
+            cum_rot = rot_deg + crot
+            # Recurse into child container
+            count += _resolve_nested_targets(
+                doc, child_name, direct_targets, container_links,
+                insert_positions,
+                child_wcs_x, child_wcs_y, cum_sx, cum_sy, cum_rot,
+                depth + 1)
+
+    return count
+
+
+def _apply_insert_transform(cx: float, cy: float,
+                            tx: float, ty: float,
+                            sx: float, sy: float,
+                            rot_deg: float,
+                            bp_x: float, bp_y: float) -> tuple[float, float]:
+    """Transform a child INSERT's local position to WCS.
+
+    WCS = parent_insert + R(rotation) * S(scale) * (child_pos - base_point)
+    """
+    # Offset from block base_point
+    lx = cx - bp_x
+    ly = cy - bp_y
+
+    # Apply scale
+    slx = lx * sx
+    sly = ly * sy
+
+    # Apply rotation
+    if abs(rot_deg) > 0.01:
+        rad = math.radians(rot_deg)
+        cos_r = math.cos(rad)
+        sin_r = math.sin(rad)
+        rx = slx * cos_r - sly * sin_r
+        ry = slx * sin_r + sly * cos_r
+    else:
+        rx, ry = slx, sly
+
+    return tx + rx, ty + ry
 
 
 def _compute_insert_svg_position_debug(entity, block_name: str, doc) -> tuple[tuple[float, float] | None, str]:
