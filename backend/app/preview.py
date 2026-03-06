@@ -273,6 +273,81 @@ def _block_has_renderable_content(block) -> bool:
     return False
 
 
+def _extract_position(entity, xs: list, ys: list):
+    """Extract position from non-renderable entity types for bounds/position tracking.
+
+    Handles ATTDEF, ATTRIB, SOLID, DIMENSION, LEADER, etc. These don't produce
+    SVG elements but have position data needed for INSERT centroid computation.
+    """
+    try:
+        dxf = entity.dxf
+        if hasattr(dxf, 'insert'):
+            xs.append(dxf.insert.x)
+            ys.append(-dxf.insert.y)
+        elif hasattr(dxf, 'location'):
+            xs.append(dxf.location.x)
+            ys.append(-dxf.location.y)
+        elif hasattr(dxf, 'center'):
+            xs.append(dxf.center.x)
+            ys.append(-dxf.center.y)
+        elif hasattr(dxf, 'start'):
+            xs.append(dxf.start.x)
+            ys.append(-dxf.start.y)
+    except Exception:
+        pass
+
+
+def _get_adjusted_insert_position(entity, block_name: str, doc) -> tuple[float, float]:
+    """Compute the SVG-space position of an INSERT entity, adjusted for block base_point.
+
+    DWG blocks often have large base_point offsets. The raw insertion point
+    (entity.dxf.insert) is NOT where the visual content appears. The actual
+    world position is: insert_point + rotation(scale(-base_point)).
+    For simple cases (no rotation, scale=1): insert_point - base_point.
+    """
+    ix = entity.dxf.insert.x
+    iy = entity.dxf.insert.y
+
+    if doc is not None:
+        try:
+            block = doc.blocks.get(block_name)
+            if block is not None:
+                base = block.base_point
+                bx, by = base.x, base.y
+                if abs(bx) > 0.01 or abs(by) > 0.01:
+                    sx = entity.dxf.get('xscale', 1.0)
+                    sy = entity.dxf.get('yscale', 1.0)
+                    rot = entity.dxf.get('rotation', 0.0)
+
+                    # Transform -base_point through scale and rotation
+                    dx = -bx * sx
+                    dy = -by * sy
+
+                    if abs(rot) > 0.01:
+                        rad = math.radians(rot)
+                        cos_r = math.cos(rad)
+                        sin_r = math.sin(rad)
+                        rdx = dx * cos_r - dy * sin_r
+                        rdy = dx * sin_r + dy * cos_r
+                        dx, dy = rdx, rdy
+
+                    ix += dx
+                    iy += dy
+        except Exception:
+            pass
+
+    return (ix, -iy)
+
+
+def _record_adjusted_insert_position(entity, block_name: str, doc, insert_positions: dict):
+    """Record the base_point-adjusted SVG position for an INSERT entity."""
+    try:
+        adj_x, adj_y = _get_adjusted_insert_position(entity, block_name, doc)
+        insert_positions.setdefault(block_name, []).append((round(adj_x, 2), round(adj_y, 2)))
+    except Exception:
+        pass
+
+
 def _process_entity(
     entity, elements: list, xs: list, ys: list,
     counter: list, depth: int = 0, doc=None,
@@ -317,6 +392,11 @@ def _process_entity(
             ys.append(-y)
         except Exception:
             pass
+    else:
+        # Non-renderable entity types (ATTDEF, ATTRIB, SOLID, HATCH, DIMENSION, etc.)
+        # Don't create SVG elements, but extract position for INSERT centroid tracking.
+        # Critical for fire alarm symbol blocks that contain primarily ATTDEF entities.
+        _extract_position(entity, xs, ys)
 
 
 def _handle_insert(entity, elements: list, xs: list, ys: list,
@@ -361,15 +441,10 @@ def _handle_insert(entity, elements: list, xs: list, ys: list,
                 cy = (min(local_ys) + max(local_ys)) / 2
                 insert_positions.setdefault(block_name, []).append((round(cx, 2), round(cy, 2)))
             else:
-                # virtual_entities() "succeeded" but produced no renderable geometry
-                # (common for blocks with only ATTRIB/ATTDEF entities).
-                # Fall back to the raw insertion point in SVG space.
-                try:
-                    ix = entity.dxf.insert.x
-                    iy = -entity.dxf.insert.y
-                    insert_positions.setdefault(block_name, []).append((round(ix, 2), round(iy, 2)))
-                except Exception:
-                    pass
+                # virtual_entities() "succeeded" but produced no geometry at all.
+                # Use insertion point adjusted by block base_point to get correct
+                # world-space position. DWG blocks often have large base_point offsets.
+                _record_adjusted_insert_position(entity, block_name, doc, insert_positions)
         return
 
     # Strategy 2: Manual block definition expansion with SVG transform.
@@ -383,25 +458,22 @@ def _handle_insert(entity, elements: list, xs: list, ys: list,
                 expanded = _manual_expand_block(
                     entity, block, elements, xs, ys, counter, depth, doc
                 )
-                # For manual expansion, SVG position is the translate point
                 if expanded and insert_positions is not None and depth == 0:
-                    svg_x = entity.dxf.insert.x
-                    svg_y = -entity.dxf.insert.y
-                    insert_positions.setdefault(block_name, []).append(
-                        (round(svg_x, 2), round(svg_y, 2)))
+                    # Use base_point-adjusted position (not raw insert point)
+                    _record_adjusted_insert_position(entity, block_name, doc, insert_positions)
         except Exception:
             pass
 
     # Last resort: record insertion point for bounds calculation
     if not expanded:
         try:
-            ix = entity.dxf.insert.x
-            iy = -entity.dxf.insert.y
-            xs.append(ix)
-            ys.append(iy)
+            # Use base_point-adjusted position for correct world coordinates
+            adj_x, adj_y = _get_adjusted_insert_position(entity, block_name, doc)
+            xs.append(adj_x)
+            ys.append(adj_y)
             if insert_positions is not None and depth == 0:
                 insert_positions.setdefault(block_name, []).append(
-                    (round(ix, 2), round(iy, 2)))
+                    (round(adj_x, 2), round(adj_y, 2)))
         except Exception:
             pass
 
