@@ -106,6 +106,7 @@ export default function UploadZone({ onUpload, uploading, error }: Props) {
               />
             </div>
             <p className="preview-progress-stage">{stage}</p>
+            <p className="preview-progress-hint">Large drawings may take up to a minute</p>
           </div>
         ) : (
           <>
