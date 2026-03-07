@@ -5,7 +5,6 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Claude AI](https://img.shields.io/badge/Claude-Sonnet_4-D97757?logo=anthropic&logoColor=white)](https://anthropic.com)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docker.com)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **Talk to your drawing files.** Upload DXF/DWG construction drawings, automatically detect and count all fire alarm symbols, visualize them on an interactive floor plan, and chat with the extracted data using AI.
 
@@ -151,6 +150,3 @@ Plus 48 more patterns. Unknown block names are sent to Claude AI for classificat
 | `MAX_FILE_SIZE_MB` | No | Max upload size in MB (default: 50) |
 | `PORT` | No | Server port (default: 8000) |
 
-## License
-
-MIT
