@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useMemo } from "react";
+import React, { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import { ZoomIn, ZoomOut, Maximize2, Loader } from "lucide-react";
 import { DrawingPreview, SymbolInfo } from "../types";
 
@@ -94,12 +94,60 @@ export default function DrawingViewer({
       .filter((s) => s.svgPositions.length > 0);
   }, [symbols, preview]);
 
+  // Simulated progress for loading state
+  const [loadProgress, setLoadProgress] = useState(0);
+  const [loadStage, setLoadStage] = useState("");
+
+  useEffect(() => {
+    if (!loading) {
+      setLoadProgress(0);
+      setLoadStage("");
+      return;
+    }
+    setLoadProgress(0);
+    setLoadStage("Reading DXF geometry...");
+
+    const stages = [
+      { at: 15, label: "Parsing lines and polylines..." },
+      { at: 30, label: "Processing circles and arcs..." },
+      { at: 45, label: "Rendering floor plan to SVG..." },
+      { at: 60, label: "Scanning symbol positions..." },
+      { at: 75, label: "Matching symbols to floor plan..." },
+      { at: 85, label: "Applying coordinate transforms..." },
+      { at: 92, label: "Generating marker overlay..." },
+    ];
+
+    let progress = 0;
+    const interval = setInterval(() => {
+      // Slow down as we approach 95% (never reaches 100 until actually done)
+      const remaining = 95 - progress;
+      const increment = Math.max(0.3, remaining * 0.04);
+      progress = Math.min(95, progress + increment);
+      setLoadProgress(progress);
+
+      const stage = [...stages].reverse().find((s) => progress >= s.at);
+      if (stage) setLoadStage(stage.label);
+    }, 200);
+
+    return () => clearInterval(interval);
+  }, [loading]);
+
   if (loading) {
     return (
       <div className="drawing-viewer">
         <div className="drawing-viewer-loading">
           <Loader className="spin" />
-          <p>Generating drawing preview...</p>
+          <p style={{ fontWeight: 500 }}>Generating drawing preview...</p>
+          <div className="preview-progress-bar">
+            <div
+              className="preview-progress-fill"
+              style={{ width: `${loadProgress}%` }}
+            />
+          </div>
+          <p className="preview-progress-stage">{loadStage}</p>
+          <p className="preview-progress-hint">
+            Large drawings may take up to 3 minutes
+          </p>
         </div>
       </div>
     );
