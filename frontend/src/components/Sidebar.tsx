@@ -52,7 +52,7 @@ export default function Sidebar({
             Fire<span className="sidebar-logo-accent">GPT</span>
           </span>
         </div>
-        <div className="sidebar-tagline">Fire Alarm Intelligence</div>
+        <div className="sidebar-tagline">Talk to your drawing files</div>
       </div>
 
       <div className="sidebar-section">
