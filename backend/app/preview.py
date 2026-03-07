@@ -226,8 +226,12 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
                              position_debug)
 
     # ── Recovery pass: for symbols with 0 positions after schedule removal, ──
-    # ── try raw entity.dxf.insert positions (may differ from renderable_geom ──
-    # ── centroid when block geometry is offset from the block origin). ──
+    # ── try entity.dxf.insert with OCS→WCS transform. The renderable_geom ──
+    # ── centroid can be wrong when block geometry is at large offsets from ──
+    # ── the block origin (common in Revit exports where geometry is stored ──
+    # ── at project WCS coordinates inside the block definition). ──
+    # ── Also handles entities with extrusion (0,0,-1) where OCS X differs ──
+    # ── from WCS X (X gets negated). ──
     missing_symbols = [sym for sym in symbols if sym.block_name not in symbol_svg_positions]
     if missing_symbols:
         missing_blocks: set[str] = set()
@@ -239,7 +243,8 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
         try:
             msp = doc.modelspace()
             raw_positions: dict[str, list[list[float]]] = {}
-            raw_samples: dict[str, tuple[float, float, float, float]] = {}  # block -> (raw_x, raw_y, rg_x, rg_y)
+            raw_samples: dict[str, tuple] = {}
+
             for entity in msp:
                 if entity.dxftype() not in ("INSERT", "MINSERT"):
                     continue
@@ -247,15 +252,32 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
                 if bn not in missing_blocks:
                     continue
                 try:
-                    raw_x = round(entity.dxf.insert.x, 2)
-                    raw_y = round(-entity.dxf.insert.y, 2)
-                    raw_positions.setdefault(bn, []).append([raw_x, raw_y])
-                    # Store first sample for diagnostic comparison
+                    ocs_insert = entity.dxf.insert
+
+                    # Method 1: Apply OCS→WCS transform (handles extrusion vectors)
+                    try:
+                        ocs = entity.ocs()
+                        wcs_pos = ocs.to_wcs(ocs_insert)
+                        wcs_x, wcs_y = wcs_pos.x, wcs_pos.y
+                    except Exception:
+                        wcs_x, wcs_y = ocs_insert.x, ocs_insert.y
+
+                    svg_x = round(wcs_x, 2)
+                    svg_y = round(-wcs_y, 2)
+                    raw_positions.setdefault(bn, []).append([svg_x, svg_y])
+
+                    # Store diagnostic info for first entity of each block type
                     if bn not in raw_samples:
-                        # Also get the renderable_geom position for comparison
                         rg_pos, _ = _compute_insert_svg_position_debug(entity, bn, doc)
                         rg_x, rg_y = rg_pos if rg_pos else (0.0, 0.0)
-                        raw_samples[bn] = (raw_x, raw_y, rg_x, rg_y)
+                        try:
+                            ext = entity.dxf.extrusion
+                            ext_str = f"({ext.x:.1f},{ext.y:.1f},{ext.z:.1f})"
+                        except Exception:
+                            ext_str = "(0,0,1)"
+                        raw_samples[bn] = (svg_x, svg_y, rg_x, rg_y,
+                                           round(ocs_insert.x, 2), round(ocs_insert.y, 2),
+                                           ext_str)
                 except Exception:
                     pass
 
@@ -270,23 +292,37 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
                 if not positions:
                     continue
 
-                # Filter to in-viewBox positions
+                # Try 1: Direct OCS→WCS positions in viewBox
                 in_vb = [p for p in positions
                          if vb_x <= p[0] <= vb_x + vb_w and vb_y <= p[1] <= vb_y + vb_h]
+
+                # Try 2: If direct didn't work but negated X is in viewBox range,
+                # the entities likely have extrusion (0,0,-1) that ezdxf OCS
+                # didn't fully resolve, or the DWG→DXF converter stored OCS as WCS.
+                if not in_vb and positions:
+                    negated = [[-p[0], p[1]] for p in positions]
+                    neg_in_vb = [p for p in negated
+                                 if vb_x <= p[0] <= vb_x + vb_w and vb_y <= p[1] <= vb_y + vb_h]
+                    if len(neg_in_vb) > len(in_vb):
+                        in_vb = neg_in_vb
+                        position_debug.append(
+                            f"  Recovery: {sym.label}: negated X puts positions in viewBox "
+                            f"(OCS/extrusion correction)")
+
                 if in_vb:
                     seen = set()
                     unique = []
                     for p in in_vb:
-                        key = (p[0], p[1])
+                        key = (round(p[0], 1), round(p[1], 1))
                         if key not in seen:
                             seen.add(key)
                             unique.append(p)
                     symbol_svg_positions[sym.block_name] = unique
                     position_debug.append(
-                        f"  Raw INSERT recovery: {sym.label}: {len(unique)} positions "
-                        f"(entity.dxf.insert differs from renderable_geom centroid)")
+                        f"  Recovery: {sym.label}: {len(unique)} positions recovered "
+                        f"from entity.dxf.insert (OCS→WCS)")
                 else:
-                    # Log diagnostic: raw positions vs renderable_geom
+                    # Log diagnostic
                     sample_bn = sym.block_name
                     if sample_bn not in raw_samples:
                         for v in (sym.block_variants or []):
@@ -294,16 +330,14 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
                                 sample_bn = v
                                 break
                     if sample_bn in raw_samples:
-                        rx, ry, rgx, rgy = raw_samples[sample_bn]
+                        sx, sy, rgx, rgy, ox, oy, ext_str = raw_samples[sample_bn]
                         position_debug.append(
-                            f"  Raw INSERT check {sym.label}: {len(positions)} total, 0 in viewBox. "
-                            f"raw=({rx}, {ry}) vs renderable_geom=({rgx}, {rgy})")
-                    else:
-                        position_debug.append(
-                            f"  Raw INSERT check {sym.label}: {len(positions)} total, 0 in viewBox, "
-                            f"sample={positions[0]}")
+                            f"  Recovery failed {sym.label}: {len(positions)} total, 0 in viewBox. "
+                            f"wcs=({sx},{sy}) ocs=({ox},{oy}) ext={ext_str} "
+                            f"renderable_geom=({rgx},{rgy})")
+
         except Exception as e:
-            position_debug.append(f"  Raw INSERT recovery failed: {e}")
+            position_debug.append(f"  Recovery pass failed: {e}")
 
     # Add per-symbol mapping debug info
     for sym in symbols:
