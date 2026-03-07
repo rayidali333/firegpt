@@ -146,7 +146,7 @@ export default function DrawingViewer({
           </div>
           <p className="preview-progress-stage">{loadStage}</p>
           <p className="preview-progress-hint">
-            Large drawings may take 10–30 seconds
+            Large drawings may take up to 3 minutes
           </p>
         </div>
       </div>
