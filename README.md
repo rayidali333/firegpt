@@ -146,6 +146,17 @@ The parser auto-labels common fire alarm symbols:
 
 Plus 48 more patterns. Unknown block names are sent to Claude AI for classification.
 
+## Coming Soon
+
+- **PDF Drawing Support** — upload PDF construction drawings alongside DXF/DWG
+- **Multi-page Drawing Support** — handle drawing sets with multiple sheets/pages
+- **Persistent Storage** — database-backed drawing storage across sessions
+- **Project Management** — organize multiple drawings into projects for large bids
+- **Device Schedule Comparison** — auto-compare detected symbols against spec sheets
+- **Report Generation** — export professional PDF takeoff reports with floor plan markup
+- **Team Collaboration** — share drawings and analysis with team members
+- **Batch Upload** — upload and process multiple drawings at once
+
 ## Environment Variables
 
 | Variable | Required | Description |
