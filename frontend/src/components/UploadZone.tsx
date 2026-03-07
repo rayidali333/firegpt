@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 
 interface Props {
@@ -10,6 +10,44 @@ interface Props {
 export default function UploadZone({ onUpload, uploading, error }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [progress, setProgress] = useState(0);
+  const [stage, setStage] = useState("");
+
+  useEffect(() => {
+    if (!uploading) {
+      setProgress(0);
+      setStage("");
+      return;
+    }
+    setProgress(0);
+    setStage("Reading file...");
+
+    const stages = [
+      { at: 8, label: "Uploading drawing file..." },
+      { at: 18, label: "Converting to DXF format..." },
+      { at: 30, label: "Scanning block definitions..." },
+      { at: 42, label: "Detecting INSERT entities..." },
+      { at: 52, label: "Matching known symbol patterns..." },
+      { at: 62, label: "Classifying unknown blocks with AI..." },
+      { at: 72, label: "Resolving XREF prefixes..." },
+      { at: 80, label: "Consolidating symbol variants..." },
+      { at: 88, label: "Counting devices and building summary..." },
+      { at: 93, label: "Finalizing symbol table..." },
+    ];
+
+    let p = 0;
+    const interval = setInterval(() => {
+      const remaining = 95 - p;
+      const increment = Math.max(0.25, remaining * 0.035);
+      p = Math.min(95, p + increment);
+      setProgress(p);
+
+      const s = [...stages].reverse().find((s) => p >= s.at);
+      if (s) setStage(s.label);
+    }, 200);
+
+    return () => clearInterval(interval);
+  }, [uploading]);
 
   const handleFile = useCallback(
     (file: File) => {
@@ -60,7 +98,14 @@ export default function UploadZone({ onUpload, uploading, error }: Props) {
         {uploading ? (
           <div className="upload-spinner">
             <div className="spinner" />
-            <p>Parsing drawing symbols...</p>
+            <p style={{ fontWeight: 500, marginBottom: 4 }}>Analyzing drawing...</p>
+            <div className="preview-progress-bar" style={{ width: 240 }}>
+              <div
+                className="preview-progress-fill"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <p className="preview-progress-stage">{stage}</p>
           </div>
         ) : (
           <>
