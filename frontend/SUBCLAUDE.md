@@ -2,11 +2,11 @@
 
 ## Overview
 
-React 19 + TypeScript single-page application with a retro Mac OS vintage design aesthetic. Three-panel layout: left sidebar navigation, center content area, right-side AI chat panel.
+React 19 + TypeScript single-page application with a retro Mac OS vintage design aesthetic. Three-panel layout: left sidebar navigation, center content area (tabbed), right-side AI chat panel.
 
 ## Design System
 
-### Color Palette (Retro Mac OS Warm Theme)
+### Color Palette (Warm Vintage Theme)
 - Desktop background: #C2A882 (warm tan)
 - Window background: #F2E8D5 (cream)
 - Sidebar: #E5D5BB (warm beige)
@@ -27,9 +27,12 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 | SIDEBAR  |    MAIN CONTENT            |   CHAT PANEL     |
 | 220px    |    flexible                |   340px          |
 |          |                            |                  |
-| Logo     |  Upload zone (no file)     |  "AI Assistant"  |
+| Logo     | [Symbols] [Drawing] [Analysis] tabs           |
+| Tagline  |  Upload zone (no file)     |  "AI Assistant"  |
 | Upload   |  Symbol table (file loaded)|  Messages...     |
-| Files    |                            |  [Input area]    |
+| Files    |  SVG preview (drawing tab) |  Markdown render  |
+| Views    |  Analysis log              |  [Input area]    |
+| Stats    |                            |                  |
 +----------+----------------------------+------------------+
 ```
 
@@ -41,17 +44,20 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 
 ### App.tsx
 - Root component managing all state
-- State: drawing (DrawingData|null), messages (ChatMessage[]), uploading, error
-- Three-panel layout: Sidebar | MainContent | ChatPanel
+- State: drawing, messages, uploading, error, activeTab, previewData, highlightedSymbol
+- Three-panel layout: Sidebar | MainContent (tabbed) | ChatPanel
 - Wrapped in retro window chrome (desktop > window > titlebar + content)
+- Handles bidirectional highlighting between symbol table and drawing preview
 
 ### components/Sidebar.tsx
 - Left navigation panel (220px fixed width)
-- Brand section: FireGPT logo + tagline
+- Brand section: FireGPT logo (Flame icon) + tagline "Talk to your drawing files"
 - Upload button with hidden file input (.dxf, .dwg)
-- "Your Drawings" section with file list
+- Drawings section with active file indicator
+- Views section: Symbols (with count badge), Drawing, Analysis (with count badge), Chat (with message count)
+- Bottom stats: Types count + Devices count
 - "New Drawing" reset button when file loaded
-- Props: drawing, onUpload, uploading, onReset
+- Props: drawing, onUpload, uploading, onReset, messageCount, activeTab, onTabChange
 
 ### components/Header.tsx
 - Retro window title bar (38px height)
@@ -70,30 +76,36 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 ### components/SymbolTable.tsx
 - Displays detected symbols after file upload
 - Header with "Detected Symbols" title + total count badge
-- List of symbols: label, block name (mono), count
-- Warm brown accent colors for counts
-- Empty state message if no symbols found
-- Props: symbols, total
+- Color-coded dots per symbol category
+- Confidence badges (high/medium) and source indicators (dictionary/AI)
+- Bidirectional highlighting: click row → highlights markers on drawing
+- Block variants shown for consolidated symbols
+- Props: symbols, total, onSymbolClick, highlightedSymbol
 
 ### components/ChatPanel.tsx (Cursor-style)
 - Right-side panel (340px fixed width)
 - Own header bar: "AI Assistant" title
 - Messages area with auto-scroll
 - User messages: right-aligned, copper-toned bubbles
-- Assistant messages: left-aligned, bordered bubbles
-- 4 suggestion buttons when empty
+- Assistant messages: left-aligned with full markdown rendering (tables, bold, code, lists)
+- Typing indicator during AI response
+- 4 suggestion buttons when empty (counts, cost estimate, device schedule, recommendations)
 - Textarea input with send button
 - Disabled state when no drawing loaded
-- Props: messages, onSend, disabled
+- Props: messages, onSend, disabled, loading
 
 ## API Client (api.ts)
 - `uploadDrawing(file)`: POST /api/upload with FormData
-- `chatWithDrawing(drawingId, message)`: POST /api/chat with JSON
+- `chatWithDrawing(drawingId, message, history)`: POST /api/chat with JSON
+- `getDrawingPreview(drawingId)`: GET /api/drawings/{id}/preview
+- `exportDrawingCSV(drawingId)`: GET /api/drawings/{id}/export
+- `overrideSymbol(drawingId, blockName, label, count)`: PATCH symbol override
 
 ## TypeScript Types (types.ts)
-- SymbolInfo: block_name, label, count, sample_locations
-- DrawingData: drawing_id, filename, file_type, symbols, total_symbols
+- SymbolInfo: block_name, label, count, locations, color, confidence, source, block_variants, original_count
+- DrawingData: drawing_id, filename, file_type, symbols, total_symbols, analysis, audit, xref_warnings, legend_texts
 - ChatMessage: role ("user"|"assistant"), content
+- PreviewData: svg, viewBox, width, height, symbol_positions, position_debug
 
 ## Build
 - Create React App (react-scripts)
@@ -102,9 +114,11 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 - Build output copied to backend/static for serving
 
 ## Current State
-- All components functional with retro Mac OS design
+- All components functional with retro vintage styling
 - Three-panel layout responsive (stacks on mobile)
-- Chat panel always visible, disabled until drawing uploaded
+- Tabbed content: Symbols, Drawing (SVG preview), Analysis
+- Chat panel always visible with markdown rendering and typing indicator
+- Bidirectional highlighting between symbol table and drawing preview
 - Upload works via sidebar button or drag-drop in main area
-- Symbol detection results display in sortable list
-- AI chat with suggestion prompts and auto-scroll
+- Symbol table shows confidence, source, and color-coded categories
+- AI chat with suggestion prompts, auto-scroll, and multi-turn history
