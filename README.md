@@ -1,8 +1,21 @@
 # FireGPT
 
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Claude AI](https://img.shields.io/badge/Claude-Sonnet_4-D97757?logo=anthropic&logoColor=white)](https://anthropic.com)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docker.com)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 **Talk to your drawing files.** Upload DXF/DWG construction drawings, automatically detect and count all fire alarm symbols, visualize them on an interactive floor plan, and chat with the extracted data using AI.
 
 Built for fire alarm contractors who need accurate device counts for pricing bids.
+
+<p align="center">
+  <img src="https://i.postimg.cc/VshZ9tVn/Screenshot-2026-03-06-at-9-19-06-PM.png" alt="Symbol Detection View" width="420" />
+  &nbsp;&nbsp;
+  <img src="https://i.postimg.cc/ryd2Lq68/Screenshot-2026-03-06-at-9-23-04-PM.png" alt="Drawing Preview View" width="420" />
+</p>
 
 ## How It Works
 
@@ -61,6 +74,18 @@ docker compose up --build
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:8000`
 
+## Features
+
+- **57 known symbol patterns** — automatic dictionary matching for common fire alarm abbreviations
+- **AI block classification** — Claude classifies ambiguous blocks using full drawing context
+- **Interactive SVG preview** — renders DXF geometry with zoom/pan and color-coded device markers
+- **Bidirectional highlighting** — click symbols in table ↔ highlights markers on drawing
+- **Cost estimation** — AI-powered project estimates with 2024-2025 US market pricing
+- **Multi-turn chat** — Claude remembers the full conversation context
+- **Manual overrides** — edit counts/labels with audit trail
+- **CSV export** — download symbol data for device schedule comparison
+- **Symbol consolidation** — merges block variants of same device type into single rows
+
 ## API Endpoints
 
 | Method | Path | Description |
@@ -99,18 +124,6 @@ docker compose up --build
 - **Chat is simple** — parsed data is ~2-5KB JSON, injected directly into the LLM system prompt. No vector DB or RAG needed.
 - **OCS→WCS recovery** — handles Revit/AutoCAD exports where INSERT coordinates are stored in OCS with mirrored X axis, ensuring all device types show markers on the floor plan.
 
-## Features
-
-- **57 known symbol patterns** — automatic dictionary matching for common fire alarm abbreviations
-- **AI block classification** — Claude classifies ambiguous blocks using full drawing context
-- **Interactive SVG preview** — renders DXF geometry with zoom/pan and color-coded device markers
-- **Bidirectional highlighting** — click symbols in table ↔ highlights markers on drawing
-- **Cost estimation** — AI-powered project estimates with 2024-2025 US market pricing
-- **Multi-turn chat** — Claude remembers the full conversation context
-- **Manual overrides** — edit counts/labels with audit trail
-- **CSV export** — download symbol data for device schedule comparison
-- **Symbol consolidation** — merges block variants of same device type into single rows
-
 ## Supported Symbol Types
 
 The parser auto-labels common fire alarm symbols:
@@ -137,3 +150,7 @@ Plus 48 more patterns. Unknown block names are sent to Claude AI for classificat
 | `UPLOAD_DIR` | No | Upload directory (default: ./uploads) |
 | `MAX_FILE_SIZE_MB` | No | Max upload size in MB (default: 50) |
 | `PORT` | No | Server port (default: 8000) |
+
+## License
+
+MIT
