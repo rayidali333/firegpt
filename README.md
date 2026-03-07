@@ -10,11 +10,16 @@
 
 Built for fire alarm contractors who need accurate device counts for pricing bids.
 
-<p align="center">
-  <img src="https://i.postimg.cc/VshZ9tVn/Screenshot-2026-03-06-at-9-19-06-PM.png" alt="Symbol Detection View" width="420" />
-  &nbsp;&nbsp;
-  <img src="https://i.postimg.cc/ryd2Lq68/Screenshot-2026-03-06-at-9-23-04-PM.png" alt="Drawing Preview View" width="420" />
-</p>
+<table>
+  <tr>
+    <td><img src="https://i.postimg.cc/VshZ9tVn/Screenshot-2026-03-06-at-9-19-06-PM.png" alt="Symbol Detection View" width="420" /></td>
+    <td><img src="https://i.postimg.cc/ryd2Lq68/Screenshot-2026-03-06-at-9-23-04-PM.png" alt="Drawing Preview View" width="420" /></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Symbol Detection</em></td>
+    <td align="center"><em>Drawing Preview</em></td>
+  </tr>
+</table>
 
 ## How It Works
 
