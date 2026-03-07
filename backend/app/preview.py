@@ -225,6 +225,86 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     _fixup_coordinate_offset(symbol_svg_positions, vb_x, vb_y, vb_w, vb_h,
                              position_debug)
 
+    # ── Recovery pass: for symbols with 0 positions after schedule removal, ──
+    # ── try raw entity.dxf.insert positions (may differ from renderable_geom ──
+    # ── centroid when block geometry is offset from the block origin). ──
+    missing_symbols = [sym for sym in symbols if sym.block_name not in symbol_svg_positions]
+    if missing_symbols:
+        missing_blocks: set[str] = set()
+        for sym in missing_symbols:
+            missing_blocks.add(sym.block_name)
+            for v in (sym.block_variants or []):
+                missing_blocks.add(v)
+
+        try:
+            msp = doc.modelspace()
+            raw_positions: dict[str, list[list[float]]] = {}
+            raw_samples: dict[str, tuple[float, float, float, float]] = {}  # block -> (raw_x, raw_y, rg_x, rg_y)
+            for entity in msp:
+                if entity.dxftype() not in ("INSERT", "MINSERT"):
+                    continue
+                bn = entity.dxf.name
+                if bn not in missing_blocks:
+                    continue
+                try:
+                    raw_x = round(entity.dxf.insert.x, 2)
+                    raw_y = round(-entity.dxf.insert.y, 2)
+                    raw_positions.setdefault(bn, []).append([raw_x, raw_y])
+                    # Store first sample for diagnostic comparison
+                    if bn not in raw_samples:
+                        # Also get the renderable_geom position for comparison
+                        rg_pos, _ = _compute_insert_svg_position_debug(entity, bn, doc)
+                        rg_x, rg_y = rg_pos if rg_pos else (0.0, 0.0)
+                        raw_samples[bn] = (raw_x, raw_y, rg_x, rg_y)
+                except Exception:
+                    pass
+
+            # Map raw positions to symbol block names and check viewBox
+            for sym in missing_symbols:
+                positions: list[list[float]] = []
+                if sym.block_name in raw_positions:
+                    positions.extend(raw_positions[sym.block_name])
+                for v in (sym.block_variants or []):
+                    if v in raw_positions:
+                        positions.extend(raw_positions[v])
+                if not positions:
+                    continue
+
+                # Filter to in-viewBox positions
+                in_vb = [p for p in positions
+                         if vb_x <= p[0] <= vb_x + vb_w and vb_y <= p[1] <= vb_y + vb_h]
+                if in_vb:
+                    seen = set()
+                    unique = []
+                    for p in in_vb:
+                        key = (p[0], p[1])
+                        if key not in seen:
+                            seen.add(key)
+                            unique.append(p)
+                    symbol_svg_positions[sym.block_name] = unique
+                    position_debug.append(
+                        f"  Raw INSERT recovery: {sym.label}: {len(unique)} positions "
+                        f"(entity.dxf.insert differs from renderable_geom centroid)")
+                else:
+                    # Log diagnostic: raw positions vs renderable_geom
+                    sample_bn = sym.block_name
+                    if sample_bn not in raw_samples:
+                        for v in (sym.block_variants or []):
+                            if v in raw_samples:
+                                sample_bn = v
+                                break
+                    if sample_bn in raw_samples:
+                        rx, ry, rgx, rgy = raw_samples[sample_bn]
+                        position_debug.append(
+                            f"  Raw INSERT check {sym.label}: {len(positions)} total, 0 in viewBox. "
+                            f"raw=({rx}, {ry}) vs renderable_geom=({rgx}, {rgy})")
+                    else:
+                        position_debug.append(
+                            f"  Raw INSERT check {sym.label}: {len(positions)} total, 0 in viewBox, "
+                            f"sample={positions[0]}")
+        except Exception as e:
+            position_debug.append(f"  Raw INSERT recovery failed: {e}")
+
     # Add per-symbol mapping debug info
     for sym in symbols:
         sp = symbol_svg_positions.get(sym.block_name)
