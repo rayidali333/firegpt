@@ -129,7 +129,25 @@ Respond with ONLY a JSON array:
                 json_lines.append(line)
         response_text = "\n".join(json_lines)
 
-    raw_symbols = json.loads(response_text)
+    # Clean up common JSON issues from LLM output
+    # Remove trailing commas before } or ] (e.g., {"a": 1,} or [1,2,])
+    import re
+    response_text = re.sub(r',\s*([}\]])', r'\1', response_text)
+    # Remove single-line comments (// ...)
+    response_text = re.sub(r'//[^\n]*', '', response_text)
+    # Replace single quotes with double quotes for property names/values
+    # Only if the JSON still fails to parse with standard parser
+    try:
+        raw_symbols = json.loads(response_text)
+    except json.JSONDecodeError:
+        # Try extracting just the JSON array if there's surrounding text
+        array_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+        if array_match:
+            cleaned = array_match.group(0)
+            cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
+            raw_symbols = json.loads(cleaned)
+        else:
+            raise
 
     symbols = []
     for entry in raw_symbols:
