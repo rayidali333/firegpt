@@ -51,3 +51,19 @@ export interface DrawingPreview {
   symbol_positions: Record<string, [number, number][]>;
   position_debug: string[];
 }
+
+export interface LegendSymbol {
+  code: string;
+  name: string;
+  category: string;
+  shape: string;
+  shape_code: string;
+}
+
+export interface LegendData {
+  legend_id: string;
+  filename: string;
+  symbols: LegendSymbol[];
+  total_symbols: number;
+  systems: string[];
+}

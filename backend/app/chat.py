@@ -16,7 +16,7 @@ import os
 
 from anthropic import AsyncAnthropic
 
-from app.models import ParseResponse
+from app.models import LegendData, LegendSymbol, ParseResponse
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,112 @@ def _get_client() -> AsyncAnthropic:
     return client
 
 
+async def parse_legend_with_vision(
+    image_data: bytes,
+    media_type: str,
+    filename: str,
+) -> LegendData:
+    """Use Claude Vision to parse a legend sheet image/PDF into structured symbol data.
+
+    Sends the legend image to Claude and extracts all symbol definitions with their
+    codes, names, categories, and visual shapes.
+    """
+    import base64
+    import uuid
+
+    api_client = _get_client()
+
+    image_b64 = base64.standard_b64encode(image_data).decode("utf-8")
+
+    prompt = """You are analyzing a construction drawing legend/key sheet. Extract EVERY symbol definition shown.
+
+For each symbol, provide:
+1. "code": The text code or abbreviation shown inside/next to the symbol (e.g., "MFACP", "CR", "SD", "DS", "ML"). If no code, use a short abbreviation of the name.
+2. "name": The full device name exactly as written (e.g., "Main Fire Alarm Control Panel", "Proximity Card Reader")
+3. "category": The system category it belongs to. Use EXACTLY one of these:
+   - "Fire Alarm" — detectors, panels, modules, manual stations, sirens, strobes
+   - "Access Control" — card readers, door locks, exit buttons, break glass
+   - "Structured Cabling" — server racks, patch panels, data outlets
+   - "BMS" — building management system panels, workstations, converters
+   - "Video Surveillance" — CCTV cameras, workstations, NVR
+   - "Public Address" — speakers, amplifiers, alarm racks
+   - "Other" — anything that doesn't fit above
+4. "shape": Describe the visual shape of the symbol (e.g., "circle with S inside", "square with MFACP text", "filled circle", "diamond")
+5. "shape_code": Classify the marker shape as one of: "circle", "square", "diamond", "hexagon"
+   - Circles/round shapes → "circle"
+   - Squares/rectangles/boxes → "square"
+   - Diamond/rotated squares → "diamond"
+   - Hexagons or complex shapes → "hexagon"
+
+Extract ALL symbols from ALL sections/systems shown in the legend. Do not skip any.
+
+Respond with ONLY a JSON array:
+[{"code": "MFACP", "name": "Main Fire Alarm Control Panel", "category": "Fire Alarm", "shape": "rectangle with MFACP text", "shape_code": "square"}, ...]"""
+
+    response = await api_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": image_b64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": prompt,
+                },
+            ],
+        }],
+    )
+
+    response_text = response.content[0].text.strip()
+
+    # Extract JSON from response (handle markdown code blocks)
+    if response_text.startswith("```"):
+        lines = response_text.split("\n")
+        json_lines = []
+        in_block = False
+        for line in lines:
+            if line.startswith("```") and not in_block:
+                in_block = True
+                continue
+            if line.startswith("```") and in_block:
+                break
+            if in_block:
+                json_lines.append(line)
+        response_text = "\n".join(json_lines)
+
+    raw_symbols = json.loads(response_text)
+
+    symbols = []
+    for entry in raw_symbols:
+        symbols.append(LegendSymbol(
+            code=entry.get("code", ""),
+            name=entry.get("name", ""),
+            category=entry.get("category", "Other"),
+            shape=entry.get("shape", ""),
+            shape_code=entry.get("shape_code", "circle"),
+        ))
+
+    # Extract unique system categories
+    systems = sorted(set(s.category for s in symbols))
+
+    legend_id = str(uuid.uuid4())
+    return LegendData(
+        legend_id=legend_id,
+        filename=filename,
+        symbols=symbols,
+        total_symbols=len(symbols),
+        systems=systems,
+    )
+
+
 async def classify_blocks_with_ai(
     ai_candidate_blocks: list,
     filename: str,
@@ -43,12 +149,16 @@ async def classify_blocks_with_ai(
     fire_layers: list[str],
     legend_texts: list[str],
     fast_path_labels: dict[str, str],
+    legend: LegendData | None = None,
 ) -> dict[str, str]:
     """Use Claude to classify blocks that dictionary matching couldn't identify.
 
-    This is the PRIMARY classification method for non-obvious blocks. It receives
-    full drawing context so Claude can understand the naming convention used in
-    this specific drawing and make informed decisions.
+    When a legend is provided, ALL blocks are sent to AI for classification using
+    the legend as the authoritative source of truth. The hardcoded dictionary is
+    bypassed entirely — the legend defines what symbols exist in this project.
+
+    When no legend is provided, falls back to the standard approach with hardcoded
+    patterns and general AI classification.
 
     Args:
         ai_candidate_blocks: Blocks with full metadata that need classification
@@ -58,6 +168,7 @@ async def classify_blocks_with_ai(
         fire_layers: Layers identified as fire-alarm related
         legend_texts: Text from drawing legends/schedules
         fast_path_labels: Blocks already identified by dictionary (for context)
+        legend: Optional parsed legend data from uploaded legend sheet
 
     Returns:
         dict mapping block_name -> label for blocks identified as fire alarm devices.
@@ -93,10 +204,9 @@ async def classify_blocks_with_ai(
 
     # Build rich drawing context
     context_parts = []
-
     context_parts.append(f'Drawing file: "{filename}"')
 
-    if fast_path_labels:
+    if fast_path_labels and not legend:
         context_parts.append(
             f"\nALREADY IDENTIFIED (by standard abbreviations):\n"
             + "\n".join(f'  - "{name}" = {label}' for name, label in fast_path_labels.items())
@@ -119,7 +229,44 @@ async def classify_blocks_with_ai(
 
     drawing_context = "\n".join(context_parts)
 
-    prompt = f"""You are a fire alarm systems expert analyzing a CAD construction drawing.
+    # Build prompt — legend-aware or standard
+    if legend:
+        # Legend-aware prompt: use legend as authoritative source
+        legend_entries = "\n".join(
+            f'  - Code: "{s.code}" → {s.name} [{s.category}]'
+            for s in legend.symbols
+        )
+        prompt = f"""You are a fire alarm and building systems expert analyzing a CAD construction drawing.
+
+You have been provided with the OFFICIAL LEGEND/KEY for this project. Use it as the AUTHORITATIVE
+source of truth to classify every block in the drawing.
+
+PROJECT LEGEND (from "{legend.filename}"):
+{legend_entries}
+
+DRAWING CONTEXT:
+{drawing_context}
+
+BLOCKS TO CLASSIFY:
+{blocks_json}
+
+CLASSIFICATION GUIDELINES:
+1. The legend above is the DEFINITIVE reference. Match blocks to legend entries by:
+   - Block name containing the legend code (e.g., block "FA_MFACP_01" matches legend code "MFACP")
+   - Text labels inside the block matching legend codes
+   - Block attributes matching legend codes or names
+   - Layer names suggesting the system category
+2. Use the EXACT device name from the legend as the label (e.g., "Main Fire Alarm Control Panel")
+3. Blocks from ALL systems in the legend should be classified (Fire Alarm, Access Control, BMS, CCTV, etc.)
+4. Title blocks, sheet frames, borders, furniture, structural elements = null
+5. When in doubt, classify as null. False negatives are better than false positives.
+6. A block that appears hundreds of times and is NOT on any relevant system layer is likely NOT a device.
+
+Respond with ONLY a JSON object. Identified devices get their legend name, everything else gets null:
+{{"block_name_1": "Main Fire Alarm Control Panel", "block_name_2": null, ...}}"""
+    else:
+        # Standard prompt — no legend available
+        prompt = f"""You are a fire alarm systems expert analyzing a CAD construction drawing.
 
 Your job: classify each unidentified block as either a fire alarm / building safety device,
 or as NOT a fire alarm device (furniture, plumbing, structural, annotation, etc.).
@@ -205,7 +352,7 @@ Respond with ONLY a JSON object. Fire devices get their label, everything else g
         return {}
 
 
-def _build_system_prompt(drawing: ParseResponse) -> str:
+def _build_system_prompt(drawing: ParseResponse, legend: LegendData | None = None) -> str:
     """Build a system prompt with the parsed drawing data injected."""
     symbol_data = []
     for s in drawing.symbols:
@@ -220,13 +367,31 @@ def _build_system_prompt(drawing: ParseResponse) -> str:
 
     data_json = json.dumps(symbol_data, indent=2)
 
+    # Build legend context if available
+    legend_section = ""
+    if legend:
+        legend_entries = "\n".join(
+            f"  - {s.code}: {s.name} [{s.category}]"
+            for s in legend.symbols
+        )
+        legend_section = f"""
+
+PROJECT LEGEND (from "{legend.filename}"):
+The contractor uploaded an official legend/key sheet for this project. The following symbols
+are defined in the project's legend — use these as the authoritative reference:
+{legend_entries}
+
+When answering questions, reference the legend definitions. If a detected symbol matches
+a legend entry, use the legend's official name and category.
+"""
+
     return f"""You are FireGPT, a professional AI assistant built for fire alarm contractors \
 and smart building engineers. You specialize in analyzing construction drawings, \
 fire alarm system design, and project estimation.
 
 You are helping a fire alarm contractor analyze a drawing file. Below is the extracted symbol data \
 from the drawing "{drawing.filename}" ({drawing.file_type.upper()} format).
-
+{legend_section}
 EXTRACTED SYMBOL DATA:
 {data_json}
 
@@ -301,6 +466,7 @@ async def chat_with_drawing(
     message: str,
     drawing: ParseResponse,
     history: list[dict] | None = None,
+    legend: LegendData | None = None,
 ) -> str:
     """Send a message to the LLM with drawing context and return the response."""
     api_client = _get_client()
@@ -314,7 +480,7 @@ async def chat_with_drawing(
     response = await api_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
-        system=_build_system_prompt(drawing),
+        system=_build_system_prompt(drawing, legend),
         messages=messages,
     )
 

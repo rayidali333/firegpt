@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { DrawingData, DrawingPreview, ChatMessage } from "./types";
-import { uploadDrawing, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
+import { uploadDrawing, uploadLegend, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
@@ -20,6 +20,9 @@ function App() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [chatSending, setChatSending] = useState(false);
+  const [legend, setLegend] = useState<LegendData | null>(null);
+  const [legendUploading, setLegendUploading] = useState(false);
+  const [legendError, setLegendError] = useState<string | null>(null);
 
   // Load preview when drawing changes
   useEffect(() => {
@@ -47,11 +50,24 @@ function App() {
       .finally(() => setPreviewLoading(false));
   }, [drawing]);
 
+  const handleLegendUpload = async (file: File) => {
+    setLegendUploading(true);
+    setLegendError(null);
+    try {
+      const data = await uploadLegend(file);
+      setLegend(data);
+    } catch (e: any) {
+      setLegendError(e.message || "Legend upload failed");
+    } finally {
+      setLegendUploading(false);
+    }
+  };
+
   const handleUpload = async (file: File) => {
     setUploading(true);
     setError(null);
     try {
-      const data = await uploadDrawing(file);
+      const data = await uploadDrawing(file, legend?.legend_id);
       setDrawing(data);
       setMessages([]);
       setActiveTab("symbols");
@@ -107,6 +123,8 @@ function App() {
     setActiveTab("symbols");
     setPreview(null);
     setSelectedSymbol(null);
+    setLegend(null);
+    setLegendError(null);
   };
 
   const handleSelectSymbol = useCallback(
@@ -166,6 +184,7 @@ function App() {
             messageCount={messages.length}
             activeTab={activeTab}
             onTabChange={setActiveTab}
+            legend={legend}
           />
           <main className="main-content">
             {!drawing ? (
@@ -173,6 +192,10 @@ function App() {
                 onUpload={handleUpload}
                 uploading={uploading}
                 error={error}
+                legend={legend}
+                onLegendUpload={handleLegendUpload}
+                legendUploading={legendUploading}
+                legendError={legendError}
               />
             ) : (
               <div className="content-with-tabs">

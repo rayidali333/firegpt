@@ -545,6 +545,102 @@
   color: var(--danger);
 }
 
+/* ===== Legend Upload ===== */
+.legend-section {
+  margin: 16px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-upload-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  background: var(--window-bg);
+  border: 1px solid;
+  border-color: var(--bevel-light) var(--bevel-dark) var(--bevel-dark) var(--bevel-light);
+  font-family: var(--font);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.legend-upload-btn:hover {
+  background: #E0E8F0;
+}
+
+.legend-upload-btn:active {
+  border-color: var(--bevel-dark) var(--bevel-light) var(--bevel-light) var(--bevel-dark);
+}
+
+.legend-optional {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.legend-attached {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: #E8F5E9;
+  border: 1px solid #A5D6A7;
+  font-size: var(--font-size-sm);
+  color: #2E7D32;
+}
+
+.legend-uploading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.legend-error {
+  padding: 4px 10px;
+  background: #FFEEEE;
+  border: 1px solid #CC9999;
+  font-size: var(--font-size-sm);
+  color: var(--danger);
+}
+
+.upload-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.drawing-upload-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  background: var(--accent);
+  border: 2px solid;
+  border-color: #4A7DB5 var(--accent-hover) var(--accent-hover) #4A7DB5;
+  font-family: var(--font);
+  font-size: var(--font-size);
+  font-weight: 600;
+  color: var(--text-inverse);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.drawing-upload-btn:hover {
+  background: var(--accent-hover);
+}
+
+.drawing-upload-btn:active {
+  border-color: var(--accent-hover) #4A7DB5 #4A7DB5 var(--accent-hover);
+}
+
 /* ===== Symbol Table ===== */
 .symbol-table {
   height: 100%;

@@ -452,11 +452,13 @@ def _collect_block_metadata(block_def, doc) -> dict:
     }
 
 
-def parse_dxf_file(filepath: str) -> ParseResult:
+def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
     """Parse a DXF file and extract all block references with metadata.
 
-    Uses dictionary matching as a fast path for obvious symbols.
-    All other blocks are collected with full metadata for AI classification.
+    When use_fast_path=True (default, no legend): uses dictionary matching as a
+    fast path for obvious symbols. Remaining blocks go to AI.
+    When use_fast_path=False (legend provided): skips dictionary matching entirely.
+    ALL blocks are collected as AI candidates for legend-aware classification.
     """
     result = ParseResult(dxf_path=filepath)
 
@@ -673,12 +675,17 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         result.log("warning", f"{len(result.xref_warnings)} external references (XREFs) detected — devices in referenced files are not counted")
 
     # Step 9: Classify blocks — fast path vs AI candidates
+    # When use_fast_path=False (legend uploaded), ALL blocks go to AI as candidates.
+    # The legend provides the authoritative symbol dictionary, so we skip hardcoded patterns.
     result.all_block_names = sorted(block_counts.keys())
     fast_path_count = 0
     ai_candidate_count = 0
 
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
-        match = _fast_path_label(block_name)
+        if use_fast_path:
+            match = _fast_path_label(block_name)
+        else:
+            match = None  # Skip dictionary — legend is source of truth
 
         if match is not None:
             # Fast path: dictionary matched with high confidence
@@ -722,11 +729,17 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                 attdef_tags=meta.get("attdef_tags", {}),
             ))
 
-    result.log(
-        "info",
-        f"Fast-path identified: {fast_path_count} symbol types "
-        f"({sum(s.count for s in result.fast_path_symbols)} devices)"
-    )
+    if use_fast_path:
+        result.log(
+            "info",
+            f"Fast-path identified: {fast_path_count} symbol types "
+            f"({sum(s.count for s in result.fast_path_symbols)} devices)"
+        )
+    else:
+        result.log(
+            "info",
+            "Legend mode: skipping hardcoded patterns — all blocks sent to AI with legend context"
+        )
     if ai_candidate_count > 0:
         result.log(
             "info",
@@ -754,7 +767,7 @@ def _merge_dxf_result(result: ParseResult, dxf_result: ParseResult, dxf_path: st
     result.dxf_path = dxf_path
 
 
-def parse_dwg_file(filepath: str) -> ParseResult:
+def parse_dwg_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
     """Parse a DWG file by converting to DXF first, then parsing."""
     result = ParseResult()
     file_size_mb = Path(filepath).stat().st_size / (1024 * 1024)
@@ -772,7 +785,7 @@ def parse_dwg_file(filepath: str) -> ParseResult:
         result.log("info", f"Using ODA File Converter: {oda_path}")
         try:
             dxf_path = _convert_with_oda(filepath, oda_path, result)
-            _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
+            _merge_dxf_result(result, parse_dxf_file(dxf_path, use_fast_path=use_fast_path), dxf_path)
             return result
         except HTTPException:
             raise
@@ -787,7 +800,7 @@ def parse_dwg_file(filepath: str) -> ParseResult:
         result.log("info", f"Using LibreDWG converter: {dwg2dxf_path}")
         try:
             dxf_path = _convert_with_libredwg(filepath, dwg2dxf_path, result)
-            _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
+            _merge_dxf_result(result, parse_dxf_file(dxf_path, use_fast_path=use_fast_path), dxf_path)
             return result
         except HTTPException:
             raise
@@ -815,7 +828,7 @@ def parse_dwg_file(filepath: str) -> ParseResult:
     try:
         doc.saveas(dxf_path)
         result.log("success", f"Saved recovered DXF ({Path(dxf_path).stat().st_size / 1024:.0f} KB)")
-        _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
+        _merge_dxf_result(result, parse_dxf_file(dxf_path, use_fast_path=use_fast_path), dxf_path)
         return result
     except Exception as e:
         result.log("error", f"Could not save recovered file: {str(e)}")

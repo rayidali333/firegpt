@@ -7,8 +7,9 @@ import {
   Eye,
   Flame,
   ClipboardList,
+  BookOpen,
 } from "lucide-react";
-import { DrawingData } from "../types";
+import { DrawingData, LegendData } from "../types";
 
 interface Props {
   drawing: DrawingData | null;
@@ -18,6 +19,7 @@ interface Props {
   messageCount: number;
   activeTab: "symbols" | "drawing" | "analysis";
   onTabChange: (tab: "symbols" | "drawing" | "analysis") => void;
+  legend: LegendData | null;
 }
 
 export default function Sidebar({
@@ -28,6 +30,7 @@ export default function Sidebar({
   messageCount,
   activeTab,
   onTabChange,
+  legend,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -72,6 +75,20 @@ export default function Sidebar({
           style={{ display: "none" }}
         />
       </div>
+
+      {legend && (
+        <div className="sidebar-section">
+          <div className="sidebar-section-title">
+            <span className="sidebar-section-arrow">&#9660;</span>
+            Legend
+          </div>
+          <div className="sidebar-nav-item active">
+            <BookOpen />
+            <span className="sidebar-file-name">{legend.filename}</span>
+            <span className="sidebar-badge">{legend.total_symbols}</span>
+          </div>
+        </div>
+      )}
 
       <div className="sidebar-section">
         <div className="sidebar-section-title">

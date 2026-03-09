@@ -12,10 +12,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
 from app.preview import generate_drawing_preview
-from app.chat import chat_with_drawing, classify_blocks_with_ai
+from app.chat import chat_with_drawing, classify_blocks_with_ai, parse_legend_with_vision
 from app.models import (
-    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, ParseResponse,
-    PreviewResponse, SymbolInfo, SymbolOverride,
+    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendData,
+    ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
 )
 
 load_dotenv()
@@ -43,6 +43,10 @@ drawings_store: dict[str, ParseResponse] = {}
 file_paths_store: dict[str, str] = {}
 # Cache generated previews
 preview_cache: dict[str, dict] = {}
+# Legend store — parsed legend data keyed by legend_id
+legend_store: dict[str, LegendData] = {}
+# Track which legend is associated with which drawing
+drawing_legend_map: dict[str, str] = {}  # drawing_id → legend_id
 
 
 @app.get("/api/health")
@@ -50,8 +54,52 @@ def health():
     return {"status": "ok"}
 
 
+@app.post("/api/upload-legend", response_model=LegendData)
+async def upload_legend(file: UploadFile):
+    """Upload a legend/key sheet (PDF or image) and parse it with Claude Vision."""
+    if not file.filename:
+        raise HTTPException(400, "No file provided")
+
+    ext = Path(file.filename).suffix.lower()
+    allowed_exts = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    if ext not in allowed_exts:
+        raise HTTPException(
+            400,
+            f"Unsupported file type: {ext}. "
+            f"Legend must be an image ({', '.join(allowed_exts)})."
+        )
+
+    contents = await file.read()
+    size_mb = len(contents) / (1024 * 1024)
+    if size_mb > 20:
+        raise HTTPException(400, f"File too large ({size_mb:.1f}MB). Max legend size is 20MB.")
+
+    # Map file extension to media type
+    media_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".pdf": "application/pdf",
+    }
+    media_type = media_types.get(ext, "image/png")
+
+    try:
+        legend_data = await parse_legend_with_vision(
+            image_data=contents,
+            media_type=media_type,
+            filename=file.filename,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to parse legend: {str(e)}")
+
+    legend_store[legend_data.legend_id] = legend_data
+    return legend_data
+
+
 @app.post("/api/upload", response_model=ParseResponse)
-async def upload_drawing(file: UploadFile):
+async def upload_drawing(file: UploadFile, legend_id: str | None = None):
     if not file.filename:
         raise HTTPException(400, "No file provided")
 
@@ -68,11 +116,14 @@ async def upload_drawing(file: UploadFile):
     save_path = UPLOAD_DIR / f"{drawing_id}{ext}"
     save_path.write_bytes(contents)
 
+    # Resolve legend if provided
+    legend = legend_store.get(legend_id) if legend_id else None
+
     try:
         if ext == ".dxf":
-            parse_result = parse_dxf_file(str(save_path))
+            parse_result = parse_dxf_file(str(save_path), use_fast_path=not legend)
         elif ext == ".dwg":
-            parse_result = parse_dwg_file(str(save_path))
+            parse_result = parse_dwg_file(str(save_path), use_fast_path=not legend)
         else:
             raise HTTPException(400, f"Unsupported file type: {ext}")
     except HTTPException:
@@ -80,35 +131,50 @@ async def upload_drawing(file: UploadFile):
     except Exception as e:
         raise HTTPException(500, f"Failed to parse drawing: {str(e)}")
 
-    # AI-first classification: send all ambiguous blocks to Claude with full
-    # drawing context (layers, legend text, all block names, already-identified symbols).
-    if parse_result.ai_candidate_blocks:
+    if legend:
+        parse_result.analysis.append({
+            "type": "success",
+            "message": f"Using uploaded legend \"{legend.filename}\" ({legend.total_symbols} symbols) as classification source",
+        })
+
+    # AI classification: send blocks to Claude for classification.
+    # When legend is provided: ALL blocks go to AI with legend context (no fast-path).
+    # When no legend: only ambiguous blocks go to AI (fast-path handles known patterns).
+    blocks_to_classify = (
+        parse_result.ai_candidate_blocks if not legend
+        else parse_result.ai_candidate_blocks  # When legend present, parser sends ALL blocks as candidates
+    )
+
+    if blocks_to_classify:
         try:
-            # Build context of what fast-path already identified
             fast_path_labels = {
                 s.block_name: s.label for s in parse_result.fast_path_symbols
             }
 
             ai_labels = await classify_blocks_with_ai(
-                ai_candidate_blocks=parse_result.ai_candidate_blocks,
+                ai_candidate_blocks=blocks_to_classify,
                 filename=file.filename,
                 all_block_names=parse_result.all_block_names,
                 all_layer_names=parse_result.all_layer_names,
                 fire_layers=parse_result.fire_layers,
                 legend_texts=parse_result.legend_texts,
                 fast_path_labels=fast_path_labels,
+                legend=legend,
             )
 
             if ai_labels:
+                source_label = "legend + AI" if legend else "AI"
                 parse_result.analysis.append({
                     "type": "success",
-                    "message": f"AI classified {len(ai_labels)} fire alarm devices: "
+                    "message": f"{source_label} classified {len(ai_labels)} devices: "
                     + ", ".join(f'"{k}" → {v}' for k, v in list(ai_labels.items())[:8]),
                 })
 
-                for block in parse_result.ai_candidate_blocks:
+                for block in blocks_to_classify:
                     if block.block_name in ai_labels:
                         label = ai_labels[block.block_name]
+                        confidence = "high" if legend else "medium"
+                        source = "legend" if legend else "ai"
                         parse_result.symbols.append(
                             SymbolInfo(
                                 block_name=block.block_name,
@@ -116,23 +182,23 @@ async def upload_drawing(file: UploadFile):
                                 count=block.count,
                                 locations=block.locations,
                                 color=_get_symbol_color(label),
-                                confidence="medium",
-                                source="ai",
+                                confidence=confidence,
+                                source=source,
                             )
                         )
                         parse_result.audit.append(AuditEntry(
                             block_name=block.block_name,
                             label=label,
                             count=block.count,
-                            method="ai",
-                            confidence="medium",
+                            method="legend_ai" if legend else "ai",
+                            confidence=confidence,
                             layers=block.layers,
                         ))
             else:
-                n = len(parse_result.ai_candidate_blocks)
+                n = len(blocks_to_classify)
                 parse_result.analysis.append({
                     "type": "info",
-                    "message": f"AI analyzed {n} blocks — none identified as fire alarm devices",
+                    "message": f"AI analyzed {n} blocks — none identified as devices",
                 })
         except Exception:
             parse_result.analysis.append({
@@ -213,6 +279,10 @@ async def upload_drawing(file: UploadFile):
     effective_path = parse_result.dxf_path or str(save_path)
     file_paths_store[drawing_id] = effective_path
 
+    # Link drawing to legend if one was used
+    if legend_id and legend_id in legend_store:
+        drawing_legend_map[drawing_id] = legend_id
+
     return result
 
 
@@ -262,7 +332,13 @@ async def chat(request: ChatRequest):
     if request.history:
         history = [{"role": h.role, "content": h.content} for h in request.history]
 
-    response_text = await chat_with_drawing(request.message, drawing, history)
+    # Pass legend context to chat if available
+    legend = None
+    legend_id = drawing_legend_map.get(request.drawing_id)
+    if legend_id:
+        legend = legend_store.get(legend_id)
+
+    response_text = await chat_with_drawing(request.message, drawing, history, legend)
     return ChatResponse(response=response_text)
 
 
