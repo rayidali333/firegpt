@@ -77,20 +77,33 @@ Extract ALL symbols from ALL sections/systems shown in the legend. Do not skip a
 Respond with ONLY a JSON array:
 [{"code": "MFACP", "name": "Main Fire Alarm Control Panel", "category": "Fire Alarm", "shape": "rectangle with MFACP text", "shape_code": "square"}, ...]"""
 
+    # PDFs use "document" content type; images use "image" content type
+    if media_type == "application/pdf":
+        file_content_block = {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": image_b64,
+            },
+        }
+    else:
+        file_content_block = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": image_b64,
+            },
+        }
+
     response = await api_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
         messages=[{
             "role": "user",
             "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": image_b64,
-                    },
-                },
+                file_content_block,
                 {
                     "type": "text",
                     "text": prompt,
