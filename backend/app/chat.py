@@ -13,12 +13,68 @@ This works robustly across any naming convention, language, or CAD standard.
 import json
 import logging
 import os
+import re
 
 from anthropic import AsyncAnthropic
 
 from app.models import LegendData, LegendSymbol, ParseResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json_array(text: str) -> list:
+    """Robustly extract a JSON array from LLM output.
+
+    Handles markdown code blocks, surrounding prose, and trailing commas.
+    """
+    # Strategy 1: Try parsing the raw text directly
+    try:
+        result = json.loads(text)
+        if isinstance(result, list):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Extract from markdown code block (```json ... ``` or ``` ... ```)
+    code_block_match = re.search(r'```(?:json)?\s*\n(.*?)```', text, re.DOTALL)
+    if code_block_match:
+        block = code_block_match.group(1).strip()
+        # Fix trailing commas
+        block = re.sub(r',\s*([}\]])', r'\1', block)
+        try:
+            result = json.loads(block)
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Find the outermost [ ... ] in the text
+    # Use bracket matching to find the correct closing bracket
+    start = text.find('[')
+    if start != -1:
+        depth = 0
+        end = -1
+        for i in range(start, len(text)):
+            if text[i] == '[':
+                depth += 1
+            elif text[i] == ']':
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end != -1:
+            array_text = text[start:end + 1]
+            # Fix trailing commas
+            array_text = re.sub(r',\s*([}\]])', r'\1', array_text)
+            try:
+                return json.loads(array_text)
+            except json.JSONDecodeError:
+                pass
+
+    raise ValueError(
+        f"Could not extract JSON array from AI response. "
+        f"Response starts with: {text[:200]!r}"
+    )
 
 client: AsyncAnthropic | None = None
 
@@ -114,40 +170,8 @@ Respond with ONLY a JSON array:
 
     response_text = response.content[0].text.strip()
 
-    # Extract JSON from response (handle markdown code blocks)
-    if response_text.startswith("```"):
-        lines = response_text.split("\n")
-        json_lines = []
-        in_block = False
-        for line in lines:
-            if line.startswith("```") and not in_block:
-                in_block = True
-                continue
-            if line.startswith("```") and in_block:
-                break
-            if in_block:
-                json_lines.append(line)
-        response_text = "\n".join(json_lines)
-
-    # Clean up common JSON issues from LLM output
-    # Remove trailing commas before } or ] (e.g., {"a": 1,} or [1,2,])
-    import re
-    response_text = re.sub(r',\s*([}\]])', r'\1', response_text)
-    # Remove single-line comments (// ...)
-    response_text = re.sub(r'//[^\n]*', '', response_text)
-    # Replace single quotes with double quotes for property names/values
-    # Only if the JSON still fails to parse with standard parser
-    try:
-        raw_symbols = json.loads(response_text)
-    except json.JSONDecodeError:
-        # Try extracting just the JSON array if there's surrounding text
-        array_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-        if array_match:
-            cleaned = array_match.group(0)
-            cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
-            raw_symbols = json.loads(cleaned)
-        else:
-            raise
+    # Extract JSON array from response, handling various LLM output formats
+    raw_symbols = _extract_json_array(response_text)
 
     symbols = []
     for entry in raw_symbols:
