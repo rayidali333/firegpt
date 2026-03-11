@@ -25,9 +25,10 @@ function shortBlockName(name: string): string {
   return first.length > 40 ? first.slice(0, 37) + "..." : first;
 }
 
-const CONFIDENCE_BADGE: Record<string, { label: string; className: string; title: string }> = {
-  high: { label: "Dict", className: "badge-high", title: "Matched via dictionary — high confidence" },
-  medium: { label: "AI", className: "badge-medium", title: "Classified by AI — verify if critical" },
+const SOURCE_BADGE: Record<string, { label: string; className: string; title: string }> = {
+  dictionary: { label: "Dict", className: "badge-high", title: "Matched via built-in dictionary — high confidence" },
+  legend: { label: "Legend", className: "badge-legend", title: "Classified using uploaded legend sheet" },
+  ai: { label: "AI", className: "badge-medium", title: "Classified by AI — verify if critical" },
   manual: { label: "Manual", className: "badge-manual", title: "Manually overridden by user" },
 };
 
@@ -110,7 +111,7 @@ export default function SymbolTable({
           symbols.map((s) => {
             const isSelected = selectedSymbol === s.block_name;
             const isEditing = editingBlock === s.block_name;
-            const badge = CONFIDENCE_BADGE[s.confidence] || CONFIDENCE_BADGE.high;
+            const badge = SOURCE_BADGE[s.source] || SOURCE_BADGE.dictionary;
             return (
               <div
                 key={s.block_name}

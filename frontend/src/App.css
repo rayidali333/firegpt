@@ -844,6 +844,12 @@
   border: 1px solid #A9DFBF;
 }
 
+.badge-legend {
+  background: #E8DAEF;
+  color: #6C3483;
+  border: 1px solid #D2B4DE;
+}
+
 .badge-medium {
   background: #FEF9E7;
   color: #B7950B;

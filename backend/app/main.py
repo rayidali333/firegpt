@@ -264,6 +264,47 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
     else:
         logger.info("No blocks to classify — all handled by fast-path")
 
+    # Legend coverage analysis — tell the user which systems were found vs missing
+    if legend:
+        detected_labels = {s.label.upper() for s in parse_result.symbols}
+        matched_legend_symbols = []
+        unmatched_legend_symbols = []
+        for ls in legend.symbols:
+            # Check if any detected label contains the legend symbol name
+            name_upper = ls.name.upper()
+            if any(name_upper in dl or dl in name_upper for dl in detected_labels):
+                matched_legend_symbols.append(ls)
+            else:
+                unmatched_legend_symbols.append(ls)
+
+        # Report by system category
+        detected_categories = set()
+        for s in parse_result.symbols:
+            # Find which legend category this symbol belongs to
+            for ls in legend.symbols:
+                if ls.name.upper() in s.label.upper() or s.label.upper() in ls.name.upper():
+                    detected_categories.add(ls.category)
+                    break
+
+        all_categories = set(ls.category for ls in legend.symbols)
+        missing_categories = all_categories - detected_categories
+
+        parse_result.analysis.append({
+            "type": "info",
+            "message": (
+                f"Legend coverage: {len(matched_legend_symbols)}/{len(legend.symbols)} legend symbols "
+                f"found in this drawing. Systems detected: {', '.join(sorted(detected_categories)) or 'none'}"
+            ),
+        })
+        if missing_categories:
+            parse_result.analysis.append({
+                "type": "info",
+                "message": (
+                    f"Systems NOT found in this drawing: {', '.join(sorted(missing_categories))}. "
+                    "These may be on separate drawing sheets."
+                ),
+            })
+
     # Consolidate symbols by label — merge different block names that map to
     # the same device type (e.g., 4 different "Control Module" block variants
     # become one "Control Module" row with combined counts and locations).
@@ -290,9 +331,16 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
             # Use highest confidence level in group
             confidence_rank = {"high": 3, "medium": 2, "low": 1}
             best_confidence = max(group, key=lambda s: confidence_rank.get(s.confidence, 0)).confidence
-            # If any source is dictionary, mark as dictionary; otherwise ai
+            # If any source is dictionary, mark as dictionary; legend takes priority over ai
             sources = {s.source for s in group}
-            best_source = "dictionary" if "dictionary" in sources else ("ai" if "ai" in sources else "manual")
+            if "dictionary" in sources:
+                best_source = "dictionary"
+            elif "legend" in sources:
+                best_source = "legend"
+            elif "ai" in sources:
+                best_source = "ai"
+            else:
+                best_source = "manual"
             consolidated_symbols.append(SymbolInfo(
                 block_name=combined_name,
                 label=label,
