@@ -71,6 +71,46 @@ def _extract_json_array(text: str) -> list:
             except json.JSONDecodeError:
                 pass
 
+    # Strategy 4: Handle truncated JSON — extract all complete {...} objects
+    # This happens when the AI response hits max_tokens mid-array
+    if start != -1:
+        objects = []
+        obj_depth = 0
+        obj_start = -1
+        in_string = False
+        escape_next = False
+        for i in range(start + 1, len(text)):
+            ch = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                if obj_depth == 0:
+                    obj_start = i
+                obj_depth += 1
+            elif ch == '}':
+                obj_depth -= 1
+                if obj_depth == 0 and obj_start != -1:
+                    try:
+                        obj = json.loads(text[obj_start:i + 1])
+                        objects.append(obj)
+                    except json.JSONDecodeError:
+                        pass
+                    obj_start = -1
+        if objects:
+            logger.warning(
+                f"Recovered {len(objects)} complete objects from truncated JSON"
+            )
+            return objects
+
     raise ValueError(
         f"Could not extract JSON array from AI response. "
         f"Response starts with: {text[:200]!r}"
@@ -155,7 +195,7 @@ Respond with ONLY a JSON array:
 
     response = await api_client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=4096,
+        max_tokens=16384,
         messages=[{
             "role": "user",
             "content": [
@@ -167,6 +207,13 @@ Respond with ONLY a JSON array:
             ],
         }],
     )
+
+    # Warn if response was truncated (hit max_tokens)
+    if response.stop_reason == "max_tokens":
+        logger.warning(
+            "Legend parsing response was truncated (hit max_tokens). "
+            "Some symbols may be missing."
+        )
 
     response_text = response.content[0].text.strip()
 
