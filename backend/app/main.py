@@ -1,6 +1,8 @@
 import csv
 import io
+import logging
 import os
+import traceback
 import uuid
 from pathlib import Path
 
@@ -13,6 +15,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
 from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai, parse_legend_with_vision
+
+logger = logging.getLogger(__name__)
+
+# Configure logging to show detailed output
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 from app.models import (
     AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendData,
     ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
@@ -57,20 +67,23 @@ def health():
 @app.post("/api/upload-legend", response_model=LegendData)
 async def upload_legend(file: UploadFile):
     """Upload a legend/key sheet (PDF or image) and parse it with Claude Vision."""
+    logger.info("=== LEGEND UPLOAD START ===")
+    logger.info(f"Filename: {file.filename}, Content-Type: {file.content_type}")
+
     if not file.filename:
         raise HTTPException(400, "No file provided")
 
     ext = Path(file.filename).suffix.lower()
     allowed_exts = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
     if ext not in allowed_exts:
-        raise HTTPException(
-            400,
-            f"Unsupported file type: {ext}. "
-            f"Legend must be an image ({', '.join(allowed_exts)})."
-        )
+        msg = f"Unsupported file type: {ext}. Legend must be an image ({', '.join(allowed_exts)})."
+        logger.error(f"Legend rejected: {msg}")
+        raise HTTPException(400, msg)
 
     contents = await file.read()
     size_mb = len(contents) / (1024 * 1024)
+    logger.info(f"File size: {size_mb:.2f} MB, extension: {ext}")
+
     if size_mb > 20:
         raise HTTPException(400, f"File too large ({size_mb:.1f}MB). Max legend size is 20MB.")
 
@@ -84,17 +97,26 @@ async def upload_legend(file: UploadFile):
         ".pdf": "application/pdf",
     }
     media_type = media_types.get(ext, "image/png")
+    logger.info(f"Media type resolved: {media_type}")
 
     try:
+        logger.info("Calling parse_legend_with_vision...")
         legend_data = await parse_legend_with_vision(
             image_data=contents,
             media_type=media_type,
             filename=file.filename,
         )
+        logger.info(
+            f"Legend parsed successfully: {legend_data.total_symbols} symbols, "
+            f"legend_id={legend_data.legend_id}"
+        )
     except Exception as e:
-        raise HTTPException(500, f"Failed to parse legend: {str(e)}")
+        logger.error(f"Legend parsing failed: {type(e).__name__}: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(500, f"Failed to parse legend: {type(e).__name__}: {str(e)}")
 
     legend_store[legend_data.legend_id] = legend_data
+    logger.info("=== LEGEND UPLOAD COMPLETE ===")
     return legend_data
 
 

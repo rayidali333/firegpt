@@ -144,9 +144,14 @@ async def parse_legend_with_vision(
     import base64
     import uuid
 
+    logger.info("=== parse_legend_with_vision START ===")
+    logger.info(f"Filename: {filename}, media_type: {media_type}, data_size: {len(image_data)} bytes")
+
     api_client = _get_client()
+    logger.info("Anthropic client initialized successfully")
 
     image_b64 = base64.standard_b64encode(image_data).decode("utf-8")
+    logger.info(f"Base64 encoded size: {len(image_b64)} chars")
 
     prompt = """You are analyzing a construction drawing legend/key sheet. Extract EVERY symbol definition shown.
 
@@ -193,45 +198,73 @@ Respond with ONLY a JSON array:
             },
         }
 
-    response = await api_client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=16384,
-        messages=[{
-            "role": "user",
-            "content": [
-                file_content_block,
-                {
-                    "type": "text",
-                    "text": prompt,
-                },
-            ],
-        }],
+    logger.info(f"Sending {media_type} to Claude API (model: claude-sonnet-4-20250514, max_tokens: 16384)...")
+    try:
+        response = await api_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=16384,
+            messages=[{
+                "role": "user",
+                "content": [
+                    file_content_block,
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    },
+                ],
+            }],
+        )
+    except Exception as api_err:
+        logger.error(f"Claude API call failed: {type(api_err).__name__}: {api_err}")
+        raise
+
+    logger.info(
+        f"Claude API response received: stop_reason={response.stop_reason}, "
+        f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
     )
 
-    # Warn if response was truncated (hit max_tokens)
     if response.stop_reason == "max_tokens":
         logger.warning(
-            "Legend parsing response was truncated (hit max_tokens). "
+            "Legend parsing response was TRUNCATED (hit max_tokens). "
             "Some symbols may be missing."
         )
 
+    if not response.content:
+        logger.error("Claude returned empty content array")
+        raise ValueError("Claude returned no content in response")
+
     response_text = response.content[0].text.strip()
+    logger.info(f"Response text length: {len(response_text)} chars")
+    logger.debug(f"Response text (first 500 chars): {response_text[:500]}")
 
     # Extract JSON array from response, handling various LLM output formats
-    raw_symbols = _extract_json_array(response_text)
+    try:
+        raw_symbols = _extract_json_array(response_text)
+    except (ValueError, json.JSONDecodeError) as parse_err:
+        logger.error(f"JSON extraction failed: {parse_err}")
+        logger.error(f"Full response text:\n{response_text}")
+        raise
+
+    logger.info(f"Extracted {len(raw_symbols)} raw symbol entries from AI response")
 
     symbols = []
-    for entry in raw_symbols:
-        symbols.append(LegendSymbol(
-            code=entry.get("code", ""),
-            name=entry.get("name", ""),
-            category=entry.get("category", "Other"),
-            shape=entry.get("shape", ""),
-            shape_code=entry.get("shape_code", "circle"),
-        ))
+    for i, entry in enumerate(raw_symbols):
+        try:
+            symbols.append(LegendSymbol(
+                code=entry.get("code", ""),
+                name=entry.get("name", ""),
+                category=entry.get("category", "Other"),
+                shape=entry.get("shape", ""),
+                shape_code=entry.get("shape_code", "circle"),
+            ))
+        except Exception as sym_err:
+            logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")
 
     # Extract unique system categories
     systems = sorted(set(s.category for s in symbols))
+    logger.info(
+        f"Legend parsing complete: {len(symbols)} symbols across {len(systems)} systems: {systems}"
+    )
 
     legend_id = str(uuid.uuid4())
     return LegendData(

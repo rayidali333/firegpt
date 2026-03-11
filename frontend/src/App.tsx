@@ -57,7 +57,9 @@ function App() {
       const data = await uploadLegend(file);
       setLegend(data);
     } catch (e: any) {
-      setLegendError(e.message || "Legend upload failed");
+      const errorMsg = e.message || "Legend upload failed";
+      console.error("[FireGPT] Legend upload failed:", errorMsg, e);
+      setLegendError(errorMsg);
     } finally {
       setLegendUploading(false);
     }
