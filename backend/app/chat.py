@@ -156,7 +156,7 @@ async def parse_legend_with_vision(
     prompt = """You are analyzing a construction drawing legend/key sheet. Extract EVERY symbol definition shown.
 
 For each symbol, provide:
-1. "code": The text code or abbreviation shown inside/next to the symbol (e.g., "MFACP", "CR", "SD", "DS", "ML"). If no code, use a short abbreviation of the name.
+1. "code": The text code or abbreviation shown inside/next to the symbol (e.g., "MFACP", "CR", "S", "H", "DS", "ML", "SCM"). If no code, use a short abbreviation of the name.
 2. "name": The full device name exactly as written (e.g., "Main Fire Alarm Control Panel", "Proximity Card Reader")
 3. "category": The system category it belongs to. Use EXACTLY one of these:
    - "Fire Alarm" — detectors, panels, modules, manual stations, sirens, strobes
@@ -166,17 +166,21 @@ For each symbol, provide:
    - "Video Surveillance" — CCTV cameras, workstations, NVR
    - "Public Address" — speakers, amplifiers, alarm racks
    - "Other" — anything that doesn't fit above
-4. "shape": Describe the visual shape of the symbol (e.g., "circle with S inside", "square with MFACP text", "filled circle", "diamond")
-5. "shape_code": Classify the marker shape as one of: "circle", "square", "diamond", "hexagon"
-   - Circles/round shapes → "circle"
-   - Squares/rectangles/boxes → "square"
-   - Diamond/rotated squares → "diamond"
-   - Hexagons or complex shapes → "hexagon"
+4. "shape": Describe the visual shape of the symbol precisely (e.g., "pentagon with S inside", "rectangle with MFACP text", "filled pentagon with H", "small square", "circle with arrow", "triangle speaker shape", "camera icon")
+5. "shape_code": Classify the OUTER shape of the symbol. Use EXACTLY one of:
+   - "circle" — circles, round shapes, ovals
+   - "square" — squares, rectangles, boxes
+   - "diamond" — diamond/rotated squares
+   - "pentagon" — pentagons (5-sided shapes, common for detectors)
+   - "hexagon" — hexagons (6-sided)
+   - "triangle" — triangles, speaker/cone shapes
+   - "star" — star shapes, asterisk-like
+6. "filled": true if the symbol is filled/solid, false if it is just an outline
 
 Extract ALL symbols from ALL sections/systems shown in the legend. Do not skip any.
 
 Respond with ONLY a JSON array:
-[{"code": "MFACP", "name": "Main Fire Alarm Control Panel", "category": "Fire Alarm", "shape": "rectangle with MFACP text", "shape_code": "square"}, ...]"""
+[{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "pentagon with S inside", "shape_code": "pentagon", "filled": false}, ...]"""
 
     # PDFs use "document" content type; images use "image" content type
     if media_type == "application/pdf":
@@ -256,6 +260,7 @@ Respond with ONLY a JSON array:
                 category=entry.get("category", "Other"),
                 shape=entry.get("shape", ""),
                 shape_code=entry.get("shape_code", "circle"),
+                filled=bool(entry.get("filled", False)),
             ))
         except Exception as sym_err:
             logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")

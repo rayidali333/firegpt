@@ -740,7 +740,7 @@
 }
 
 .symbol-color-indicator {
-  width: 36px;
+  width: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -754,33 +754,9 @@
   border: 1px solid rgba(0, 0, 0, 0.15);
 }
 
-.symbol-code-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 18px;
-  padding: 0 3px;
-  color: #fff;
-  font-family: "Monaco", "Menlo", monospace;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(0, 0, 0, 0.15);
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.symbol-code-badge.shape-circle {
-  border-radius: 9px;
-}
-
-.symbol-code-badge.shape-square {
-  border-radius: 3px;
-}
-
-.symbol-code-badge.shape-diamond {
-  border-radius: 2px;
-  transform: rotate(0deg);
+.symbol-marker-svg {
+  display: block;
+  overflow: visible;
 }
 
 .symbol-info {

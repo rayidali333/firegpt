@@ -11,6 +11,7 @@ export interface SymbolInfo {
   shape_code: string;
   category: string;
   legend_code: string;
+  legend_shape: string;
 }
 
 export interface AuditEntry {

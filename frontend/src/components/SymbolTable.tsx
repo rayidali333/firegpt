@@ -3,26 +3,87 @@ import { MapPin, Download, Check, X, Edit2 } from "lucide-react";
 import { SymbolInfo } from "../types";
 
 function SymbolMarker({ color, code, shape }: { color: string; code: string; shape: string }) {
-  // If we have a legend code, render it as a colored badge with shape
-  if (code) {
-    const isLong = code.length > 3;
-    return (
-      <span
-        className={`symbol-code-badge ${shape === "square" ? "shape-square" : shape === "diamond" ? "shape-diamond" : "shape-circle"}`}
-        style={{
-          backgroundColor: color,
-          minWidth: isLong ? 32 : 22,
-          fontSize: isLong ? 7 : 8,
-        }}
-        title={code}
-      >
-        {code}
-      </span>
-    );
+  if (!code) {
+    return <span className="symbol-dot" style={{ backgroundColor: color }} />;
   }
-  // Fallback: simple colored dot
+
+  // Determine SVG size based on code length
+  const isLong = code.length > 3;
+  const w = isLong ? 38 : 26;
+  const h = 22;
+  const cx = w / 2;
+  const cy = h / 2;
+  const fontSize = isLong ? 7.5 : (code.length > 2 ? 8 : 9);
+
+  // Build SVG shape path
+  let shapePath: React.ReactNode;
+  const stroke = color;
+  const fill = "none";
+  const sw = 1.5; // stroke width
+
+  switch (shape) {
+    case "pentagon": {
+      const r = 9;
+      const pts = Array.from({ length: 5 }, (_, i) => {
+        const angle = (Math.PI * 2 / 5) * i - Math.PI / 2;
+        return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`;
+      }).join(" ");
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "hexagon": {
+      const r = 9;
+      const pts = Array.from({ length: 6 }, (_, i) => {
+        const angle = (Math.PI / 3) * i - Math.PI / 2;
+        return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`;
+      }).join(" ");
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "triangle": {
+      const pts = `${cx},${cy - 9} ${cx + 10},${cy + 7} ${cx - 10},${cy + 7}`;
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "diamond": {
+      const pts = `${cx},${cy - 9} ${cx + 10},${cy} ${cx},${cy + 9} ${cx - 10},${cy}`;
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "star": {
+      const outer = 9, inner = 4.5;
+      const pts = Array.from({ length: 10 }, (_, i) => {
+        const r = i % 2 === 0 ? outer : inner;
+        const angle = (Math.PI / 5) * i - Math.PI / 2;
+        return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`;
+      }).join(" ");
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "square": {
+      const pad = isLong ? 2 : 3;
+      shapePath = (
+        <rect x={pad} y={cy - 9} width={w - pad * 2} height={18}
+          rx="2" fill={fill} stroke={stroke} strokeWidth={sw} />
+      );
+      break;
+    }
+    default: { // circle
+      const r = isLong ? Math.min(cx - 2, 10) : 9;
+      shapePath = <ellipse cx={cx} cy={cy} rx={isLong ? cx - 2 : r} ry={r}
+        fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+  }
+
   return (
-    <span className="symbol-dot" style={{ backgroundColor: color }} />
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="symbol-marker-svg">
+      {shapePath}
+      <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
+        fill={color} fontSize={fontSize} fontWeight="bold" fontFamily="Monaco, Menlo, monospace">
+        {code}
+      </text>
+    </svg>
   );
 }
 

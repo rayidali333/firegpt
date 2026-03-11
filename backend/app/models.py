@@ -11,9 +11,10 @@ class SymbolInfo(BaseModel):
     source: str = "dictionary"  # "dictionary" | "ai" | "legend" | "manual"
     block_variants: list[str] = []  # Individual block names before consolidation
     original_count: int | None = None  # Pre-override count (null if never overridden)
-    shape_code: str = "circle"  # Marker shape: "circle", "square", "diamond", "hexagon"
+    shape_code: str = "circle"  # Marker shape: "circle", "square", "diamond", "hexagon", "pentagon", "triangle"
     category: str = ""  # System category from legend (e.g., "Fire Alarm", "Access Control")
     legend_code: str = ""  # Symbol code from legend (e.g., "S", "MFACP", "SCM")
+    legend_shape: str = ""  # Shape description from legend (e.g., "pentagon with S inside")
 
 
 class AuditEntry(BaseModel):
@@ -77,8 +78,9 @@ class LegendSymbol(BaseModel):
     code: str  # Text code shown in symbol (e.g., "MFACP", "CR", "DS")
     name: str  # Full device name (e.g., "Main Fire Alarm Control Panel")
     category: str  # System category (e.g., "Fire Alarm", "Access Control", "BMS")
-    shape: str = ""  # Visual shape description (e.g., "circle", "square", "rectangle")
-    shape_code: str = ""  # SVG marker shape: "circle", "square", "diamond", "hexagon"
+    shape: str = ""  # Visual shape description (e.g., "pentagon with S inside")
+    shape_code: str = ""  # SVG marker shape: "circle", "square", "diamond", "pentagon", "hexagon", "triangle", "star"
+    filled: bool = False  # Whether the symbol shape is filled/solid
 
 
 class LegendData(BaseModel):
