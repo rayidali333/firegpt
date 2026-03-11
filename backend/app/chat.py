@@ -446,13 +446,30 @@ Respond with ONLY a JSON object. Fire devices get their label, everything else g
 
     try:
         api_client = _get_client()
+
+        logger.info(
+            f"=== AI BLOCK CLASSIFICATION START ===\n"
+            f"  Blocks to classify: {len(ai_candidate_blocks)}\n"
+            f"  Legend: {'yes (' + str(len(legend.symbols)) + ' symbols)' if legend else 'no'}\n"
+            f"  Prompt length: {len(prompt)} chars"
+        )
+
         response = await api_client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=2048,
+            max_tokens=16384,
             messages=[{"role": "user", "content": prompt}],
         )
 
+        logger.info(
+            f"  Claude response: stop_reason={response.stop_reason}, "
+            f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
+        )
+
+        if response.stop_reason == "max_tokens":
+            logger.warning("AI classification response was TRUNCATED (hit max_tokens)")
+
         response_text = response.content[0].text.strip()
+        logger.debug(f"  Response text (first 500 chars): {response_text[:500]}")
 
         # Extract JSON from response (handle markdown code blocks)
         if response_text.startswith("```"):
@@ -473,18 +490,32 @@ Respond with ONLY a JSON object. Fire devices get their label, everything else g
 
         # Filter out null values — only return positively identified blocks
         identified = {}
+        null_count = 0
         for block_name, label in result.items():
             if label and isinstance(label, str) and len(label.strip()) > 1:
                 identified[block_name] = label.strip()
+            else:
+                null_count += 1
+
+        logger.info(
+            f"  Classification result: {len(identified)} identified, {null_count} null/skipped\n"
+            f"  ==========================="
+        )
+        if identified:
+            for name, label in list(identified.items())[:20]:
+                logger.info(f"    {name!r} → {label!r}")
+            if len(identified) > 20:
+                logger.info(f"    ... and {len(identified) - 20} more")
 
         return identified
 
-    except json.JSONDecodeError:
-        logger.warning("AI block classification returned invalid JSON")
-        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"AI block classification returned invalid JSON: {e}")
+        logger.error(f"Response text:\n{response_text[:1000]}")
+        raise  # Re-raise so caller can surface in analysis log
     except Exception as e:
-        logger.warning(f"AI block classification failed: {e}")
-        return {}
+        logger.error(f"AI block classification failed: {type(e).__name__}: {e}")
+        raise  # Re-raise so caller can surface in analysis log
 
 
 def _build_system_prompt(drawing: ParseResponse, legend: LegendData | None = None) -> str:

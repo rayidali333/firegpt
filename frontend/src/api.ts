@@ -44,21 +44,49 @@ export async function uploadDrawing(file: File, legendId?: string): Promise<Draw
   const formData = new FormData();
   formData.append("file", file);
 
+  console.log(
+    `[FireGPT] Uploading drawing: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)` +
+    (legendId ? `, with legend_id=${legendId}` : ", NO legend attached")
+  );
+
   const url = legendId
     ? `${API_BASE}/api/upload?legend_id=${encodeURIComponent(legendId)}`
     : `${API_BASE}/api/upload`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Upload failed" }));
-    throw new Error(err.detail || "Upload failed");
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (networkErr) {
+    console.error("[FireGPT] Drawing upload network error:", networkErr);
+    throw new Error(`Network error: ${networkErr instanceof Error ? networkErr.message : "Could not reach server"}`);
   }
 
-  return res.json();
+  console.log(`[FireGPT] Drawing upload response: ${res.status} ${res.statusText}`);
+
+  if (!res.ok) {
+    let detail = `Server error ${res.status}`;
+    try {
+      const errBody = await res.json();
+      console.error("[FireGPT] Drawing upload error response:", errBody);
+      detail = errBody.detail || detail;
+    } catch {
+      const textBody = await res.text().catch(() => "");
+      console.error("[FireGPT] Drawing upload non-JSON error:", res.status, textBody.slice(0, 500));
+      if (textBody) detail = `${detail}: ${textBody.slice(0, 200)}`;
+    }
+    throw new Error(detail);
+  }
+
+  const data = await res.json();
+  console.log(
+    `[FireGPT] Drawing parsed: ${data.symbols?.length} symbol types, ` +
+    `${data.symbols?.reduce((sum: number, s: any) => sum + s.count, 0)} total devices`,
+    data
+  );
+  return data;
 }
 
 export async function getDrawingPreview(

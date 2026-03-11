@@ -122,6 +122,9 @@ async def upload_legend(file: UploadFile):
 
 @app.post("/api/upload", response_model=ParseResponse)
 async def upload_drawing(file: UploadFile, legend_id: str | None = None):
+    logger.info("=== DRAWING UPLOAD START ===")
+    logger.info(f"Filename: {file.filename}, legend_id: {legend_id!r}")
+
     if not file.filename:
         raise HTTPException(400, "No file provided")
 
@@ -140,6 +143,19 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
 
     # Resolve legend if provided
     legend = legend_store.get(legend_id) if legend_id else None
+    if legend_id:
+        if legend:
+            logger.info(
+                f"Legend resolved: {legend.filename} ({legend.total_symbols} symbols, "
+                f"systems: {legend.systems})"
+            )
+        else:
+            logger.warning(
+                f"legend_id={legend_id!r} was provided but NOT FOUND in legend_store! "
+                f"Available legend IDs: {list(legend_store.keys())}"
+            )
+    else:
+        logger.info("No legend_id provided — using dictionary fast-path")
 
     try:
         if ext == ".dxf":
@@ -167,11 +183,22 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
         else parse_result.ai_candidate_blocks  # When legend present, parser sends ALL blocks as candidates
     )
 
+    logger.info(
+        f"Blocks to classify: {len(blocks_to_classify)}, "
+        f"fast_path_symbols: {len(parse_result.fast_path_symbols)}, "
+        f"mode: {'legend+AI' if legend else 'dictionary+AI'}"
+    )
+
     if blocks_to_classify:
         try:
             fast_path_labels = {
                 s.block_name: s.label for s in parse_result.fast_path_symbols
             }
+
+            logger.info(
+                f"Sending {len(blocks_to_classify)} blocks to AI classification"
+                f"{f' with legend ({legend.total_symbols} symbols)' if legend else ''}..."
+            )
 
             ai_labels = await classify_blocks_with_ai(
                 ai_candidate_blocks=blocks_to_classify,
@@ -183,6 +210,11 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 fast_path_labels=fast_path_labels,
                 legend=legend,
             )
+
+            logger.info(f"AI classification returned {len(ai_labels)} identified devices")
+            if ai_labels:
+                for k, v in ai_labels.items():
+                    logger.debug(f"  AI: {k!r} → {v!r}")
 
             if ai_labels:
                 source_label = "legend + AI" if legend else "AI"
@@ -222,11 +254,15 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                     "type": "info",
                     "message": f"AI analyzed {n} blocks — none identified as devices",
                 })
-        except Exception:
+        except Exception as e:
+            logger.error(f"AI classification FAILED: {type(e).__name__}: {e}")
+            logger.error(traceback.format_exc())
             parse_result.analysis.append({
                 "type": "warning",
-                "message": "AI classification unavailable (no API key or service error)",
+                "message": f"AI classification failed: {type(e).__name__}: {str(e)[:200]}",
             })
+    else:
+        logger.info("No blocks to classify — all handled by fast-path")
 
     # Consolidate symbols by label — merge different block names that map to
     # the same device type (e.g., 4 different "Control Module" block variants
