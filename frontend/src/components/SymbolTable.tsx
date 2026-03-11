@@ -2,41 +2,28 @@ import React, { useState } from "react";
 import { MapPin, Download, Check, X, Edit2 } from "lucide-react";
 import { SymbolInfo } from "../types";
 
-function SymbolShape({ color, shape }: { color: string; shape: string }) {
-  const size = 14;
-  const half = size / 2;
-  switch (shape) {
-    case "square":
-      return (
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-          <rect x="1" y="1" width={size - 2} height={size - 2} rx="2" fill={color} />
-        </svg>
-      );
-    case "diamond":
-      return (
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-          <polygon points={`${half},1 ${size - 1},${half} ${half},${size - 1} 1,${half}`} fill={color} />
-        </svg>
-      );
-    case "hexagon": {
-      const r = half - 1;
-      const pts = Array.from({ length: 6 }, (_, i) => {
-        const angle = (Math.PI / 3) * i - Math.PI / 2;
-        return `${half + r * Math.cos(angle)},${half + r * Math.sin(angle)}`;
-      }).join(" ");
-      return (
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-          <polygon points={pts} fill={color} />
-        </svg>
-      );
-    }
-    default: // circle
-      return (
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-          <circle cx={half} cy={half} r={half - 1} fill={color} />
-        </svg>
-      );
+function SymbolMarker({ color, code, shape }: { color: string; code: string; shape: string }) {
+  // If we have a legend code, render it as a colored badge with shape
+  if (code) {
+    const isLong = code.length > 3;
+    return (
+      <span
+        className={`symbol-code-badge ${shape === "square" ? "shape-square" : shape === "diamond" ? "shape-diamond" : "shape-circle"}`}
+        style={{
+          backgroundColor: color,
+          minWidth: isLong ? 32 : 22,
+          fontSize: isLong ? 7 : 8,
+        }}
+        title={code}
+      >
+        {code}
+      </span>
+    );
   }
+  // Fallback: simple colored dot
+  return (
+    <span className="symbol-dot" style={{ backgroundColor: color }} />
+  );
 }
 
 interface Props {
@@ -158,7 +145,7 @@ export default function SymbolTable({
                 }
               >
                 <div className="symbol-color-indicator">
-                  <SymbolShape color={s.color} shape={s.shape_code || "circle"} />
+                  <SymbolMarker color={s.color} code={s.legend_code || ""} shape={s.shape_code || "circle"} />
                 </div>
                 <div className="symbol-info">
                   {isEditing ? (

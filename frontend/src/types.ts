@@ -10,6 +10,7 @@ export interface SymbolInfo {
   original_count: number | null;
   shape_code: string;
   category: string;
+  legend_code: string;
 }
 
 export interface AuditEntry {

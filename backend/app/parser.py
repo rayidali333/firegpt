@@ -232,10 +232,39 @@ CATEGORY_COLORS: dict[str, str] = {
     "Other": "#95A5A6",
 }
 
+# Distinct color palette for individual symbol types (20 visually distinct colors)
+SYMBOL_PALETTE = [
+    "#E74C3C",  # red
+    "#3498DB",  # blue
+    "#2ECC71",  # green
+    "#F39C12",  # orange
+    "#9B59B6",  # purple
+    "#1ABC9C",  # teal
+    "#E67E22",  # dark orange
+    "#2980B9",  # dark blue
+    "#27AE60",  # dark green
+    "#8E44AD",  # dark purple
+    "#D35400",  # burnt orange
+    "#16A085",  # dark teal
+    "#C0392B",  # dark red
+    "#2C3E50",  # navy
+    "#F1C40F",  # yellow
+    "#7D3C98",  # violet
+    "#1F618D",  # steel blue
+    "#117A65",  # forest green
+    "#A04000",  # brown
+    "#5B2C6F",  # deep purple
+]
+
 
 def get_category_color(category: str) -> str:
     """Get color for a legend system category."""
     return CATEGORY_COLORS.get(category, DEFAULT_COLOR)
+
+
+def get_symbol_palette_color(index: int) -> str:
+    """Get a distinct color from the palette by index."""
+    return SYMBOL_PALETTE[index % len(SYMBOL_PALETTE)]
 
 # Block names to always skip (truly internal AutoCAD objects)
 SKIP_PATTERNS = [

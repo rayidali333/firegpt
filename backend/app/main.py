@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color, get_category_color
+from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color, get_category_color, get_symbol_palette_color
 from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai, parse_legend_with_vision
 
@@ -230,30 +230,40 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                     for ls in legend.symbols:
                         legend_lookup[ls.name.upper()] = ls
 
+                # Track unique labels for per-symbol color assignment
+                label_color_map: dict[str, str] = {}
+                color_index = 0
+
                 for block in blocks_to_classify:
                     if block.block_name in ai_labels:
                         label = ai_labels[block.block_name]
                         confidence = "high" if legend else "medium"
                         source = "legend" if legend else "ai"
 
-                        # Look up legend symbol for category, shape, and color
+                        # Look up legend symbol for category, shape, code, and color
                         matched_legend = legend_lookup.get(label.upper())
                         if not matched_legend:
-                            # Fuzzy: find best match by checking if legend name is contained in label or vice versa
+                            # Fuzzy: find best match
                             label_upper = label.upper()
                             for lname, ls in legend_lookup.items():
                                 if lname in label_upper or label_upper in lname:
                                     matched_legend = ls
                                     break
 
+                        # Assign a unique color per label (device type)
+                        if label not in label_color_map:
+                            label_color_map[label] = get_symbol_palette_color(color_index)
+                            color_index += 1
+
+                        color = label_color_map[label]
+                        legend_code = ""
+                        shape_code = "circle"
+                        category = ""
+
                         if matched_legend:
-                            color = get_category_color(matched_legend.category)
+                            legend_code = matched_legend.code
                             shape_code = matched_legend.shape_code or "circle"
                             category = matched_legend.category
-                        else:
-                            color = _get_symbol_color(label)
-                            shape_code = "circle"
-                            category = ""
 
                         parse_result.symbols.append(
                             SymbolInfo(
@@ -266,6 +276,7 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                                 source=source,
                                 shape_code=shape_code,
                                 category=category,
+                                legend_code=legend_code,
                             )
                         )
                         parse_result.audit.append(AuditEntry(
@@ -380,6 +391,7 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 block_variants=block_names,
                 shape_code=group[0].shape_code,
                 category=group[0].category,
+                legend_code=group[0].legend_code,
             ))
 
     # Sort by count descending

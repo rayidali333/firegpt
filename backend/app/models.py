@@ -13,6 +13,7 @@ class SymbolInfo(BaseModel):
     original_count: int | None = None  # Pre-override count (null if never overridden)
     shape_code: str = "circle"  # Marker shape: "circle", "square", "diamond", "hexagon"
     category: str = ""  # System category from legend (e.g., "Fire Alarm", "Access Control")
+    legend_code: str = ""  # Symbol code from legend (e.g., "S", "MFACP", "SCM")
 
 
 class AuditEntry(BaseModel):
