@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
+from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color, get_category_color
 from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai, parse_legend_with_vision
 
@@ -224,20 +224,48 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                     + ", ".join(f'"{k}" → {v}' for k, v in list(ai_labels.items())[:8]),
                 })
 
+                # Build legend lookup for category/shape/color when legend is available
+                legend_lookup: dict[str, "LegendSymbol"] = {}
+                if legend:
+                    for ls in legend.symbols:
+                        legend_lookup[ls.name.upper()] = ls
+
                 for block in blocks_to_classify:
                     if block.block_name in ai_labels:
                         label = ai_labels[block.block_name]
                         confidence = "high" if legend else "medium"
                         source = "legend" if legend else "ai"
+
+                        # Look up legend symbol for category, shape, and color
+                        matched_legend = legend_lookup.get(label.upper())
+                        if not matched_legend:
+                            # Fuzzy: find best match by checking if legend name is contained in label or vice versa
+                            label_upper = label.upper()
+                            for lname, ls in legend_lookup.items():
+                                if lname in label_upper or label_upper in lname:
+                                    matched_legend = ls
+                                    break
+
+                        if matched_legend:
+                            color = get_category_color(matched_legend.category)
+                            shape_code = matched_legend.shape_code or "circle"
+                            category = matched_legend.category
+                        else:
+                            color = _get_symbol_color(label)
+                            shape_code = "circle"
+                            category = ""
+
                         parse_result.symbols.append(
                             SymbolInfo(
                                 block_name=block.block_name,
                                 label=label,
                                 count=block.count,
                                 locations=block.locations,
-                                color=_get_symbol_color(label),
+                                color=color,
                                 confidence=confidence,
                                 source=source,
+                                shape_code=shape_code,
+                                category=category,
                             )
                         )
                         parse_result.audit.append(AuditEntry(
@@ -350,6 +378,8 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 confidence=best_confidence,
                 source=best_source,
                 block_variants=block_names,
+                shape_code=group[0].shape_code,
+                category=group[0].category,
             ))
 
     # Sort by count descending

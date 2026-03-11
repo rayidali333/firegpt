@@ -2,6 +2,43 @@ import React, { useState } from "react";
 import { MapPin, Download, Check, X, Edit2 } from "lucide-react";
 import { SymbolInfo } from "../types";
 
+function SymbolShape({ color, shape }: { color: string; shape: string }) {
+  const size = 14;
+  const half = size / 2;
+  switch (shape) {
+    case "square":
+      return (
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+          <rect x="1" y="1" width={size - 2} height={size - 2} rx="2" fill={color} />
+        </svg>
+      );
+    case "diamond":
+      return (
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+          <polygon points={`${half},1 ${size - 1},${half} ${half},${size - 1} 1,${half}`} fill={color} />
+        </svg>
+      );
+    case "hexagon": {
+      const r = half - 1;
+      const pts = Array.from({ length: 6 }, (_, i) => {
+        const angle = (Math.PI / 3) * i - Math.PI / 2;
+        return `${half + r * Math.cos(angle)},${half + r * Math.sin(angle)}`;
+      }).join(" ");
+      return (
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+          <polygon points={pts} fill={color} />
+        </svg>
+      );
+    }
+    default: // circle
+      return (
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+          <circle cx={half} cy={half} r={half - 1} fill={color} />
+        </svg>
+      );
+  }
+}
+
 interface Props {
   symbols: SymbolInfo[];
   total: number;
@@ -121,10 +158,7 @@ export default function SymbolTable({
                 }
               >
                 <div className="symbol-color-indicator">
-                  <span
-                    className="symbol-dot"
-                    style={{ backgroundColor: s.color }}
-                  />
+                  <SymbolShape color={s.color} shape={s.shape_code || "circle"} />
                 </div>
                 <div className="symbol-info">
                   {isEditing ? (

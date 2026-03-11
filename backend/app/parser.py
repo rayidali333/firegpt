@@ -221,6 +221,22 @@ SYMBOL_COLORS: dict[str, str] = {
 
 DEFAULT_COLOR = "#95A5A6"
 
+# Colors for legend system categories
+CATEGORY_COLORS: dict[str, str] = {
+    "Fire Alarm": "#E74C3C",
+    "Access Control": "#3498DB",
+    "Structured Cabling": "#E67E22",
+    "BMS": "#9B59B6",
+    "Video Surveillance": "#1ABC9C",
+    "Public Address": "#2ECC71",
+    "Other": "#95A5A6",
+}
+
+
+def get_category_color(category: str) -> str:
+    """Get color for a legend system category."""
+    return CATEGORY_COLORS.get(category, DEFAULT_COLOR)
+
 # Block names to always skip (truly internal AutoCAD objects)
 SKIP_PATTERNS = [
     r"^\*Model_Space",

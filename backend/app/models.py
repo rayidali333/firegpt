@@ -8,9 +8,11 @@ class SymbolInfo(BaseModel):
     locations: list[tuple[float, float]]  # ALL (x, y) insertion points
     color: str = "#95A5A6"  # Category color for visualization
     confidence: str = "high"  # "high" (dictionary) | "medium" (AI) | "manual" (user override)
-    source: str = "dictionary"  # "dictionary" | "ai" | "manual"
+    source: str = "dictionary"  # "dictionary" | "ai" | "legend" | "manual"
     block_variants: list[str] = []  # Individual block names before consolidation
     original_count: int | None = None  # Pre-override count (null if never overridden)
+    shape_code: str = "circle"  # Marker shape: "circle", "square", "diamond", "hexagon"
+    category: str = ""  # System category from legend (e.g., "Fire Alarm", "Access Control")
 
 
 class AuditEntry(BaseModel):

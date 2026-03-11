@@ -5,9 +5,11 @@ export interface SymbolInfo {
   locations: [number, number][];
   color: string;
   confidence: "high" | "medium" | "manual";
-  source: "dictionary" | "ai" | "manual";
+  source: "dictionary" | "ai" | "legend" | "manual";
   block_variants: string[];
   original_count: number | null;
+  shape_code: string;
+  category: string;
 }
 
 export interface AuditEntry {
