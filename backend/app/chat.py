@@ -372,10 +372,19 @@ async def classify_blocks_with_ai(
     # Build prompt — legend-aware or standard
     if legend:
         # Legend-aware prompt: use legend as authoritative source
-        legend_entries = "\n".join(
-            f'  - Code: "{s.code}" → {s.name} [{s.category}]'
-            for s in legend.symbols
-        )
+        # Build a numbered list of valid labels so the AI MUST pick from this exact set
+        valid_labels = []
+        legend_entries_lines = []
+        for idx, s in enumerate(legend.symbols):
+            valid_labels.append(s.name)
+            legend_entries_lines.append(
+                f'  {idx+1}. Code: "{s.code}" → "{s.name}" [{s.category}]'
+            )
+        legend_entries = "\n".join(legend_entries_lines)
+
+        # Build a JSON-style list of the exact valid label strings
+        valid_labels_json = json.dumps(valid_labels)
+
         prompt = f"""You are a fire alarm and building systems expert analyzing a CAD construction drawing.
 
 You have been provided with the OFFICIAL LEGEND/KEY for this project. Use it as the AUTHORITATIVE
@@ -390,20 +399,24 @@ DRAWING CONTEXT:
 BLOCKS TO CLASSIFY:
 {blocks_json}
 
-CLASSIFICATION GUIDELINES:
-1. The legend above is the DEFINITIVE reference. Match blocks to legend entries by:
+CLASSIFICATION RULES:
+1. The legend above is the ONLY valid source. You MUST use the EXACT name string from the legend.
+2. VALID LABELS (you MUST use one of these exact strings, or null):
+   {valid_labels_json}
+3. DO NOT invent, rephrase, or paraphrase device names. Use the legend name VERBATIM.
+   - If the legend says "Heat Detector", you must return "Heat Detector", NOT "Temperature Detector"
+   - If the legend says "Manual Call Station", NOT "Pull Station" or "Manual Pull Station"
+   - If the legend says "Fire Alarm Siren", NOT "Alarm Siren" or "Siren"
+4. Match blocks to legend entries by:
    - Block name containing the legend code (e.g., block "FA_MFACP_01" matches legend code "MFACP")
    - Text labels inside the block matching legend codes
    - Block attributes matching legend codes or names
    - Layer names suggesting the system category
-2. Use the EXACT device name from the legend as the label (e.g., "Main Fire Alarm Control Panel")
-3. Blocks from ALL systems in the legend should be classified (Fire Alarm, Access Control, BMS, CCTV, etc.)
-4. Title blocks, sheet frames, borders, furniture, structural elements = null
-5. When in doubt, classify as null. False negatives are better than false positives.
-6. A block that appears hundreds of times and is NOT on any relevant system layer is likely NOT a device.
+5. Title blocks, sheet frames, borders, furniture, structural elements = null
+6. When in doubt, classify as null. False negatives are better than false positives.
 
-Respond with ONLY a JSON object. Identified devices get their legend name, everything else gets null:
-{{"block_name_1": "Main Fire Alarm Control Panel", "block_name_2": null, ...}}"""
+Respond with ONLY a JSON object mapping block names to EXACT legend names or null:
+{{"block_name_1": "Heat Detector", "block_name_2": null, ...}}"""
     else:
         # Standard prompt — no legend available
         prompt = f"""You are a fire alarm systems expert analyzing a CAD construction drawing.

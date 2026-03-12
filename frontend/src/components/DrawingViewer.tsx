@@ -2,6 +2,101 @@ import React, { useState, useRef, useCallback, useMemo, useEffect } from "react"
 import { ZoomIn, ZoomOut, Maximize2, Loader } from "lucide-react";
 import { DrawingPreview, SymbolInfo } from "../types";
 
+/**
+ * Generates SVG polygon points for a regular n-sided shape centered at (cx, cy) with radius r.
+ */
+function polygonPoints(cx: number, cy: number, r: number, sides: number): string {
+  return Array.from({ length: sides }, (_, i) => {
+    const angle = (Math.PI * 2 / sides) * i - Math.PI / 2;
+    return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`;
+  }).join(" ");
+}
+
+/**
+ * Renders a shape outline + code text for a symbol marker on the drawing view.
+ * Uses the legend's shape_code (pentagon, hexagon, square, etc.) instead of plain circles.
+ */
+function DrawingMarkerShape({
+  cx, cy, r, color, strokeW, code, shape, fontSize, isSelected,
+}: {
+  cx: number; cy: number; r: number; color: string; strokeW: number;
+  code: string; shape: string; fontSize: number; isSelected?: boolean;
+}) {
+  const fill = isSelected ? color : color;
+  const stroke = "white";
+  const darkStroke = "rgba(0,0,0,0.5)";
+
+  // Build the outer dark outline shape + colored fill shape
+  let outerShape: React.ReactNode;
+  let innerShape: React.ReactNode;
+  const outerR = r + strokeW;
+
+  switch (shape) {
+    case "pentagon": {
+      outerShape = <polygon points={polygonPoints(cx, cy, outerR, 5)} fill={darkStroke} />;
+      innerShape = <polygon points={polygonPoints(cx, cy, r, 5)} fill={fill} stroke={stroke} strokeWidth={strokeW} />;
+      break;
+    }
+    case "hexagon": {
+      outerShape = <polygon points={polygonPoints(cx, cy, outerR, 6)} fill={darkStroke} />;
+      innerShape = <polygon points={polygonPoints(cx, cy, r, 6)} fill={fill} stroke={stroke} strokeWidth={strokeW} />;
+      break;
+    }
+    case "triangle": {
+      outerShape = <polygon points={polygonPoints(cx, cy, outerR, 3)} fill={darkStroke} />;
+      innerShape = <polygon points={polygonPoints(cx, cy, r, 3)} fill={fill} stroke={stroke} strokeWidth={strokeW} />;
+      break;
+    }
+    case "diamond": {
+      outerShape = <polygon points={polygonPoints(cx, cy, outerR, 4)} fill={darkStroke} />;
+      innerShape = <polygon points={polygonPoints(cx, cy, r, 4)} fill={fill} stroke={stroke} strokeWidth={strokeW} />;
+      break;
+    }
+    case "star": {
+      const starPts = (rad: number) => Array.from({ length: 10 }, (_, i) => {
+        const rr = i % 2 === 0 ? rad : rad * 0.5;
+        const angle = (Math.PI / 5) * i - Math.PI / 2;
+        return `${cx + rr * Math.cos(angle)},${cy + rr * Math.sin(angle)}`;
+      }).join(" ");
+      outerShape = <polygon points={starPts(outerR)} fill={darkStroke} />;
+      innerShape = <polygon points={starPts(r)} fill={fill} stroke={stroke} strokeWidth={strokeW} />;
+      break;
+    }
+    case "square": {
+      const half = r * 0.85; // slightly smaller to look proportional
+      const outerHalf = outerR * 0.85;
+      outerShape = <rect x={cx - outerHalf} y={cy - outerHalf} width={outerHalf * 2} height={outerHalf * 2} rx={strokeW} fill={darkStroke} />;
+      innerShape = <rect x={cx - half} y={cy - half} width={half * 2} height={half * 2} rx={strokeW} fill={fill} stroke={stroke} strokeWidth={strokeW} />;
+      break;
+    }
+    default: { // circle
+      outerShape = <circle cx={cx} cy={cy} r={outerR} fill={darkStroke} />;
+      innerShape = <circle cx={cx} cy={cy} r={r} fill={fill} stroke={stroke} strokeWidth={strokeW} />;
+      break;
+    }
+  }
+
+  return (
+    <>
+      {outerShape}
+      {innerShape}
+      {code && isSelected && (
+        <text
+          x={cx} y={cy}
+          textAnchor="middle" dominantBaseline="central"
+          fill="white" fontSize={fontSize} fontWeight="bold"
+          fontFamily="Arial, sans-serif"
+          stroke="rgba(0,0,0,0.4)" strokeWidth={fontSize * 0.08}
+          paintOrder="stroke"
+          style={{ pointerEvents: "none" }}
+        >
+          {code}
+        </text>
+      )}
+    </>
+  );
+}
+
 interface Props {
   preview: DrawingPreview | null;
   loading: boolean;
@@ -236,7 +331,7 @@ export default function DrawingViewer({
                 </filter>
               </defs>
               {selectedSymbol ? (
-                // Selected mode: show only the selected symbol with numbered circles
+                // Selected mode: show only the selected symbol with shape + number
                 symbolsWithPositions
                   .filter((s) => s.block_name === selectedSymbol)
                   .map((symbol) =>
@@ -253,38 +348,15 @@ export default function DrawingViewer({
                         style={{ cursor: "pointer" }}
                         filter="url(#marker-shadow)"
                       >
-                        {/* Dark outline ring for contrast */}
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={selectedRadius + selectedStroke}
-                          fill="rgba(0,0,0,0.5)"
-                        />
-                        {/* Main colored circle */}
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={selectedRadius}
-                          fill={symbol.color}
-                          stroke="white"
-                          strokeWidth={selectedStroke}
-                        />
-                        <text
-                          x={cx}
-                          y={cy}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fill="white"
+                        <DrawingMarkerShape
+                          cx={cx} cy={cy} r={selectedRadius}
+                          color={symbol.color}
+                          strokeW={selectedStroke}
+                          code={symbol.legend_code || String(i + 1)}
+                          shape={symbol.shape_code || "circle"}
                           fontSize={fontSize}
-                          fontWeight="bold"
-                          fontFamily="Arial, sans-serif"
-                          stroke="rgba(0,0,0,0.4)"
-                          strokeWidth={fontSize * 0.08}
-                          paintOrder="stroke"
-                          style={{ pointerEvents: "none" }}
-                        >
-                          {i + 1}
-                        </text>
+                          isSelected
+                        />
                         <title>
                           {symbol.label} #{i + 1}
                         </title>
@@ -292,40 +364,34 @@ export default function DrawingViewer({
                     ))
                   )
               ) : (
-                // Default mode: show all symbols as small dots
+                // Default mode: show all symbols as small shaped markers
                 symbolsWithPositions.map((symbol) =>
                   symbol.svgPositions.map(([cx, cy], i) => {
                     const isHovered = hoveredMarker === symbol.block_name;
                     const r = isHovered ? markerRadius * 1.5 : markerRadius;
                     return (
-                      <g key={`${symbol.block_name}-${i}`}>
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={r + strokeWidth}
-                          fill="rgba(0,0,0,0.4)"
+                      <g
+                        key={`${symbol.block_name}-${i}`}
+                        className="viewer-marker"
+                        onMouseEnter={() => setHoveredMarker(symbol.block_name)}
+                        onMouseLeave={() => setHoveredMarker(null)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectSymbol(symbol.block_name);
+                        }}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <DrawingMarkerShape
+                          cx={cx} cy={cy} r={r}
+                          color={symbol.color}
+                          strokeW={strokeWidth}
+                          code=""
+                          shape={symbol.shape_code || "circle"}
+                          fontSize={0}
                         />
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={r}
-                          fill={symbol.color}
-                          stroke="white"
-                          strokeWidth={strokeWidth}
-                          className="viewer-marker"
-                          onMouseEnter={() =>
-                            setHoveredMarker(symbol.block_name)
-                          }
-                          onMouseLeave={() => setHoveredMarker(null)}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onSelectSymbol(symbol.block_name);
-                          }}
-                        >
-                          <title>
-                            {symbol.label} ({symbol.count})
-                          </title>
-                        </circle>
+                        <title>
+                          {symbol.label} ({symbol.count})
+                        </title>
                       </g>
                     );
                   })
