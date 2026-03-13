@@ -100,7 +100,18 @@ function DrawingMarkerShape({
 /**
  * Small SVG icon for the bottom legend bar — shows shape + optional code text.
  */
-function LegendBarIcon({ color, shape, code }: { color: string; shape: string; code: string }) {
+function LegendBarIcon({ color, shape, code, svgIcon }: { color: string; shape: string; code: string; svgIcon?: string }) {
+  // Prefer AI-generated SVG icon when available
+  if (svgIcon) {
+    return (
+      <span
+        className="viewer-legend-svg-icon"
+        style={{ color }}
+        dangerouslySetInnerHTML={{ __html: svgIcon }}
+      />
+    );
+  }
+
   const size = 14;
   const cx = size / 2;
   const cy = size / 2;
@@ -491,7 +502,7 @@ export default function DrawingViewer({
                 )
               }
             >
-              <LegendBarIcon color={s.color} shape={s.shape_code || "circle"} code={s.legend_code || ""} />
+              <LegendBarIcon color={s.color} shape={s.shape_code || "circle"} code={s.legend_code || ""} svgIcon={s.svg_icon || ""} />
               <span className="viewer-legend-label">{s.label}</span>
               <span className="viewer-legend-count">{s.count}</span>
             </div>

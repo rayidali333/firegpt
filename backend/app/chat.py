@@ -203,6 +203,139 @@ def _correct_legend_shape(sym: LegendSymbol) -> LegendSymbol:
     return sym
 
 
+def _sanitize_svg(svg: str) -> str:
+    """Sanitize AI-generated SVG to prevent XSS and normalize for embedding."""
+    # Remove script tags
+    svg = re.sub(r'<script[^>]*>.*?</script>', '', svg, flags=re.DOTALL | re.IGNORECASE)
+    # Remove event handlers (onclick, onload, onerror, etc.)
+    svg = re.sub(r'\s+on\w+\s*=\s*["\'][^"\']*["\']', '', svg, flags=re.IGNORECASE)
+    # Remove javascript: URLs
+    svg = re.sub(r'javascript\s*:', '', svg, flags=re.IGNORECASE)
+    # Remove external references
+    svg = re.sub(r'href\s*=\s*["\']https?://[^"\']*["\']', '', svg, flags=re.IGNORECASE)
+    # Remove width/height from <svg> tag so CSS can control sizing
+    svg = re.sub(r'(<svg[^>]*?)\s+width\s*=\s*["\'][^"\']*["\']', r'\1', svg, flags=re.IGNORECASE)
+    svg = re.sub(r'(<svg[^>]*?)\s+height\s*=\s*["\'][^"\']*["\']', r'\1', svg, flags=re.IGNORECASE)
+    return svg.strip()
+
+
+async def _generate_symbol_svgs(symbols: list[LegendSymbol]) -> list[LegendSymbol]:
+    """Generate SVG icons for each legend symbol using AI text model.
+
+    Takes the shape descriptions from the vision-parsed legend and generates
+    clean, monochrome SVG icons that match the actual legend symbols.
+    Uses currentColor so the frontend can apply per-symbol colors.
+    """
+    if not symbols or not os.getenv("ANTHROPIC_API_KEY"):
+        return symbols
+
+    api_client = _get_client()
+    BATCH_SIZE = 35  # Keep output within token limits
+
+    for batch_start in range(0, len(symbols), BATCH_SIZE):
+        batch = symbols[batch_start:batch_start + BATCH_SIZE]
+
+        # Build descriptions from the vision-parsed data
+        descriptions = []
+        for i, sym in enumerate(batch):
+            desc = f'{i + 1}. Code: "{sym.code}", Name: "{sym.name}"'
+            if sym.shape:
+                desc += f', Visual: {sym.shape}'
+            else:
+                desc += f', Shape: {sym.shape_code}'
+            if sym.filled:
+                desc += ' — FILLED/SOLID (shape is solid black)'
+            else:
+                desc += ' — OUTLINE ONLY'
+            descriptions.append(desc)
+
+        desc_text = "\n".join(descriptions)
+
+        prompt = f"""Generate a minimal SVG icon for each construction drawing legend symbol described below.
+
+STRICT RULES:
+- Each SVG MUST have: viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"
+- Use ONLY: <polygon>, <circle>, <rect>, <text>, <line>, <path>, <ellipse>, <g>, <polyline>
+- For OUTLINE shapes: stroke="currentColor" stroke-width="1.5" fill="none"
+- For FILLED/SOLID shapes: fill="currentColor" stroke="currentColor" stroke-width="0.5"
+- For text inside shapes: font-size appropriate for text length (1 char=10, 2-3 chars=8, 4+=6), font-weight="bold", text-anchor="middle", dominant-baseline="central"
+- On OUTLINE shapes: text fill="currentColor"
+- On FILLED shapes: text fill="white" (for contrast against solid fill)
+- Center everything in the 24x24 viewBox
+- These are engineering schematic symbols — keep them clean and precise
+- NO <style>, <script>, <defs>, <filter>, <image>, <use>, <foreignObject>
+- Each SVG must be ONE COMPLETE self-contained <svg>...</svg> element
+
+SHAPE REFERENCE (use these as guides):
+- Hexagon centered at (12,12), radius ~10: points at 30° intervals
+- Rectangle: <rect> with rx="1" for slight rounding
+- Circle: <circle cx="12" cy="12" r="10">
+- Square: <rect x="2" y="2" width="20" height="20">
+- Speaker icon: circle with concentric arcs or smaller circle inside
+- Strobe: star or radiating lines from center
+- Camera: trapezoid + rectangle (side view) or simplified icon
+
+SYMBOLS TO GENERATE:
+{desc_text}
+
+Respond with ONLY a JSON object mapping the 1-based index number (as string) to the complete SVG string.
+Example: {{"1": "<svg viewBox=\\"0 0 24 24\\" xmlns=\\"http://www.w3.org/2000/svg\\"><circle cx=\\"12\\" cy=\\"12\\" r=\\"10\\" stroke=\\"currentColor\\" fill=\\"none\\" stroke-width=\\"1.5\\"/><text x=\\"12\\" y=\\"12\\" text-anchor=\\"middle\\" dominant-baseline=\\"central\\" fill=\\"currentColor\\" font-size=\\"10\\" font-weight=\\"bold\\">S</text></svg>"}}"""
+
+        try:
+            logger.info(
+                f"Generating SVG icons for symbols {batch_start + 1}-{batch_start + len(batch)} "
+                f"of {len(symbols)}..."
+            )
+            response = await api_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=16384,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            response_text = response.content[0].text.strip()
+
+            if response.stop_reason == "max_tokens":
+                logger.warning("SVG generation response was truncated (hit max_tokens)")
+
+            # Extract JSON from response (handle markdown code blocks)
+            if response_text.startswith("```"):
+                lines = response_text.split("\n")
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.startswith("```") and not in_block:
+                        in_block = True
+                        continue
+                    if line.startswith("```") and in_block:
+                        break
+                    if in_block:
+                        json_lines.append(line)
+                response_text = "\n".join(json_lines)
+
+            result = json.loads(response_text)
+
+            # Map SVGs back to batch symbols
+            svg_count = 0
+            for i, sym in enumerate(batch):
+                key = str(i + 1)
+                if key in result:
+                    svg = _sanitize_svg(str(result[key]))
+                    if svg.startswith("<svg"):
+                        sym.svg_icon = svg
+                        svg_count += 1
+
+            logger.info(f"  Generated {svg_count}/{len(batch)} SVG icons in this batch")
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"SVG generation returned invalid JSON (non-fatal): {e}")
+        except Exception as e:
+            logger.warning(f"SVG generation failed (non-fatal): {type(e).__name__}: {e}")
+
+    total_with_svg = sum(1 for s in symbols if s.svg_icon)
+    logger.info(f"SVG icon generation complete: {total_with_svg}/{len(symbols)} symbols have icons")
+    return symbols
+
+
 async def parse_legend_with_vision(
     image_data: bytes,
     media_type: str,
@@ -361,6 +494,12 @@ Respond with ONLY a JSON array:
     logger.info(
         f"Legend parsing complete: {len(symbols)} symbols across {len(systems)} systems: {systems}"
     )
+
+    # Generate SVG icons for each symbol (second AI layer)
+    try:
+        symbols = await _generate_symbol_svgs(symbols)
+    except Exception as svg_err:
+        logger.warning(f"SVG icon generation failed entirely (non-fatal): {svg_err}")
 
     legend_id = str(uuid.uuid4())
     return LegendData(

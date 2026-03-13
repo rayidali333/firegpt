@@ -12,6 +12,7 @@ export interface SymbolInfo {
   category: string;
   legend_code: string;
   legend_shape: string;
+  svg_icon: string;
 }
 
 export interface AuditEntry {
@@ -62,6 +63,7 @@ export interface LegendSymbol {
   category: string;
   shape: string;
   shape_code: string;
+  svg_icon: string;
 }
 
 export interface LegendData {

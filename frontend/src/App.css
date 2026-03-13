@@ -759,6 +759,20 @@
   overflow: visible;
 }
 
+.symbol-svg-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+}
+
+.symbol-svg-icon svg {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
 .symbol-info {
   flex: 1;
   display: flex;
@@ -1249,6 +1263,22 @@
   border-radius: 50%;
   flex-shrink: 0;
   border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.viewer-legend-svg-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+.viewer-legend-svg-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 .viewer-legend-label {

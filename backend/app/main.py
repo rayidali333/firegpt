@@ -260,12 +260,14 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                         shape_code = "circle"
                         category = ""
                         legend_shape = ""
+                        svg_icon = ""
 
                         if matched_legend:
                             legend_code = matched_legend.code
                             shape_code = matched_legend.shape_code or "circle"
                             category = matched_legend.category
                             legend_shape = matched_legend.shape
+                            svg_icon = matched_legend.svg_icon
 
                         parse_result.symbols.append(
                             SymbolInfo(
@@ -280,6 +282,7 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                                 category=category,
                                 legend_code=legend_code,
                                 legend_shape=legend_shape,
+                                svg_icon=svg_icon,
                             )
                         )
                         parse_result.audit.append(AuditEntry(
@@ -396,6 +399,7 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 category=group[0].category,
                 legend_code=group[0].legend_code,
                 legend_shape=group[0].legend_shape,
+                svg_icon=group[0].svg_icon,
             ))
 
     # Sort by count descending

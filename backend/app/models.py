@@ -14,7 +14,8 @@ class SymbolInfo(BaseModel):
     shape_code: str = "circle"  # Marker shape: "circle", "square", "diamond", "hexagon", "pentagon", "triangle"
     category: str = ""  # System category from legend (e.g., "Fire Alarm", "Access Control")
     legend_code: str = ""  # Symbol code from legend (e.g., "S", "MFACP", "SCM")
-    legend_shape: str = ""  # Shape description from legend (e.g., "pentagon with S inside")
+    legend_shape: str = ""  # Shape description from legend (e.g., "hexagon with S inside")
+    svg_icon: str = ""  # AI-generated SVG icon matching the legend symbol
 
 
 class AuditEntry(BaseModel):
@@ -81,6 +82,7 @@ class LegendSymbol(BaseModel):
     shape: str = ""  # Visual shape description (e.g., "pentagon with S inside")
     shape_code: str = ""  # SVG marker shape: "circle", "square", "diamond", "pentagon", "hexagon", "triangle", "star"
     filled: bool = False  # Whether the symbol shape is filled/solid
+    svg_icon: str = ""  # AI-generated SVG icon for this symbol
 
 
 class LegendData(BaseModel):

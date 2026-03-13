@@ -2,12 +2,23 @@ import React, { useState } from "react";
 import { MapPin, Download, Check, X, Edit2 } from "lucide-react";
 import { SymbolInfo } from "../types";
 
-function SymbolMarker({ color, code, shape }: { color: string; code: string; shape: string }) {
+function SymbolMarker({ color, code, shape, svgIcon }: { color: string; code: string; shape: string; svgIcon?: string }) {
+  // Prefer AI-generated SVG icon when available
+  if (svgIcon) {
+    return (
+      <span
+        className="symbol-svg-icon"
+        style={{ color }}
+        dangerouslySetInnerHTML={{ __html: svgIcon }}
+      />
+    );
+  }
+
   if (!code) {
     return <span className="symbol-dot" style={{ backgroundColor: color }} />;
   }
 
-  // Determine SVG size based on code length
+  // Fallback: hardcoded shape + code text
   const isLong = code.length > 3;
   const w = isLong ? 38 : 26;
   const h = 22;
@@ -15,11 +26,10 @@ function SymbolMarker({ color, code, shape }: { color: string; code: string; sha
   const cy = h / 2;
   const fontSize = isLong ? 7.5 : (code.length > 2 ? 8 : 9);
 
-  // Build SVG shape path
   let shapePath: React.ReactNode;
   const stroke = color;
   const fill = "none";
-  const sw = 1.5; // stroke width
+  const sw = 1.5;
 
   switch (shape) {
     case "pentagon": {
@@ -68,7 +78,7 @@ function SymbolMarker({ color, code, shape }: { color: string; code: string; sha
       );
       break;
     }
-    default: { // circle
+    default: {
       const r = isLong ? Math.min(cx - 2, 10) : 9;
       shapePath = <ellipse cx={cx} cy={cy} rx={isLong ? cx - 2 : r} ry={r}
         fill={fill} stroke={stroke} strokeWidth={sw} />;
@@ -206,7 +216,7 @@ export default function SymbolTable({
                 }
               >
                 <div className="symbol-color-indicator">
-                  <SymbolMarker color={s.color} code={s.legend_code || ""} shape={s.shape_code || "circle"} />
+                  <SymbolMarker color={s.color} code={s.legend_code || ""} shape={s.shape_code || "circle"} svgIcon={s.svg_icon || ""} />
                 </div>
                 <div className="symbol-info">
                   {isEditing ? (
