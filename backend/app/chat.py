@@ -131,6 +131,78 @@ def _get_client() -> AsyncAnthropic:
     return client
 
 
+def _correct_legend_shape(sym: LegendSymbol) -> LegendSymbol:
+    """Apply fire alarm industry domain knowledge to correct AI shape classifications.
+
+    AI vision models often confuse pentagon (5 sides) vs hexagon (6 sides).
+    In fire alarm drawings, detectors are universally hexagons per NFPA standards.
+    This function overrides unreliable AI shape_code with correct industry shapes.
+    """
+    name_lower = sym.name.lower()
+    category_lower = sym.category.lower()
+
+    # Fire alarm detectors → HEXAGON (industry standard, AI often says "pentagon")
+    detector_keywords = [
+        "smoke detector", "heat detector", "detector", "photoelectric",
+        "smoke and heat", "multi-sensor", "duct detector", "beam detector",
+        "aspirating", "linear heat",
+    ]
+    if any(kw in name_lower for kw in detector_keywords):
+        if sym.shape_code in ("pentagon", "hexagon", "circle"):
+            old = sym.shape_code
+            sym.shape_code = "hexagon"
+            if old != "hexagon":
+                logger.info(f"Shape correction: '{sym.name}' {old} → hexagon (detector)")
+
+    # Panels, modules in boxes → SQUARE (rectangle)
+    panel_keywords = [
+        "control panel", "panel", "rack", "workstation", "converter",
+    ]
+    if any(kw in name_lower for kw in panel_keywords):
+        if sym.shape_code not in ("square",):
+            old = sym.shape_code
+            sym.shape_code = "square"
+            if old != "square":
+                logger.info(f"Shape correction: '{sym.name}' {old} → square (panel/rack)")
+
+    # Signal/control modules with text codes in rectangles → SQUARE
+    module_rect_keywords = ["signal control module", "scm", "lhcp"]
+    if any(kw in name_lower for kw in module_rect_keywords):
+        sym.shape_code = "square"
+
+    # Manual call station / pull station → SQUARE
+    manual_keywords = ["manual call", "pull station", "break glass"]
+    if any(kw in name_lower for kw in manual_keywords):
+        sym.shape_code = "square"
+
+    # Speakers / loudspeakers → CIRCLE
+    speaker_keywords = ["speaker", "loudspeaker"]
+    if any(kw in name_lower for kw in speaker_keywords):
+        sym.shape_code = "circle"
+
+    # Horn strobe / strobe / siren → STAR (distinctive shape)
+    strobe_keywords = ["strobe", "siren"]
+    if any(kw in name_lower for kw in strobe_keywords) and "horn" not in name_lower:
+        sym.shape_code = "star"
+
+    # Horn strobe combo → STAR
+    if "horn" in name_lower and "strobe" in name_lower:
+        sym.shape_code = "star"
+
+    # Camera → DIAMOND
+    camera_keywords = ["camera", "cctv"]
+    if any(kw in name_lower for kw in camera_keywords):
+        if sym.shape_code not in ("square",):
+            sym.shape_code = "diamond"
+
+    # Access control with text codes in rounded rectangles → SQUARE
+    if category_lower == "access control":
+        if sym.shape_code not in ("circle", "diamond"):
+            sym.shape_code = "square"
+
+    return sym
+
+
 async def parse_legend_with_vision(
     image_data: bytes,
     media_type: str,
@@ -156,8 +228,11 @@ async def parse_legend_with_vision(
     prompt = """You are analyzing a construction drawing legend/key sheet. Extract EVERY symbol definition shown.
 
 For each symbol, provide:
-1. "code": The text code or abbreviation shown inside/next to the symbol (e.g., "MFACP", "CR", "S", "H", "DS", "ML", "SCM"). If no code, use a short abbreviation of the name.
-2. "name": The full device name exactly as written (e.g., "Main Fire Alarm Control Panel", "Proximity Card Reader")
+1. "code": The EXACT text shown INSIDE the symbol shape. Read it carefully character by character.
+   - If the symbol contains text like "MFACP", "SCM", "LHCP", "S", "H", "TJ", "CR", "DS" — use EXACTLY that text.
+   - If the symbol is purely graphical (no text inside), use a standard abbreviation: e.g., "SD" for smoke detector, "HD" for heat detector, "SPK" for speaker, "STR" for strobe, "SRN" for siren.
+   - Do NOT make up codes. Only use what you can actually read in the image.
+2. "name": The full device name exactly as written next to the symbol (e.g., "Main Fire Alarm Control Panel", "Proximity Card Reader")
 3. "category": The system category it belongs to. Use EXACTLY one of these:
    - "Fire Alarm" — detectors, panels, modules, manual stations, sirens, strobes
    - "Access Control" — card readers, door locks, exit buttons, break glass
@@ -166,21 +241,34 @@ For each symbol, provide:
    - "Video Surveillance" — CCTV cameras, workstations, NVR
    - "Public Address" — speakers, amplifiers, alarm racks
    - "Other" — anything that doesn't fit above
-4. "shape": Describe the visual shape of the symbol precisely (e.g., "pentagon with S inside", "rectangle with MFACP text", "filled pentagon with H", "small square", "circle with arrow", "triangle speaker shape", "camera icon")
-5. "shape_code": Classify the OUTER shape of the symbol. Use EXACTLY one of:
+4. "shape": Describe the visual shape precisely. Count the number of sides carefully:
+   - 3 sides = triangle
+   - 4 sides (equal) = square
+   - 4 sides (rectangular) = rectangle
+   - 5 sides = pentagon
+   - 6 sides = hexagon (VERY COMMON for fire alarm detectors — count carefully!)
+   - Round = circle
+   Examples: "hexagon with S inside", "rectangle with MFACP text", "filled hexagon", "small square", "circle with concentric rings (speaker)", "rectangle with radiating lines (strobe)"
+5. "shape_code": The OUTER shape. Count sides carefully. Use EXACTLY one of:
    - "circle" — circles, round shapes, ovals
    - "square" — squares, rectangles, boxes
    - "diamond" — diamond/rotated squares
-   - "pentagon" — pentagons (5-sided shapes, common for detectors)
-   - "hexagon" — hexagons (6-sided)
-   - "triangle" — triangles, speaker/cone shapes
+   - "pentagon" — pentagons (exactly 5 sides)
+   - "hexagon" — hexagons (exactly 6 sides) — fire alarm detectors are almost always hexagons!
+   - "triangle" — triangles (exactly 3 sides)
    - "star" — star shapes, asterisk-like
-6. "filled": true if the symbol is filled/solid, false if it is just an outline
+6. "filled": true if the symbol shape is filled/solid black, false if it is just an outline
+
+IMPORTANT SHAPE GUIDANCE:
+- Fire alarm DETECTORS (smoke, heat, multi-sensor) almost always use HEXAGONS (6 sides). Count carefully!
+- Panels and modules in rectangles/boxes → "square"
+- Manual call stations / pull stations → "square"
+- If you're unsure between pentagon and hexagon, it's almost certainly a HEXAGON in fire alarm drawings.
 
 Extract ALL symbols from ALL sections/systems shown in the legend. Do not skip any.
 
 Respond with ONLY a JSON array:
-[{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "pentagon with S inside", "shape_code": "pentagon", "filled": false}, ...]"""
+[{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "hexagon with S inside", "shape_code": "hexagon", "filled": false}, ...]"""
 
     # PDFs use "document" content type; images use "image" content type
     if media_type == "application/pdf":
@@ -254,14 +342,17 @@ Respond with ONLY a JSON array:
     symbols = []
     for i, entry in enumerate(raw_symbols):
         try:
-            symbols.append(LegendSymbol(
+            sym = LegendSymbol(
                 code=entry.get("code", ""),
                 name=entry.get("name", ""),
                 category=entry.get("category", "Other"),
                 shape=entry.get("shape", ""),
                 shape_code=entry.get("shape_code", "circle"),
                 filled=bool(entry.get("filled", False)),
-            ))
+            )
+            # Apply domain-knowledge shape correction
+            sym = _correct_legend_shape(sym)
+            symbols.append(sym)
         except Exception as sym_err:
             logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")
 

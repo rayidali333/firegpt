@@ -97,6 +97,61 @@ function DrawingMarkerShape({
   );
 }
 
+/**
+ * Small SVG icon for the bottom legend bar — shows shape + optional code text.
+ */
+function LegendBarIcon({ color, shape, code }: { color: string; shape: string; code: string }) {
+  const size = 14;
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = 5.5;
+  const sw = 1.2;
+
+  let shapeEl: React.ReactNode;
+  switch (shape) {
+    case "hexagon":
+      shapeEl = <polygon points={polygonPoints(cx, cy, r, 6)} fill={color} stroke="rgba(0,0,0,0.2)" strokeWidth={sw} />;
+      break;
+    case "pentagon":
+      shapeEl = <polygon points={polygonPoints(cx, cy, r, 5)} fill={color} stroke="rgba(0,0,0,0.2)" strokeWidth={sw} />;
+      break;
+    case "triangle":
+      shapeEl = <polygon points={polygonPoints(cx, cy, r, 3)} fill={color} stroke="rgba(0,0,0,0.2)" strokeWidth={sw} />;
+      break;
+    case "diamond":
+      shapeEl = <polygon points={polygonPoints(cx, cy, r, 4)} fill={color} stroke="rgba(0,0,0,0.2)" strokeWidth={sw} />;
+      break;
+    case "star": {
+      const pts = Array.from({ length: 10 }, (_, i) => {
+        const rr = i % 2 === 0 ? r : r * 0.5;
+        const angle = (Math.PI / 5) * i - Math.PI / 2;
+        return `${cx + rr * Math.cos(angle)},${cy + rr * Math.sin(angle)}`;
+      }).join(" ");
+      shapeEl = <polygon points={pts} fill={color} stroke="rgba(0,0,0,0.2)" strokeWidth={sw} />;
+      break;
+    }
+    case "square":
+      shapeEl = <rect x={cx - r * 0.8} y={cy - r * 0.8} width={r * 1.6} height={r * 1.6} rx={1} fill={color} stroke="rgba(0,0,0,0.2)" strokeWidth={sw} />;
+      break;
+    default:
+      shapeEl = <circle cx={cx} cy={cy} r={r} fill={color} stroke="rgba(0,0,0,0.2)" strokeWidth={sw} />;
+      break;
+  }
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0, marginRight: 4 }}>
+      {shapeEl}
+      {code && code.length <= 2 && (
+        <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
+          fill="white" fontSize={code.length > 1 ? 5.5 : 6.5} fontWeight="bold"
+          fontFamily="Arial, sans-serif" style={{ pointerEvents: "none" }}>
+          {code}
+        </text>
+      )}
+    </svg>
+  );
+}
+
 interface Props {
   preview: DrawingPreview | null;
   loading: boolean;
@@ -436,10 +491,7 @@ export default function DrawingViewer({
                 )
               }
             >
-              <span
-                className="viewer-legend-dot"
-                style={{ backgroundColor: s.color }}
-              />
+              <LegendBarIcon color={s.color} shape={s.shape_code || "circle"} code={s.legend_code || ""} />
               <span className="viewer-legend-label">{s.label}</span>
               <span className="viewer-legend-count">{s.count}</span>
             </div>
