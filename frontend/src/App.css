@@ -1851,6 +1851,121 @@
   word-break: break-word;
 }
 
+/* Analysis filter/search bar */
+.analysis-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--bevel-mid);
+  background: var(--panel-bg);
+  color: var(--text-muted);
+}
+
+.analysis-filter-input {
+  flex: 1;
+  border: 1px solid var(--bevel-mid);
+  background: var(--window-bg);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.analysis-filter-input:focus {
+  border-color: var(--accent);
+}
+
+.analysis-filter-clear {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-muted);
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.analysis-filter-clear:hover {
+  color: var(--text-primary);
+}
+
+/* Collapsible debug sections */
+.analysis-section {
+  border-bottom: 1px solid var(--bevel-mid);
+}
+
+.analysis-section-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  background: #EDE8DC;
+  border-bottom: 1px solid var(--panel-bg);
+  user-select: none;
+}
+
+.analysis-section-header:hover {
+  background: #E5DFD0;
+}
+
+.analysis-section-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+}
+
+.analysis-section-title {
+  flex: 1;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+
+.analysis-section-count {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  background: var(--panel-bg);
+  padding: 1px 5px;
+  border-radius: 8px;
+}
+
+.analysis-section-body {
+  max-height: 400px;
+  overflow-y: auto;
+  background: #FAFAF5;
+  border-top: 1px solid var(--panel-bg);
+}
+
+/* Detail entries inside sections — compact monospace */
+.analysis-entry.analysis-detail {
+  padding: 1px 12px 1px 36px;
+  border-bottom: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.analysis-detail-message {
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Detail badge in header */
+.analysis-badge-detail {
+  background: #D5C8B0;
+  color: #5D4E37;
+}
+
 .analysis-success .analysis-message {
   color: var(--text);
   font-weight: 500;

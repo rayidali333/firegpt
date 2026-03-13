@@ -26,7 +26,7 @@ export interface AuditEntry {
 }
 
 export interface AnalysisStep {
-  type: "info" | "success" | "warning" | "error";
+  type: "info" | "success" | "warning" | "error" | "detail" | "section";
   message: string;
 }
 

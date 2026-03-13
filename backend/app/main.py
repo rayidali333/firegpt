@@ -174,6 +174,33 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
             "type": "success",
             "message": f"Using uploaded legend \"{legend.filename}\" ({legend.total_symbols} symbols) as classification source",
         })
+        # === DEBUG: Show all legend symbols extracted by vision AI ===
+        parse_result.analysis.append({
+            "type": "section",
+            "message": f"LEGEND EXTRACTION — {legend.total_symbols} symbols from \"{legend.filename}\"",
+        })
+        # Group by category for readability
+        by_category: dict[str, list] = {}
+        for ls in legend.symbols:
+            by_category.setdefault(ls.category, []).append(ls)
+        for cat, symbols_in_cat in sorted(by_category.items()):
+            parse_result.analysis.append({
+                "type": "detail",
+                "message": f"[{cat}] ({len(symbols_in_cat)} symbols):",
+            })
+            for ls in symbols_in_cat:
+                parts = [f'code="{ls.code}"', f'name="{ls.name}"']
+                if ls.shape:
+                    parts.append(f'shape="{ls.shape}"')
+                parts.append(f'shape_code={ls.shape_code}')
+                if ls.filled:
+                    parts.append("FILLED")
+                if ls.svg_icon:
+                    parts.append("has_svg=yes")
+                parse_result.analysis.append({
+                    "type": "detail",
+                    "message": f"  • {', '.join(parts)}",
+                })
 
     # AI classification: send blocks to Claude for classification.
     # When legend is provided: ALL blocks go to AI with legend context (no fast-path).
@@ -188,6 +215,27 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
         f"fast_path_symbols: {len(parse_result.fast_path_symbols)}, "
         f"mode: {'legend+AI' if legend else 'dictionary+AI'}"
     )
+
+    # === DEBUG: Show all DXF blocks being sent to AI ===
+    if blocks_to_classify:
+        parse_result.analysis.append({
+            "type": "section",
+            "message": f"BLOCK INVENTORY — {len(blocks_to_classify)} DXF blocks sent to AI",
+        })
+        for blk in sorted(blocks_to_classify, key=lambda b: -b.count):
+            parts = [f'count={blk.count}']
+            if blk.layers:
+                parts.append(f'layers=[{", ".join(blk.layers[:3])}]')
+            if blk.texts_inside:
+                parts.append(f'texts={blk.texts_inside[:3]}')
+            if blk.attribs:
+                parts.append(f'attrs={dict(list(blk.attribs.items())[:3])}')
+            if blk.description:
+                parts.append(f'desc="{blk.description[:50]}"')
+            parse_result.analysis.append({
+                "type": "detail",
+                "message": f'  "{blk.block_name}" — {", ".join(parts)}',
+            })
 
     if blocks_to_classify:
         try:
@@ -216,12 +264,48 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 for k, v in ai_labels.items():
                     logger.debug(f"  AI: {k!r} → {v!r}")
 
+            # === DEBUG: Show full AI classification results ===
+            parse_result.analysis.append({
+                "type": "section",
+                "message": f"AI CLASSIFICATION RESULTS — {len(ai_labels)} identified, "
+                f"{len(blocks_to_classify) - len(ai_labels)} skipped (null)",
+            })
+            # Show identified blocks
+            if ai_labels:
+                for block_name, label in sorted(ai_labels.items()):
+                    # Find the block's count
+                    blk_count = next(
+                        (b.count for b in blocks_to_classify if b.block_name == block_name), "?"
+                    )
+                    parse_result.analysis.append({
+                        "type": "detail",
+                        "message": f'  ✓ "{block_name}" (×{blk_count}) → "{label}"',
+                    })
+            # Show skipped blocks (null) — these are the ones AI rejected
+            skipped_blocks = [
+                b for b in blocks_to_classify if b.block_name not in ai_labels
+            ]
+            if skipped_blocks:
+                parse_result.analysis.append({
+                    "type": "detail",
+                    "message": f"  — {len(skipped_blocks)} blocks classified as null (not devices):",
+                })
+                for blk in sorted(skipped_blocks, key=lambda b: -b.count)[:30]:
+                    parse_result.analysis.append({
+                        "type": "detail",
+                        "message": f'  ✗ "{blk.block_name}" (×{blk.count}) → null',
+                    })
+                if len(skipped_blocks) > 30:
+                    parse_result.analysis.append({
+                        "type": "detail",
+                        "message": f"  ... and {len(skipped_blocks) - 30} more null blocks",
+                    })
+
             if ai_labels:
                 source_label = "legend + AI" if legend else "AI"
                 parse_result.analysis.append({
                     "type": "success",
-                    "message": f"{source_label} classified {len(ai_labels)} devices: "
-                    + ", ".join(f'"{k}" → {v}' for k, v in list(ai_labels.items())[:8]),
+                    "message": f"{source_label} classified {len(ai_labels)} block types as devices",
                 })
 
                 # Build legend lookup for category/shape/color when legend is available
@@ -229,6 +313,13 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 if legend:
                     for ls in legend.symbols:
                         legend_lookup[ls.name.upper()] = ls
+
+                # === DEBUG: Legend lookup section ===
+                if legend:
+                    parse_result.analysis.append({
+                        "type": "section",
+                        "message": "LEGEND LOOKUP — matching AI labels to legend symbols",
+                    })
 
                 # Track unique labels for per-symbol color assignment
                 label_color_map: dict[str, str] = {}
@@ -242,13 +333,36 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
 
                         # Look up legend symbol for category, shape, code, and color
                         matched_legend = legend_lookup.get(label.upper())
+                        match_method = "exact" if matched_legend else None
                         if not matched_legend:
                             # Fuzzy: find best match
                             label_upper = label.upper()
                             for lname, ls in legend_lookup.items():
                                 if lname in label_upper or label_upper in lname:
                                     matched_legend = ls
+                                    match_method = "fuzzy"
                                     break
+
+                        # === DEBUG: Log each legend lookup result ===
+                        if legend:
+                            if matched_legend:
+                                parse_result.analysis.append({
+                                    "type": "detail",
+                                    "message": (
+                                        f'  ✓ "{label}" → legend [{match_method}]: '
+                                        f'code="{matched_legend.code}", '
+                                        f'cat="{matched_legend.category}", '
+                                        f'shape={matched_legend.shape_code}'
+                                    ),
+                                })
+                            else:
+                                parse_result.analysis.append({
+                                    "type": "detail",
+                                    "message": (
+                                        f'  ✗ "{label}" → NO LEGEND MATCH '
+                                        f'(AI returned a label not in the legend!)'
+                                    ),
+                                })
 
                         # Assign a unique color per label (device type)
                         if label not in label_color_map:
@@ -335,12 +449,41 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
         missing_categories = all_categories - detected_categories
 
         parse_result.analysis.append({
+            "type": "section",
+            "message": f"LEGEND COVERAGE — {len(matched_legend_symbols)}/{len(legend.symbols)} symbols matched",
+        })
+        parse_result.analysis.append({
             "type": "info",
             "message": (
                 f"Legend coverage: {len(matched_legend_symbols)}/{len(legend.symbols)} legend symbols "
                 f"found in this drawing. Systems detected: {', '.join(sorted(detected_categories)) or 'none'}"
             ),
         })
+
+        # === DEBUG: Show matched legend symbols ===
+        if matched_legend_symbols:
+            parse_result.analysis.append({
+                "type": "detail",
+                "message": f"  Matched ({len(matched_legend_symbols)}):",
+            })
+            for ls in matched_legend_symbols:
+                parse_result.analysis.append({
+                    "type": "detail",
+                    "message": f'    ✓ [{ls.category}] "{ls.code}" — {ls.name}',
+                })
+
+        # === DEBUG: Show unmatched legend symbols (this is the key diagnostic!) ===
+        if unmatched_legend_symbols:
+            parse_result.analysis.append({
+                "type": "detail",
+                "message": f"  NOT found in drawing ({len(unmatched_legend_symbols)}):",
+            })
+            for ls in unmatched_legend_symbols:
+                parse_result.analysis.append({
+                    "type": "detail",
+                    "message": f'    ✗ [{ls.category}] "{ls.code}" — {ls.name}',
+                })
+
         if missing_categories:
             parse_result.analysis.append({
                 "type": "info",
@@ -357,6 +500,21 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
     label_groups: dict[str, list[SymbolInfo]] = {}
     for sym in parse_result.symbols:
         label_groups.setdefault(sym.label, []).append(sym)
+
+    # === DEBUG: Consolidation ===
+    multi_variant_groups = {k: v for k, v in label_groups.items() if len(v) > 1}
+    if multi_variant_groups:
+        parse_result.analysis.append({
+            "type": "section",
+            "message": f"CONSOLIDATION — merging {len(multi_variant_groups)} multi-variant device types",
+        })
+        for label, group in multi_variant_groups.items():
+            variants = ", ".join(f'"{s.block_name}" (×{s.count})' for s in group)
+            total = sum(s.count for s in group)
+            parse_result.analysis.append({
+                "type": "detail",
+                "message": f'  "{label}" (total ×{total}): {variants}',
+            })
 
     consolidated_symbols = []
     for label, group in label_groups.items():
