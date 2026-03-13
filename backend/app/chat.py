@@ -358,21 +358,31 @@ async def parse_legend_with_vision(
     image_b64 = base64.standard_b64encode(image_data).decode("utf-8")
     logger.info(f"Base64 encoded size: {len(image_b64)} chars")
 
-    prompt = """You are analyzing a construction drawing legend/key sheet. Extract EVERY symbol definition shown.
+    prompt = """You are analyzing a construction drawing legend/key sheet. Your task is to extract EVERY SINGLE symbol definition shown — do NOT skip any rows.
 
-For each symbol, provide:
+CRITICAL RULES FOR COMPLETENESS:
+- Each ROW in the legend is a SEPARATE symbol, even if two rows look similar.
+- "Weatherproof" variants are SEPARATE symbols from their non-weatherproof counterparts.
+- Subscript/suffix variants (like a symbol with "WP", "_T", "_F", "_P") are SEPARATE symbols.
+- If a symbol code has a small subscript letter (like S with subscript "80"), include it (e.g., code="S80").
+- If two symbols have the same shape but different descriptions, they are TWO separate entries.
+- Count EVERY row in EVERY section. Do NOT summarize or group similar entries.
+- Process ALL system sections: Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, and any others.
+
+For each symbol row, provide:
 1. "code": The EXACT text shown INSIDE the symbol shape. Read it carefully character by character.
    - If the symbol contains text like "MFACP", "SCM", "LHCP", "S", "H", "TJ", "CR", "DS" — use EXACTLY that text.
-   - If the symbol is purely graphical (no text inside), use a standard abbreviation: e.g., "SD" for smoke detector, "HD" for heat detector, "SPK" for speaker, "STR" for strobe, "SRN" for siren.
+   - For subscript variants, append the subscript: e.g., "S" with subscript "WP" → "SWP", or "S" with subscript "80" → "S80"
+   - If the symbol is purely graphical (no text inside), describe what you see: e.g., "smoke_heat_combo" for a combined detector icon.
    - Do NOT make up codes. Only use what you can actually read in the image.
-2. "name": The full device name exactly as written next to the symbol (e.g., "Main Fire Alarm Control Panel", "Proximity Card Reader")
+2. "name": The full device name exactly as written next to the symbol (e.g., "Main Fire Alarm Control Panel", "Proximity Card Reader", "Addressable Input Module Weatherproof")
 3. "category": The system category it belongs to. Use EXACTLY one of these:
-   - "Fire Alarm" — detectors, panels, modules, manual stations, sirens, strobes
-   - "Access Control" — card readers, door locks, exit buttons, break glass
-   - "Structured Cabling" — server racks, patch panels, data outlets
-   - "BMS" — building management system panels, workstations, converters
-   - "Video Surveillance" — CCTV cameras, workstations, NVR
-   - "Public Address" — speakers, amplifiers, alarm racks
+   - "Fire Alarm" — detectors, panels, modules, manual stations, sirens, strobes, telephone, cables
+   - "Access Control" — card readers, door locks, exit buttons, break glass, barriers, intercoms, biometric
+   - "Structured Cabling" — server racks, patch panels, data outlets, switches, routers, UPS
+   - "BMS" — building management system panels, workstations, converters, I/O panels
+   - "Video Surveillance" — CCTV cameras, workstations, NVR, video management
+   - "Public Address" — speakers, amplifiers, microphones, alarm racks, loudspeakers
    - "Other" — anything that doesn't fit above
 4. "shape": Describe the visual shape precisely. Count the number of sides carefully:
    - 3 sides = triangle
@@ -398,7 +408,8 @@ IMPORTANT SHAPE GUIDANCE:
 - Manual call stations / pull stations → "square"
 - If you're unsure between pentagon and hexagon, it's almost certainly a HEXAGON in fire alarm drawings.
 
-Extract ALL symbols from ALL sections/systems shown in the legend. Do not skip any.
+BEFORE YOU START: Scan the entire legend and count the total number of symbol rows across ALL sections.
+Then extract every single one. Your JSON array should have that exact number of entries.
 
 Respond with ONLY a JSON array:
 [{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "hexagon with S inside", "shape_code": "hexagon", "filled": false}, ...]"""
@@ -488,6 +499,87 @@ Respond with ONLY a JSON array:
             symbols.append(sym)
         except Exception as sym_err:
             logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")
+
+    # === COMPLETION VERIFICATION PASS ===
+    # Send the image back with the extracted list and ask for any missed symbols
+    logger.info(f"Pass 1 extracted {len(symbols)} symbols. Running completion verification pass...")
+    try:
+        existing_summary = "\n".join(
+            f'  {i+1}. [{s.category}] code="{s.code}" — "{s.name}"'
+            for i, s in enumerate(symbols)
+        )
+        verify_prompt = f"""I previously extracted {len(symbols)} symbols from this legend. Here's what I found:
+
+{existing_summary}
+
+TASK: Look at the legend image CAREFULLY and find ANY symbols I MISSED. Check:
+1. Every section header (Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, etc.)
+2. Every single row under each section — especially:
+   - Weatherproof variants (same device but with "WEATHERPROOF" in the name)
+   - Subscript/suffix variants (symbols with small text like WP, T, F, P)
+   - Devices at the bottom of columns that might be easy to miss
+   - Very similar-looking entries that are actually different devices
+3. Line/cable symbols (like "Linear Heat Sensing Cable" shown as just a line)
+
+If you find missed symbols, return them as a JSON array in the same format:
+[{{"code": "...", "name": "...", "category": "...", "shape": "...", "shape_code": "...", "filled": false}}, ...]
+
+If nothing was missed, return an empty array: []
+
+Respond with ONLY the JSON array."""
+
+        verify_response = await api_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=16384,
+            messages=[{
+                "role": "user",
+                "content": [
+                    file_content_block,
+                    {"type": "text", "text": verify_prompt},
+                ],
+            }],
+        )
+
+        logger.info(
+            f"Verification pass response: stop_reason={verify_response.stop_reason}, "
+            f"usage={{input: {verify_response.usage.input_tokens}, output: {verify_response.usage.output_tokens}}}"
+        )
+
+        verify_text = verify_response.content[0].text.strip()
+        missed_symbols = _extract_json_array(verify_text)
+
+        if missed_symbols:
+            # Deduplicate: skip any that match existing code+name
+            existing_keys = {(s.code.upper(), s.name.upper()) for s in symbols}
+            added = 0
+            for entry in missed_symbols:
+                code = entry.get("code", "")
+                name = entry.get("name", "")
+                if (code.upper(), name.upper()) not in existing_keys:
+                    try:
+                        sym = LegendSymbol(
+                            code=code,
+                            name=name,
+                            category=entry.get("category", "Other"),
+                            shape=entry.get("shape", ""),
+                            shape_code=entry.get("shape_code", "circle"),
+                            filled=bool(entry.get("filled", False)),
+                        )
+                        sym = _correct_legend_shape(sym)
+                        symbols.append(sym)
+                        existing_keys.add((code.upper(), name.upper()))
+                        added += 1
+                    except Exception as sym_err:
+                        logger.warning(f"Failed to parse missed symbol: {entry} — {sym_err}")
+            logger.info(
+                f"Verification pass found {len(missed_symbols)} candidates, "
+                f"added {added} new symbols (after dedup). Total: {len(symbols)}"
+            )
+        else:
+            logger.info("Verification pass confirmed: no missed symbols")
+
+    except Exception as verify_err:
+        logger.warning(f"Verification pass failed (non-fatal): {type(verify_err).__name__}: {verify_err}")
 
     # Extract unique system categories
     systems = sorted(set(s.category for s in symbols))
