@@ -597,37 +597,236 @@ def _deduplicate_symbols(symbols: list[dict]) -> list[dict]:
     return unique
 
 
+def _extract_json_object(text: str) -> dict:
+    """Robustly extract a JSON object from LLM response text.
+
+    Handles markdown code blocks, surrounding prose, and common output formats.
+    """
+    text = text.strip()
+
+    # Strategy 1: direct parse
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: strip markdown code fences
+    if "```" in text:
+        match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(1).strip())
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+    # Strategy 3: find outermost { }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"Could not extract JSON object from response (first 200 chars): {text[:200]}")
+
+
+# Standard category names used in extraction prompts. Pre-scan maps
+# raw legend section headers to these so counts are directly comparable.
+_STANDARD_CATEGORIES = [
+    "Fire Alarm", "Access Control", "Structured Cabling",
+    "BMS", "Video Surveillance", "Public Address", "Other",
+]
+
+
+async def _prescan_section_counts(
+    api_client: AsyncAnthropic,
+    image_data: bytes,
+    media_type: str,
+) -> dict[str, int] | None:
+    """Quick pre-scan to count symbol rows per section in the legend.
+
+    Sends the full PDF/image and asks Claude to ONLY count (not extract).
+    Counting is much easier than full extraction, so this is highly reliable.
+
+    Returns dict mapping category name to expected count, or None on failure.
+    """
+    categories_str = ", ".join(f'"{c}"' for c in _STANDARD_CATEGORIES)
+
+    prompt = f"""Look at this construction drawing legend/key sheet.
+
+Your ONLY task is to count the number of distinct SYMBOL ROWS in each system section.
+
+Rules for counting:
+- Each row with a symbol graphic + text description = 1 symbol row
+- Weatherproof variants are SEPARATE rows (count them!)
+- Subscript/suffix variants are SEPARATE rows (count them!)
+- Cable/line symbols ARE rows (count them!)
+- Section headers, column headers, notes, and title blocks are NOT symbol rows
+
+Map each section to one of these standard categories:
+{categories_str}
+
+If multiple sections map to the same category, combine their counts.
+If a section doesn't fit any category, use "Other".
+
+Output ONLY a JSON object mapping category to count:
+{{"Fire Alarm": 42, "Access Control": 18, "Video Surveillance": 12}}"""
+
+    content_block = _build_content_block(image_data, media_type)
+
+    logger.info("Pre-scan: counting sections and symbols per section...")
+
+    try:
+        response = await api_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [content_block, {"type": "text", "text": prompt}],
+            }],
+        )
+    except Exception as e:
+        logger.warning(f"Pre-scan failed (non-fatal): {e}")
+        return None
+
+    logger.info(
+        f"Pre-scan response: stop_reason={response.stop_reason}, "
+        f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
+    )
+
+    if not response.content:
+        logger.warning("Pre-scan returned empty content")
+        return None
+
+    response_text = response.content[0].text.strip()
+
+    try:
+        counts = _extract_json_object(response_text)
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.warning(f"Pre-scan JSON parsing failed: {e}")
+        return None
+
+    # Validate: all values should be positive integers
+    validated: dict[str, int] = {}
+    for section, count in counts.items():
+        try:
+            n = int(count)
+            if n > 0:
+                validated[section] = n
+        except (TypeError, ValueError):
+            logger.warning(f"Pre-scan: ignoring invalid count for '{section}': {count}")
+
+    total = sum(validated.values())
+    logger.info(
+        f"Pre-scan complete: {total} total symbols across {len(validated)} sections — "
+        + ", ".join(f"{k}: {v}" for k, v in sorted(validated.items()))
+    )
+    return validated
+
+
 async def _reconciliation_pass(
     api_client: AsyncAnthropic,
     extracted: list[dict],
     original_data: bytes,
     original_media_type: str,
+    target_counts: dict[str, int] | None = None,
 ) -> list[dict]:
-    """Verify extraction completeness and find any missed symbols.
+    """Verify extraction completeness and find missed symbols.
 
-    Sends the original legend image/PDF back to Claude along with a structured
-    summary of what was already extracted, grouped by category. Asks Claude to
-    verify per-section counts and identify specific missed rows.
+    When target_counts is provided (from pre-scan), builds a gap-focused prompt
+    that tells Claude exactly which sections have missing symbols and how many.
+    This is far more effective than the generic "find what I missed" approach.
 
-    Returns the updated symbol list (extracted + any newly found symbols).
+    When target_counts is None, falls back to the generic section-by-section
+    verification prompt.
     """
-    # Group extracted symbols by category for a structured checklist
+    # Group extracted symbols by category
     by_category: dict[str, list[dict]] = {}
     for sym in extracted:
         cat = sym.get("category", "Other")
         by_category.setdefault(cat, []).append(sym)
 
-    category_lines = []
-    for cat in sorted(by_category.keys()):
-        syms = by_category[cat]
-        category_lines.append(f"\n[{cat}] — {len(syms)} symbols extracted:")
-        for i, s in enumerate(syms):
-            category_lines.append(
-                f'  {i+1}. code="{s.get("code", "")}" — "{s.get("name", "")}"'
-            )
-    summary = "\n".join(category_lines)
+    # ── Build the prompt ──
+    if target_counts:
+        # Gap-aware reconciliation: compare extracted vs expected per section
+        comparison_lines = []
+        gap_sections: list[tuple[str, int, int, int]] = []  # (cat, expected, actual, missing)
 
-    prompt = f"""I extracted {len(extracted)} symbols from this legend, grouped by system section:
+        # Merge all section names from both sources
+        all_sections = sorted(set(list(target_counts.keys()) + list(by_category.keys())))
+
+        for section in all_sections:
+            expected = target_counts.get(section, 0)
+            actual = len(by_category.get(section, []))
+            if expected > actual:
+                gap = expected - actual
+                gap_sections.append((section, expected, actual, gap))
+                comparison_lines.append(f"  [{section}] extracted: {actual}, expected: {expected} — ⚠ MISSING {gap}")
+            elif expected > 0:
+                comparison_lines.append(f"  [{section}] extracted: {actual}, expected: {expected} — ✓ OK")
+            elif actual > 0 and expected == 0:
+                comparison_lines.append(f"  [{section}] extracted: {actual} (not in pre-scan)")
+
+        total_missing = sum(g[3] for g in gap_sections)
+
+        if total_missing == 0:
+            logger.info("Gap analysis: no gaps detected — all sections match pre-scan counts")
+            return extracted
+
+        # Build detailed gap info with already-extracted symbols for context
+        gap_details = []
+        for section, expected, actual, missing in gap_sections:
+            syms = by_category.get(section, [])
+            sym_list = "\n".join(
+                f'    {i+1}. code="{s.get("code", "")}" — "{s.get("name", "")}"'
+                for i, s in enumerate(syms)
+            )
+            gap_details.append(
+                f'\n[{section}] — I have {actual}/{expected} ({missing} MISSING):'
+                f'\n  Already extracted:\n{sym_list if sym_list else "    (none)"}'
+            )
+
+        prompt = f"""I extracted {len(extracted)} symbols from this legend, but I'm MISSING {total_missing} based on row counts.
+
+Section comparison:
+{chr(10).join(comparison_lines)}
+
+Details for sections with GAPS:
+{"".join(gap_details)}
+
+TASK: For each section marked as MISSING above, carefully examine the legend and find the specific symbol rows I missed.
+- Look row by row in each section, comparing against my "Already extracted" list
+- Pay special attention to weatherproof variants, subscript variants, and cable/line symbols
+- Only add symbols you can ACTUALLY SEE as distinct rows in the legend
+
+Return ONLY a JSON array of the missing symbols:
+[{{"code": "...", "name": "...", "category": "...", "shape": "...", "shape_code": "...", "filled": false}}, ...]
+
+If you cannot find any genuinely missing symbols, return: []"""
+
+        logger.info(
+            f"Targeted reconciliation: {total_missing} symbols missing across "
+            f"{len(gap_sections)} sections — "
+            + ", ".join(f"{s}: {m} missing" for s, _, _, m in gap_sections)
+        )
+    else:
+        # Generic reconciliation (no pre-scan data available)
+        category_lines = []
+        for cat in sorted(by_category.keys()):
+            syms = by_category[cat]
+            category_lines.append(f"\n[{cat}] — {len(syms)} symbols extracted:")
+            for i, s in enumerate(syms):
+                category_lines.append(
+                    f'  {i+1}. code="{s.get("code", "")}" — "{s.get("name", "")}"'
+                )
+        summary = "\n".join(category_lines)
+
+        prompt = f"""I extracted {len(extracted)} symbols from this legend, grouped by system section:
 {summary}
 
 TASK — Section-by-section verification:
@@ -654,12 +853,13 @@ If nothing was missed, return an empty array: []
 
 Respond with ONLY the JSON array."""
 
-    content_block = _build_content_block(original_data, original_media_type)
+        logger.info(
+            f"Generic reconciliation: verifying {len(extracted)} symbols "
+            f"across {len(by_category)} categories..."
+        )
 
-    logger.info(
-        f"Reconciliation pass: verifying {len(extracted)} symbols "
-        f"across {len(by_category)} categories..."
-    )
+    # ── Send to Claude ──
+    content_block = _build_content_block(original_data, original_media_type)
 
     try:
         response = await api_client.messages.create(
@@ -671,7 +871,7 @@ Respond with ONLY the JSON array."""
             }],
         )
     except Exception as e:
-        logger.warning(f"Reconciliation pass API call failed (non-fatal): {e}")
+        logger.warning(f"Reconciliation API call failed (non-fatal): {e}")
         return extracted
 
     logger.info(
@@ -680,7 +880,7 @@ Respond with ONLY the JSON array."""
     )
 
     if not response.content:
-        logger.warning("Reconciliation pass returned empty content")
+        logger.warning("Reconciliation returned empty content")
         return extracted
 
     response_text = response.content[0].text.strip()
@@ -726,12 +926,14 @@ async def parse_legend_with_vision(
     """Parse a legend sheet image/PDF into structured symbol data using Claude Vision.
 
     Pipeline:
+      0. Pre-scan: count symbols per section for ground-truth verification targets.
       1. For multi-page PDFs: split into pages, extract symbols from each page
          separately so Claude can focus on 15-30 symbols at a time instead of 100+.
       2. For single-page PDFs or images: extract in a single call.
       3. Merge and deduplicate across pages.
-      4. Reconciliation pass: send the original file back with the merged list,
-         ask Claude to verify per-section counts and find any gaps.
+      4. Gap-targeted reconciliation: compare extracted counts against pre-scan
+         targets, then ask Claude to find the specific missing rows in each
+         under-extracted section.
       5. Convert raw dicts to LegendSymbol with domain-knowledge shape corrections.
       6. Generate SVG icons for each symbol.
     """
@@ -744,6 +946,19 @@ async def parse_legend_with_vision(
     )
 
     api_client = _get_client()
+
+    # ── Step 0: Pre-scan section counts ──
+    # Quick pass to count symbols per section. Gives us ground-truth targets
+    # for the reconciliation pass. Counting is cheap (~200 output tokens).
+    target_counts: dict[str, int] | None = None
+    try:
+        target_counts = await _prescan_section_counts(
+            api_client, image_data, media_type,
+        )
+    except Exception as prescan_err:
+        logger.warning(
+            f"Pre-scan failed (non-fatal): {type(prescan_err).__name__}: {prescan_err}"
+        )
 
     # ── Step 1: Determine processing strategy ──
     is_pdf = media_type == "application/pdf"
@@ -808,11 +1023,14 @@ async def parse_legend_with_vision(
         logger.info(f"Deduplication: {len(unique_symbols)} symbols (no duplicates)")
 
     # ── Step 4: Reconciliation pass ──
-    # Send the original file (full PDF or image) for verification.
-    # This catches symbols missed due to page-boundary splits or attention gaps.
+    # When pre-scan target counts are available, this does a targeted gap-fill:
+    # compares extracted per-category counts against targets, then asks Claude
+    # to find the specific missing rows in each under-extracted section.
+    # Without targets, falls back to generic section-by-section verification.
     try:
         unique_symbols = await _reconciliation_pass(
             api_client, unique_symbols, image_data, media_type,
+            target_counts=target_counts,
         )
     except Exception as recon_err:
         logger.warning(
