@@ -1,12 +1,13 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { DrawingData, DrawingPreview, ChatMessage } from "./types";
-import { uploadDrawing, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
+import { uploadDrawing, uploadLegend, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
 import SymbolTable from "./components/SymbolTable";
 import DrawingViewer from "./components/DrawingViewer";
 import AnalysisLog from "./components/AnalysisLog";
+import LegendReview from "./components/LegendReview";
 import ChatPanel from "./components/ChatPanel";
 import "./App.css";
 
@@ -15,11 +16,14 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis">("symbols");
+  const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis" | "legend">("symbols");
   const [preview, setPreview] = useState<DrawingPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [chatSending, setChatSending] = useState(false);
+  const [legend, setLegend] = useState<LegendData | null>(null);
+  const [legendUploading, setLegendUploading] = useState(false);
+  const [legendError, setLegendError] = useState<string | null>(null);
 
   // Load preview when drawing changes
   useEffect(() => {
@@ -47,11 +51,40 @@ function App() {
       .finally(() => setPreviewLoading(false));
   }, [drawing]);
 
+  const handleLegendUpload = async (file: File) => {
+    setLegendUploading(true);
+    setLegendError(null);
+    try {
+      const data = await uploadLegend(file);
+      setLegend(data);
+    } catch (e: any) {
+      const errorMsg = e.message || "Legend upload failed";
+      console.error("[FireGPT] Legend upload failed:", errorMsg, e);
+      setLegendError(errorMsg);
+    } finally {
+      setLegendUploading(false);
+    }
+  };
+
+  const handleLegendReAnalyze = useCallback(async () => {
+    if (!legend) return;
+    // Re-fetch the original legend file is not possible (in-memory),
+    // so we show a message directing user to re-upload
+    // For now, reset the legend and let user re-upload
+    setLegend(null);
+    setLegendError(null);
+    setActiveTab("symbols");
+  }, [legend]);
+
+  const handleLegendChange = useCallback((updated: LegendData) => {
+    setLegend(updated);
+  }, []);
+
   const handleUpload = async (file: File) => {
     setUploading(true);
     setError(null);
     try {
-      const data = await uploadDrawing(file);
+      const data = await uploadDrawing(file, legend?.legend_id);
       setDrawing(data);
       setMessages([]);
       setActiveTab("symbols");
@@ -107,6 +140,8 @@ function App() {
     setActiveTab("symbols");
     setPreview(null);
     setSelectedSymbol(null);
+    setLegend(null);
+    setLegendError(null);
   };
 
   const handleSelectSymbol = useCallback(
@@ -166,6 +201,7 @@ function App() {
             messageCount={messages.length}
             activeTab={activeTab}
             onTabChange={setActiveTab}
+            legend={legend}
           />
           <main className="main-content">
             {!drawing ? (
@@ -173,6 +209,10 @@ function App() {
                 onUpload={handleUpload}
                 uploading={uploading}
                 error={error}
+                legend={legend}
+                onLegendUpload={handleLegendUpload}
+                legendUploading={legendUploading}
+                legendError={legendError}
               />
             ) : (
               <div className="content-with-tabs">
@@ -198,6 +238,15 @@ function App() {
                     Analysis
                     <span className="tab-badge">{drawing.analysis?.length || 0}</span>
                   </button>
+                  {legend && (
+                    <button
+                      className={`content-tab ${activeTab === "legend" ? "active" : ""}`}
+                      onClick={() => setActiveTab("legend")}
+                    >
+                      Legend
+                      <span className="tab-badge">{legend.total_symbols}</span>
+                    </button>
+                  )}
                   <div className="content-tabs-fill" />
                   <span className="content-tabs-filename">
                     {drawing.filename}
@@ -223,6 +272,13 @@ function App() {
                       symbols={drawing.symbols}
                       selectedSymbol={selectedSymbol}
                       onSelectSymbol={handleSelectSymbol}
+                    />
+                  ) : activeTab === "legend" && legend ? (
+                    <LegendReview
+                      legend={legend}
+                      onLegendChange={handleLegendChange}
+                      onReAnalyze={handleLegendReAnalyze}
+                      reAnalyzing={legendUploading}
                     />
                   ) : (
                     <AnalysisLog

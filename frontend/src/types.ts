@@ -5,9 +5,14 @@ export interface SymbolInfo {
   locations: [number, number][];
   color: string;
   confidence: "high" | "medium" | "manual";
-  source: "dictionary" | "ai" | "manual";
+  source: "dictionary" | "ai" | "legend" | "manual";
   block_variants: string[];
   original_count: number | null;
+  shape_code: string;
+  category: string;
+  legend_code: string;
+  legend_shape: string;
+  svg_icon: string;
 }
 
 export interface AuditEntry {
@@ -21,7 +26,7 @@ export interface AuditEntry {
 }
 
 export interface AnalysisStep {
-  type: "info" | "success" | "warning" | "error";
+  type: "info" | "success" | "warning" | "error" | "detail" | "section";
   message: string;
 }
 
@@ -50,4 +55,21 @@ export interface DrawingPreview {
   height: number;
   symbol_positions: Record<string, [number, number][]>;
   position_debug: string[];
+}
+
+export interface LegendSymbol {
+  code: string;
+  name: string;
+  category: string;
+  shape: string;
+  shape_code: string;
+  svg_icon: string;
+}
+
+export interface LegendData {
+  legend_id: string;
+  filename: string;
+  symbols: LegendSymbol[];
+  total_symbols: number;
+  systems: string[];
 }

@@ -68,19 +68,25 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 ### components/UploadZone.tsx
 - Centered drag-drop area in main content
 - Retro styled with brown dashed border
-- File validation: .dxf and .dwg only
-- Loading spinner state during parsing
+- Two upload types: Legend (PDF/image) and Drawing (DXF/DWG)
+- Auto-detect by extension on drag-drop: PDF/image → legend, DXF/DWG → drawing
+- Full progress bar with staged messages for both drawing AND legend uploads
+- Legend upload stages: uploading, AI vision, section scanning, symbol extraction, shape classification, verification, icon generation
+- Drawing upload stages: uploading, converting, block scanning, entity detection, classification, matching, consolidation
+- Legend attached indicator with filename and symbol count
 - Error display for failed uploads
-- Props: onUpload, uploading, error
+- Props: onUpload, uploading, error, legend, onLegendUpload, legendUploading, legendError
 
 ### components/SymbolTable.tsx
 - Displays detected symbols after file upload
-- Header with "Detected Symbols" title + total count badge
-- Color-coded dots per symbol category
-- Confidence badges (high/medium) and source indicators (dictionary/AI)
+- Header with "Detected Symbols" title + total count badge + CSV export button
+- AI-generated SVG icons per symbol (from legend parsing), fallback to shape+code markers
+- Source badges: Dict (green), Legend (blue), AI (yellow), Manual (gray)
+- Inline editing: click edit icon to change label/count with confirm/cancel
+- MapPin icon indicates symbols with location data
 - Bidirectional highlighting: click row → highlights markers on drawing
 - Block variants shown for consolidated symbols
-- Props: symbols, total, onSymbolClick, highlightedSymbol
+- Props: symbols, total, selectedSymbol, onSelectSymbol, onOverride, onExport, xrefWarnings
 
 ### components/ChatPanel.tsx (Cursor-style)
 - Right-side panel (340px fixed width)
@@ -95,17 +101,20 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 - Props: messages, onSend, disabled, loading
 
 ## API Client (api.ts)
-- `uploadDrawing(file)`: POST /api/upload with FormData
+- `uploadLegend(file)`: POST /api/upload-legend with FormData → LegendData
+- `uploadDrawing(file, legendId?)`: POST /api/upload with FormData + optional legend_id query param
 - `chatWithDrawing(drawingId, message, history)`: POST /api/chat with JSON
 - `getDrawingPreview(drawingId)`: GET /api/drawings/{id}/preview
-- `exportDrawingCSV(drawingId)`: GET /api/drawings/{id}/export
+- `getExportUrl(drawingId)`: Returns URL for GET /api/drawings/{id}/export
 - `overrideSymbol(drawingId, blockName, label, count)`: PATCH symbol override
 
 ## TypeScript Types (types.ts)
-- SymbolInfo: block_name, label, count, locations, color, confidence, source, block_variants, original_count
+- SymbolInfo: block_name, label, count, locations, color, confidence, source, block_variants, original_count, shape_code, category, legend_code, legend_shape, svg_icon
 - DrawingData: drawing_id, filename, file_type, symbols, total_symbols, analysis, audit, xref_warnings, legend_texts
-- ChatMessage: role ("user"|"assistant"), content
-- PreviewData: svg, viewBox, width, height, symbol_positions, position_debug
+- ChatMessage: role ("user"|"assistant"), content, timestamp
+- DrawingPreview: svg, viewBox, width, height, symbol_positions, position_debug
+- LegendSymbol: code, name, category, shape, shape_code, svg_icon
+- LegendData: legend_id, filename, symbols, total_symbols, systems
 
 ## Build
 - Create React App (react-scripts)
@@ -120,5 +129,9 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 - Chat panel always visible with markdown rendering and typing indicator
 - Bidirectional highlighting between symbol table and drawing preview
 - Upload works via sidebar button or drag-drop in main area
-- Symbol table shows confidence, source, and color-coded categories
+- Legend upload with full progress bar (AI vision parsing stages)
+- Drawing upload with full progress bar (parsing stages)
+- Symbol table shows AI-generated SVG icons, source badges, inline editing
+- Shape-coded markers on drawing view (hexagon, square, diamond, star, etc.)
 - AI chat with suggestion prompts, auto-scroll, and multi-turn history
+- Legend section in sidebar showing filename + symbol count

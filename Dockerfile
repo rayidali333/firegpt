@@ -25,7 +25,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY backend/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    rm -rf /root/.cache/pip
 
 # Copy LibreDWG binaries and libraries from build stage
 COPY --from=libredwg-build /usr/local/bin/dwg2dxf /usr/local/bin/dwg2dxf
@@ -37,7 +38,8 @@ COPY --from=frontend-build /app/frontend/build ./static
 
 RUN mkdir -p /app/uploads
 
-ENV PORT=8000
-EXPOSE 8000
+# Render sets PORT=10000; default to 8000 for local dev
+ENV PORT=10000
+EXPOSE 10000
 
-CMD uvicorn app.main:app --host 0.0.0.0 --port $PORT
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

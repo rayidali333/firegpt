@@ -1,22 +1,92 @@
-import { DrawingData, DrawingPreview, ChatMessage } from "./types";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData, LegendSymbol } from "./types";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
-export async function uploadDrawing(file: File): Promise<DrawingData> {
+export async function uploadLegend(file: File): Promise<LegendData> {
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await fetch(`${API_BASE}/api/upload`, {
-    method: "POST",
-    body: formData,
-  });
+  console.log(`[FireGPT] Uploading legend: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB, type: ${file.type})`);
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Upload failed" }));
-    throw new Error(err.detail || "Upload failed");
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/upload-legend`, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (networkErr) {
+    console.error("[FireGPT] Legend upload network error:", networkErr);
+    throw new Error(`Network error: ${networkErr instanceof Error ? networkErr.message : "Could not reach server"}`);
   }
 
-  return res.json();
+  console.log(`[FireGPT] Legend upload response: ${res.status} ${res.statusText}`);
+
+  if (!res.ok) {
+    let detail = `Server error ${res.status}`;
+    try {
+      const errBody = await res.json();
+      console.error("[FireGPT] Legend upload error response:", errBody);
+      detail = errBody.detail || detail;
+    } catch {
+      const textBody = await res.text().catch(() => "");
+      console.error("[FireGPT] Legend upload non-JSON error:", res.status, textBody.slice(0, 500));
+      if (textBody) detail = `${detail}: ${textBody.slice(0, 200)}`;
+    }
+    throw new Error(detail);
+  }
+
+  const data = await res.json();
+  console.log(`[FireGPT] Legend parsed successfully: ${data.total_symbols} symbols`, data);
+  return data;
+}
+
+export async function uploadDrawing(file: File, legendId?: string): Promise<DrawingData> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  console.log(
+    `[FireGPT] Uploading drawing: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)` +
+    (legendId ? `, with legend_id=${legendId}` : ", NO legend attached")
+  );
+
+  const url = legendId
+    ? `${API_BASE}/api/upload?legend_id=${encodeURIComponent(legendId)}`
+    : `${API_BASE}/api/upload`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (networkErr) {
+    console.error("[FireGPT] Drawing upload network error:", networkErr);
+    throw new Error(`Network error: ${networkErr instanceof Error ? networkErr.message : "Could not reach server"}`);
+  }
+
+  console.log(`[FireGPT] Drawing upload response: ${res.status} ${res.statusText}`);
+
+  if (!res.ok) {
+    let detail = `Server error ${res.status}`;
+    try {
+      const errBody = await res.json();
+      console.error("[FireGPT] Drawing upload error response:", errBody);
+      detail = errBody.detail || detail;
+    } catch {
+      const textBody = await res.text().catch(() => "");
+      console.error("[FireGPT] Drawing upload non-JSON error:", res.status, textBody.slice(0, 500));
+      if (textBody) detail = `${detail}: ${textBody.slice(0, 200)}`;
+    }
+    throw new Error(detail);
+  }
+
+  const data = await res.json();
+  console.log(
+    `[FireGPT] Drawing parsed: ${data.symbols?.length} symbol types, ` +
+    `${data.symbols?.reduce((sum: number, s: any) => sum + s.count, 0)} total devices`,
+    data
+  );
+  return data;
 }
 
 export async function getDrawingPreview(
@@ -81,4 +151,58 @@ export async function overrideSymbol(
 
 export function getExportUrl(drawingId: string): string {
   return `${API_BASE}/api/drawings/${drawingId}/export`;
+}
+
+// ── Legend CRUD ──
+
+export async function updateLegendSymbol(
+  legendId: string,
+  symbolIdx: number,
+  update: Partial<LegendSymbol>
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/api/legends/${legendId}/symbols/${symbolIdx}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(update),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Update failed" }));
+    throw new Error(err.detail || "Update failed");
+  }
+}
+
+export async function addLegendSymbol(
+  legendId: string,
+  symbol: LegendSymbol
+): Promise<{ index: number }> {
+  const res = await fetch(
+    `${API_BASE}/api/legends/${legendId}/symbols`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(symbol),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Add failed" }));
+    throw new Error(err.detail || "Add failed");
+  }
+  return res.json();
+}
+
+export async function deleteLegendSymbol(
+  legendId: string,
+  symbolIdx: number
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/api/legends/${legendId}/symbols/${symbolIdx}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Delete failed" }));
+    throw new Error(err.detail || "Delete failed");
+  }
 }

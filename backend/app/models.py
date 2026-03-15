@@ -8,9 +8,14 @@ class SymbolInfo(BaseModel):
     locations: list[tuple[float, float]]  # ALL (x, y) insertion points
     color: str = "#95A5A6"  # Category color for visualization
     confidence: str = "high"  # "high" (dictionary) | "medium" (AI) | "manual" (user override)
-    source: str = "dictionary"  # "dictionary" | "ai" | "manual"
+    source: str = "dictionary"  # "dictionary" | "ai" | "legend" | "manual"
     block_variants: list[str] = []  # Individual block names before consolidation
     original_count: int | None = None  # Pre-override count (null if never overridden)
+    shape_code: str = "circle"  # Marker shape: "circle", "square", "diamond", "hexagon", "pentagon", "triangle"
+    category: str = ""  # System category from legend (e.g., "Fire Alarm", "Access Control")
+    legend_code: str = ""  # Symbol code from legend (e.g., "S", "MFACP", "SCM")
+    legend_shape: str = ""  # Shape description from legend (e.g., "hexagon with S inside")
+    svg_icon: str = ""  # AI-generated SVG icon matching the legend symbol
 
 
 class AuditEntry(BaseModel):
@@ -67,3 +72,23 @@ class PreviewResponse(BaseModel):
 class SymbolOverride(BaseModel):
     label: str
     count: int
+
+
+class LegendSymbol(BaseModel):
+    """A single symbol entry parsed from an uploaded legend sheet."""
+    code: str  # Text code shown in symbol (e.g., "MFACP", "CR", "DS")
+    name: str  # Full device name (e.g., "Main Fire Alarm Control Panel")
+    category: str  # System category (e.g., "Fire Alarm", "Access Control", "BMS")
+    shape: str = ""  # Visual shape description (e.g., "pentagon with S inside")
+    shape_code: str = ""  # SVG marker shape: "circle", "square", "diamond", "pentagon", "hexagon", "triangle", "star"
+    filled: bool = False  # Whether the symbol shape is filled/solid
+    svg_icon: str = ""  # AI-generated SVG icon for this symbol
+
+
+class LegendData(BaseModel):
+    """Parsed legend data from a legend sheet upload."""
+    legend_id: str
+    filename: str
+    symbols: list[LegendSymbol]
+    total_symbols: int
+    systems: list[str] = []  # Unique system categories found

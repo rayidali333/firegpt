@@ -13,9 +13,13 @@ text found in the drawing. This makes detection robust across any
 naming convention, language, or CAD standard.
 """
 
+import logging
+import math
 import re
 import subprocess
 from collections import defaultdict
+
+logger = logging.getLogger("firegpt.parser")
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -221,6 +225,51 @@ SYMBOL_COLORS: dict[str, str] = {
 
 DEFAULT_COLOR = "#95A5A6"
 
+# Colors for legend system categories
+CATEGORY_COLORS: dict[str, str] = {
+    "Fire Alarm": "#E74C3C",
+    "Access Control": "#3498DB",
+    "Structured Cabling": "#E67E22",
+    "BMS": "#9B59B6",
+    "Video Surveillance": "#1ABC9C",
+    "Public Address": "#2ECC71",
+    "Other": "#95A5A6",
+}
+
+# Distinct color palette for individual symbol types (20 visually distinct colors)
+SYMBOL_PALETTE = [
+    "#E74C3C",  # red
+    "#3498DB",  # blue
+    "#2ECC71",  # green
+    "#F39C12",  # orange
+    "#9B59B6",  # purple
+    "#1ABC9C",  # teal
+    "#E67E22",  # dark orange
+    "#2980B9",  # dark blue
+    "#27AE60",  # dark green
+    "#8E44AD",  # dark purple
+    "#D35400",  # burnt orange
+    "#16A085",  # dark teal
+    "#C0392B",  # dark red
+    "#2C3E50",  # navy
+    "#F1C40F",  # yellow
+    "#7D3C98",  # violet
+    "#1F618D",  # steel blue
+    "#117A65",  # forest green
+    "#A04000",  # brown
+    "#5B2C6F",  # deep purple
+]
+
+
+def get_category_color(category: str) -> str:
+    """Get color for a legend system category."""
+    return CATEGORY_COLORS.get(category, DEFAULT_COLOR)
+
+
+def get_symbol_palette_color(index: int) -> str:
+    """Get a distinct color from the palette by index."""
+    return SYMBOL_PALETTE[index % len(SYMBOL_PALETTE)]
+
 # Block names to always skip (truly internal AutoCAD objects)
 SKIP_PATTERNS = [
     r"^\*Model_Space",
@@ -280,6 +329,11 @@ class BlockInfo:
     description: str = ""
     locations: list[tuple[float, float]] = field(default_factory=list)
     attdef_tags: dict[str, str] = field(default_factory=dict)
+    # Sub-grouping fields: when instances of the same block have different
+    # attribute values (e.g., TYPE=AIM vs TYPE=AOM), we split them into
+    # sub-groups. Each sub-group gets its own BlockInfo.
+    sub_group_tag: str = ""    # Which ATTRIB tag was used to split (e.g., "TYPE")
+    sub_group_value: str = ""  # The value for this sub-group (e.g., "AIM")
 
 
 @dataclass
@@ -452,11 +506,281 @@ def _collect_block_metadata(block_def, doc) -> dict:
     }
 
 
-def parse_dxf_file(filepath: str) -> ParseResult:
+def _collect_model_texts(doc) -> list[dict]:
+    """Scan all TEXT/MTEXT entities in model space and return their content + positions.
+
+    These are the device code labels placed near symbols on the drawing —
+    e.g., "S" next to a smoke detector, "AIM" next to an addressable module.
+    They're standalone text entities, not ATTRIBs or block-internal text.
+    """
+    texts = []
+    try:
+        for layout in doc.layouts:
+            if layout.name != "Model":
+                continue
+            for entity in layout:
+                etype = entity.dxftype()
+                text = ""
+                if etype == "TEXT":
+                    text = entity.dxf.text.strip()
+                elif etype == "MTEXT":
+                    try:
+                        text = entity.plain_text().strip()
+                    except Exception:
+                        text = entity.text.strip() if hasattr(entity, 'text') and entity.text else ""
+                else:
+                    continue
+
+                if not text or len(text) > 20:
+                    continue  # Skip empty or very long text (not a device code)
+
+                try:
+                    pos = entity.dxf.insert
+                    texts.append({
+                        "text": text,
+                        "x": pos.x,
+                        "y": pos.y,
+                    })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return texts
+
+
+def _compute_search_radius(block_locations: dict[str, list[tuple[float, float]]]) -> float:
+    """Compute an adaptive search radius for text-to-INSERT association.
+
+    Uses 1.5% of the smaller drawing dimension. This captures text labels
+    placed close to their symbol while avoiding false matches from neighboring
+    symbols. Fire alarm text labels are typically placed within 1-3 feet of
+    the symbol, which is a small fraction of the floor plan extent.
+    """
+    all_x = []
+    all_y = []
+    for locs in block_locations.values():
+        for x, y in locs:
+            all_x.append(x)
+            all_y.append(y)
+
+    if not all_x:
+        return 500.0  # Safe default
+
+    width = max(all_x) - min(all_x)
+    height = max(all_y) - min(all_y)
+    smaller_dim = min(width, height) if min(width, height) > 0 else max(width, height)
+
+    if smaller_dim <= 0:
+        return 500.0
+
+    radius = smaller_dim * 0.015  # 1.5% of smaller dimension
+    # Clamp to reasonable range
+    return max(50.0, min(radius, 5000.0))
+
+
+def _associate_text_with_inserts(
+    block_instances: dict[str, list[dict]],
+    model_texts: list[dict],
+    radius: float,
+) -> dict[str, int]:
+    """Find the nearest short text entity for each INSERT instance.
+
+    For each instance in block_instances, find TEXT entities within `radius`
+    distance. If found, inject the text as a synthetic attribute '_NEARBY_LABEL'
+    on the instance. This allows the existing sub-grouping and legend-matching
+    code to use these text labels automatically.
+
+    Returns:
+        dict mapping text_value → count of instances matched (for logging).
+    """
+    if not model_texts:
+        return {}
+
+    # Pre-filter: only consider short text likely to be device codes (1-10 chars)
+    code_texts = [t for t in model_texts if 1 <= len(t["text"]) <= 10]
+    if not code_texts:
+        return {}
+
+    match_counts: dict[str, int] = defaultdict(int)
+    total_matched = 0
+
+    for block_name, instances in block_instances.items():
+        for inst in instances:
+            if "location" not in inst:
+                continue
+
+            ix, iy = inst["location"]
+            best_text = None
+            best_dist = float("inf")
+
+            for ct in code_texts:
+                dist = math.sqrt((ct["x"] - ix) ** 2 + (ct["y"] - iy) ** 2)
+                if dist < best_dist and dist <= radius:
+                    best_dist = dist
+                    best_text = ct["text"]
+
+            if best_text:
+                # Inject as synthetic attribute — the existing sub-grouping
+                # and legend-matching code will pick this up automatically
+                inst["attribs"]["_NEARBY_LABEL"] = best_text
+                match_counts[best_text] += 1
+                total_matched += 1
+
+    return dict(match_counts)
+
+
+def _find_differentiating_tag(
+    instances: list[dict],
+    total_count: int,
+) -> str | None:
+    """Find the ATTRIB tag that best differentiates device types across instances.
+
+    For a block like IT-DVC-FAM-Fire Modules-111 with 47 instances, some will have
+    TYPE=AIM, others TYPE=AOM, etc. We need to find which tag varies meaningfully
+    (not an ID field where every value is unique, not a constant field).
+
+    Args:
+        instances: List of dicts, each with "attribs" key containing {tag: value}.
+        total_count: Total number of INSERT instances (some may lack attribs).
+
+    Returns:
+        The tag name that best differentiates device types, or None.
+    """
+    if not instances:
+        return None
+
+    # Collect all values per tag
+    tag_values: dict[str, list[str]] = defaultdict(list)
+    for inst in instances:
+        for tag, value in inst.get("attribs", {}).items():
+            tag_values[tag].append(value)
+
+    if not tag_values:
+        return None
+
+    # Known device-type tag names (priority order). These are standard across
+    # major CAD software: AutoCAD, Revit, BricsCAD, etc.
+    PRIORITY_TAGS = [
+        "TYPE", "DEVICE_TYPE", "DEVICE", "SYMBOL", "SYMBOL_TYPE",
+        "MODEL", "PART_NUMBER", "DEVICE_NAME",
+        "TAG", "NAME", "DESC", "DESCRIPTION",
+    ]
+
+    def _is_good_differentiator(tag: str, values: list[str]) -> bool:
+        """A good differentiator has 2+ unique values but isn't an ID field."""
+        unique = set(values)
+        n_unique = len(unique)
+        n_total = len(values)
+        if n_unique < 2:
+            return False  # Constant — same value everywhere
+        if n_total >= 5 and n_unique > n_total * 0.8:
+            return False  # ID-like — nearly every value is unique
+        return True
+
+    # Try priority tags first
+    for ptag in PRIORITY_TAGS:
+        if ptag in tag_values and _is_good_differentiator(ptag, tag_values[ptag]):
+            return ptag
+
+    # Fallback: find any tag that differentiates
+    best_tag = None
+    best_unique_count = 0
+    for tag, values in tag_values.items():
+        if _is_good_differentiator(tag, values):
+            unique_count = len(set(values))
+            if unique_count > best_unique_count:
+                best_unique_count = unique_count
+                best_tag = tag
+
+    return best_tag
+
+
+def _sub_group_block_instances(
+    block_name: str,
+    instances: list[dict],
+    diff_tag: str,
+    total_block_count: int,
+    block_def_meta: dict,
+    all_layers: set[str],
+) -> list[BlockInfo]:
+    """Split instances of a single block into sub-groups by a differentiating attribute.
+
+    Args:
+        block_name: Original DXF block name.
+        instances: Per-instance data with attribs and locations.
+        diff_tag: The attribute tag to sub-group by.
+        total_block_count: Total INSERT count for this block (includes instances without attribs).
+        block_def_meta: Block definition metadata (texts_inside, entity_types, etc.).
+        all_layers: All layers this block appears on.
+
+    Returns:
+        List of BlockInfo objects, one per sub-group.
+    """
+    groups: dict[str, list[dict]] = defaultdict(list)
+    no_attrib_instances = []
+
+    for inst in instances:
+        value = inst.get("attribs", {}).get(diff_tag, "")
+        if value:
+            groups[value].append(inst)
+        else:
+            no_attrib_instances.append(inst)
+
+    # If there are instances without the differentiating attrib (e.g., some INSERTs
+    # don't have attribs at all), create a catch-all sub-group
+    instances_with_attribs = sum(len(g) for g in groups.values())
+    unaccounted = total_block_count - instances_with_attribs - len(no_attrib_instances)
+
+    result = []
+    for value, group_instances in groups.items():
+        locations = [inst["location"] for inst in group_instances if "location" in inst]
+        layers = sorted(set(inst.get("layer", "") for inst in group_instances if inst.get("layer")))
+        # Use representative attribs from first instance
+        rep_attribs = group_instances[0].get("attribs", {}) if group_instances else {}
+
+        result.append(BlockInfo(
+            block_name=block_name,
+            count=len(group_instances),
+            layers=layers or sorted(all_layers),
+            entity_types=block_def_meta.get("entity_types", {}),
+            attribs=rep_attribs,
+            texts_inside=block_def_meta.get("texts_inside", []),
+            description=block_def_meta.get("description", ""),
+            locations=locations,
+            attdef_tags=block_def_meta.get("attdef_tags", {}),
+            sub_group_tag=diff_tag,
+            sub_group_value=value,
+        ))
+
+    # Catch-all for instances without the differentiating attribute
+    remainder_count = len(no_attrib_instances) + unaccounted
+    if remainder_count > 0:
+        remainder_locations = [inst["location"] for inst in no_attrib_instances if "location" in inst]
+        result.append(BlockInfo(
+            block_name=block_name,
+            count=remainder_count,
+            layers=sorted(all_layers),
+            entity_types=block_def_meta.get("entity_types", {}),
+            attribs={},
+            texts_inside=block_def_meta.get("texts_inside", []),
+            description=block_def_meta.get("description", ""),
+            locations=remainder_locations,
+            attdef_tags=block_def_meta.get("attdef_tags", {}),
+            sub_group_tag="",
+            sub_group_value="",
+        ))
+
+    return result
+
+
+def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
     """Parse a DXF file and extract all block references with metadata.
 
-    Uses dictionary matching as a fast path for obvious symbols.
-    All other blocks are collected with full metadata for AI classification.
+    When use_fast_path=True (default, no legend): uses dictionary matching as a
+    fast path for obvious symbols. Remaining blocks go to AI.
+    When use_fast_path=False (legend provided): skips dictionary matching entirely.
+    ALL blocks are collected as AI candidates for legend-aware classification.
     """
     result = ParseResult(dxf_path=filepath)
 
@@ -523,6 +847,9 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     block_layers: dict[str, set[str]] = defaultdict(set)
     block_attribs: dict[str, dict[str, str]] = {}
     skipped_blocks: dict[str, int] = defaultdict(int)
+    attrib_errors: dict[str, str] = {}  # Track ATTRIB extraction failures
+    # Per-instance data for sub-grouping: {block_name: [{attribs: {}, location: (x,y), layer: ""}]}
+    block_instances: dict[str, list[dict]] = defaultdict(list)
 
     total_entities = 0
     total_inserts = 0
@@ -539,7 +866,7 @@ def parse_dxf_file(filepath: str) -> ParseResult:
             etype = entity.dxftype()
             layout_types[etype] += 1
 
-            if etype == "INSERT":
+            if etype in ("INSERT", "MINSERT"):
                 block_name = entity.dxf.name
                 total_inserts += 1
                 layout_insert_count += 1
@@ -555,32 +882,51 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                 if not is_model_space:
                     continue
 
-                block_counts[block_name] += 1
+                # MINSERT = arrayed block insertions. Count = rows × cols.
+                if etype == "MINSERT":
+                    row_count = getattr(entity.dxf, 'row_count', 1) or 1
+                    col_count = getattr(entity.dxf, 'column_count', 1) or 1
+                    insert_multiplier = row_count * col_count
+                else:
+                    insert_multiplier = 1
+
+                block_counts[block_name] += insert_multiplier
+
+                # Collect per-instance data for sub-grouping
+                instance_data: dict = {"attribs": {}}
 
                 try:
                     block_layers[block_name].add(entity.dxf.layer)
+                    instance_data["layer"] = entity.dxf.layer
                 except Exception:
                     pass
 
                 try:
                     if hasattr(entity, "attribs") and entity.attribs:
+                        instance_attribs = {}
                         for attrib in entity.attribs:
                             tag = attrib.dxf.tag.upper().strip()
                             value = attrib.dxf.text.strip()
-                            if value and block_name not in block_attribs:
-                                block_attribs[block_name] = {}
                             if value:
-                                block_attribs[block_name][tag] = value
-                except Exception:
-                    pass
+                                instance_attribs[tag] = value
+                        instance_data["attribs"] = instance_attribs
+                        # Also keep first-instance attribs for backward compat
+                        if instance_attribs and block_name not in block_attribs:
+                            block_attribs[block_name] = dict(instance_attribs)
+                except Exception as e:
+                    attrib_errors[block_name] = str(e)
 
                 try:
                     insert_point = entity.dxf.insert
-                    block_locations[block_name].append(
-                        (round(insert_point.x, 2), round(insert_point.y, 2))
-                    )
+                    loc = (round(insert_point.x, 2), round(insert_point.y, 2))
+                    block_locations[block_name].append(loc)
+                    instance_data["location"] = loc
                 except Exception:
                     pass
+
+                # For MINSERT, add multiple instances for the array
+                for _ in range(insert_multiplier):
+                    block_instances[block_name].append(instance_data)
 
         top_types = sorted(layout_types.items(), key=lambda x: -x[1])[:8]
         types_str = ", ".join(f"{t}: {c}" for t, c in top_types)
@@ -603,6 +949,104 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         )
         result.log("info", f"Skipped system blocks: {skip_list}")
 
+    # Step 5a: Nearby text label scanning
+    # Fire alarm drawings have device code labels ("S", "H", "AIM", "AOM") placed
+    # as TEXT/MTEXT entities near each symbol. These are the codes shown in the legend.
+    # We scan all text in model space, find the nearest short text to each INSERT,
+    # and inject it as a synthetic attribute '_NEARBY_LABEL' on the instance data.
+    # This feeds directly into sub-grouping and legend code matching.
+    model_texts = _collect_model_texts(doc)
+    if model_texts:
+        search_radius = _compute_search_radius(block_locations)
+        result.log("info",
+            f"Text label scan: {len(model_texts)} TEXT/MTEXT entities in model space, "
+            f"search radius: {search_radius:.0f} units"
+        )
+
+        text_match_counts = _associate_text_with_inserts(
+            block_instances, model_texts, search_radius
+        )
+
+        if text_match_counts:
+            total_labeled = sum(text_match_counts.values())
+            total_inserts_in_model = sum(block_counts.values())
+            # Show top labels found
+            top_labels = sorted(text_match_counts.items(), key=lambda x: -x[1])[:20]
+            label_summary = ", ".join(f'"{t}"×{c}' for t, c in top_labels)
+            result.log("success",
+                f"Nearby text labels found: {total_labeled}/{total_inserts_in_model} "
+                f"INSERT instances matched to text labels"
+            )
+            result.log("section",
+                f"TEXT LABEL SCAN — {len(text_match_counts)} unique labels across {total_labeled} instances"
+            )
+            for text, count in top_labels:
+                result.log("detail", f'  "{text}" — found near {count} INSERT instances')
+            logger.info(
+                f"=== TEXT LABEL SCAN: {total_labeled}/{total_inserts_in_model} instances labeled. "
+                f"Top: {label_summary} ==="
+            )
+        else:
+            result.log("info",
+                "Text label scan: no short text found near INSERT positions "
+                f"(radius={search_radius:.0f} units)"
+            )
+    else:
+        result.log("info", "Text label scan: no TEXT/MTEXT entities found in model space")
+
+    # Step 5b: ATTRIB inspection — debug what attribute data we actually collected
+    blocks_with_attribs = {bn: instances for bn, instances in block_instances.items()
+                           if any(inst.get("attribs") for inst in instances)}
+    blocks_without_attribs = {bn for bn in block_counts if bn not in blocks_with_attribs}
+    logger.info(
+        f"=== ATTRIB INSPECTION: {len(blocks_with_attribs)}/{len(block_counts)} blocks have ATTRIBs, "
+        f"{len(blocks_without_attribs)} have NONE ==="
+    )
+    for bn, instances in sorted(blocks_with_attribs.items()):
+        sample = next((inst["attribs"] for inst in instances if inst.get("attribs")), {})
+        logger.info(f"  ATTRIBS: \"{bn}\" — sample: {sample}")
+
+    result.log("section",
+        f"ATTRIB INSPECTION — {len(blocks_with_attribs)}/{len(block_counts)} blocks have per-instance ATTRIBs"
+    )
+
+    if blocks_with_attribs:
+        for bn in sorted(blocks_with_attribs.keys()):
+            instances = blocks_with_attribs[bn]
+            instances_with = sum(1 for inst in instances if inst.get("attribs"))
+            instances_without = len(instances) - instances_with
+            # Collect all unique tags and sample values
+            all_tags: dict[str, set[str]] = defaultdict(set)
+            for inst in instances:
+                for tag, val in inst.get("attribs", {}).items():
+                    all_tags[tag].add(val)
+            tag_summary = ", ".join(
+                f'{tag}=[{", ".join(sorted(list(vals))[:5])}{"..." if len(vals) > 5 else ""}] ({len(vals)} unique)'
+                for tag, vals in sorted(all_tags.items())
+            )
+            result.log("detail",
+                f'  "{bn}" — {instances_with}/{len(instances)} have attribs, '
+                f'{instances_without} empty. Tags: {tag_summary}'
+            )
+    else:
+        result.log("detail", "  No blocks have per-instance ATTRIB data at all")
+        result.log("detail", "  This means INSERT entities lack ATTRIB sub-entities (common in DWG→DXF conversion)")
+
+    if blocks_without_attribs:
+        # Show up to 10 blocks without attribs
+        no_attr_list = sorted(blocks_without_attribs)[:10]
+        result.log("detail",
+            f"  Blocks with NO attribs ({len(blocks_without_attribs)}): "
+            + ", ".join(f'"{bn}" (×{block_counts[bn]})' for bn in no_attr_list)
+            + ("..." if len(blocks_without_attribs) > 10 else "")
+        )
+
+    if attrib_errors:
+        result.log("warning",
+            f"ATTRIB extraction errors ({len(attrib_errors)}): "
+            + ", ".join(f'"{bn}": {err}' for bn, err in list(attrib_errors.items())[:5])
+        )
+
     # Step 6: Analyze block definitions — nested refs + metadata
     nested_ref_counts: dict[str, dict[str, int]] = {}
     block_def_metadata: dict[str, dict] = {}
@@ -619,6 +1063,30 @@ def parse_dxf_file(filepath: str) -> ParseResult:
 
         if block.name in block_counts:
             block_def_metadata[block.name] = _collect_block_metadata(block, doc)
+
+    # Step 6b: Block definition content debug — show texts_inside and attdef_tags
+    blocks_with_content = {bn: meta for bn, meta in block_def_metadata.items()
+                           if meta.get("texts_inside") or meta.get("attdef_tags")}
+    if blocks_with_content:
+        result.log("section",
+            f"BLOCK DEFINITION CONTENT — {len(blocks_with_content)}/{len(block_def_metadata)} blocks have text/attdefs"
+        )
+        for bn in sorted(blocks_with_content.keys()):
+            meta = blocks_with_content[bn]
+            parts = []
+            if meta.get("texts_inside"):
+                parts.append(f'texts={meta["texts_inside"][:5]}')
+            if meta.get("attdef_tags"):
+                parts.append(f'attdefs={dict(list(meta["attdef_tags"].items())[:5])}')
+            if meta.get("description"):
+                parts.append(f'desc="{meta["description"][:80]}"')
+            result.log("detail",
+                f'  "{bn}" (×{block_counts.get(bn, "?")}) — {", ".join(parts)}'
+            )
+    else:
+        result.log("section",
+            f"BLOCK DEFINITION CONTENT — 0/{len(block_def_metadata)} blocks have text or attdef content"
+        )
 
     # Step 7: Propagate counts through nesting hierarchy (BFS)
     # IMPORTANT: Only propagate to blocks that were directly inserted on the
@@ -673,12 +1141,24 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         result.log("warning", f"{len(result.xref_warnings)} external references (XREFs) detected — devices in referenced files are not counted")
 
     # Step 9: Classify blocks — fast path vs AI candidates
+    # When use_fast_path=False (legend uploaded), ALL blocks go to AI as candidates.
+    # The legend provides the authoritative symbol dictionary, so we skip hardcoded patterns.
+    #
+    # NEW: Sub-grouping. When different INSERTs of the same block have different
+    # attribute values (e.g., IT-DVC-FAM-Fire Modules-111 with TYPE=AIM vs TYPE=AOM),
+    # split them into separate BlockInfo entries so each device type can be classified
+    # independently. This is critical for drawings where one generic block is used for
+    # multiple device types differentiated by ATTRIB values.
     result.all_block_names = sorted(block_counts.keys())
     fast_path_count = 0
     ai_candidate_count = 0
+    sub_grouped_count = 0
 
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
-        match = _fast_path_label(block_name)
+        if use_fast_path:
+            match = _fast_path_label(block_name)
+        else:
+            match = None  # Skip dictionary — legend is source of truth
 
         if match is not None:
             # Fast path: dictionary matched with high confidence
@@ -705,28 +1185,69 @@ def parse_dxf_file(filepath: str) -> ParseResult:
                 layers=layers,
             ))
         else:
-            # Collect full metadata for AI classification
-            ai_candidate_count += 1
             layers = sorted(block_layers.get(block_name, set()))
             meta = block_def_metadata.get(block_name, {})
+            instances = block_instances.get(block_name, [])
 
-            result.ai_candidate_blocks.append(BlockInfo(
-                block_name=block_name,
-                count=count,
-                layers=layers,
-                entity_types=meta.get("entity_types", {}),
-                attribs=block_attribs.get(block_name, {}),
-                texts_inside=meta.get("texts_inside", []),
-                description=meta.get("description", ""),
-                locations=block_locations.get(block_name, []),
-                attdef_tags=meta.get("attdef_tags", {}),
-            ))
+            # Try sub-grouping: check if instances have a differentiating attribute
+            diff_tag = _find_differentiating_tag(instances, count)
+            n_with_attribs = sum(1 for inst in instances if inst.get("attribs"))
+            logger.debug(
+                f"Sub-group check: \"{block_name}\" — {len(instances)} instances, "
+                f"{n_with_attribs} with attribs, diff_tag={diff_tag!r}"
+            )
 
-    result.log(
-        "info",
-        f"Fast-path identified: {fast_path_count} symbol types "
-        f"({sum(s.count for s in result.fast_path_symbols)} devices)"
-    )
+            if diff_tag:
+                # Sub-group this block by the differentiating attribute
+                sub_groups = _sub_group_block_instances(
+                    block_name=block_name,
+                    instances=instances,
+                    diff_tag=diff_tag,
+                    total_block_count=count,
+                    block_def_meta=meta,
+                    all_layers=block_layers.get(block_name, set()),
+                )
+                for sg in sub_groups:
+                    ai_candidate_count += 1
+                    result.ai_candidate_blocks.append(sg)
+                sub_grouped_count += 1
+                result.log(
+                    "info",
+                    f'Sub-grouped "{block_name}" by {diff_tag}: '
+                    f'{", ".join(f"{sg.sub_group_value}={sg.count}" for sg in sub_groups if sg.sub_group_value)}'
+                    f'{" + " + str(sum(sg.count for sg in sub_groups if not sg.sub_group_value)) + " untagged" if any(not sg.sub_group_value for sg in sub_groups) else ""}'
+                )
+            else:
+                # No sub-grouping — single BlockInfo as before
+                ai_candidate_count += 1
+                result.ai_candidate_blocks.append(BlockInfo(
+                    block_name=block_name,
+                    count=count,
+                    layers=layers,
+                    entity_types=meta.get("entity_types", {}),
+                    attribs=block_attribs.get(block_name, {}),
+                    texts_inside=meta.get("texts_inside", []),
+                    description=meta.get("description", ""),
+                    locations=block_locations.get(block_name, []),
+                    attdef_tags=meta.get("attdef_tags", {}),
+                ))
+
+    if use_fast_path:
+        result.log(
+            "info",
+            f"Fast-path identified: {fast_path_count} symbol types "
+            f"({sum(s.count for s in result.fast_path_symbols)} devices)"
+        )
+    else:
+        result.log(
+            "info",
+            "Legend mode: skipping hardcoded patterns — all blocks sent to AI with legend context"
+        )
+    if sub_grouped_count > 0:
+        result.log(
+            "info",
+            f"Sub-grouped {sub_grouped_count} blocks by per-instance attributes"
+        )
     if ai_candidate_count > 0:
         result.log(
             "info",
@@ -754,7 +1275,7 @@ def _merge_dxf_result(result: ParseResult, dxf_result: ParseResult, dxf_path: st
     result.dxf_path = dxf_path
 
 
-def parse_dwg_file(filepath: str) -> ParseResult:
+def parse_dwg_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
     """Parse a DWG file by converting to DXF first, then parsing."""
     result = ParseResult()
     file_size_mb = Path(filepath).stat().st_size / (1024 * 1024)
@@ -772,7 +1293,7 @@ def parse_dwg_file(filepath: str) -> ParseResult:
         result.log("info", f"Using ODA File Converter: {oda_path}")
         try:
             dxf_path = _convert_with_oda(filepath, oda_path, result)
-            _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
+            _merge_dxf_result(result, parse_dxf_file(dxf_path, use_fast_path=use_fast_path), dxf_path)
             return result
         except HTTPException:
             raise
@@ -787,7 +1308,7 @@ def parse_dwg_file(filepath: str) -> ParseResult:
         result.log("info", f"Using LibreDWG converter: {dwg2dxf_path}")
         try:
             dxf_path = _convert_with_libredwg(filepath, dwg2dxf_path, result)
-            _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
+            _merge_dxf_result(result, parse_dxf_file(dxf_path, use_fast_path=use_fast_path), dxf_path)
             return result
         except HTTPException:
             raise
@@ -815,7 +1336,7 @@ def parse_dwg_file(filepath: str) -> ParseResult:
     try:
         doc.saveas(dxf_path)
         result.log("success", f"Saved recovered DXF ({Path(dxf_path).stat().st_size / 1024:.0f} KB)")
-        _merge_dxf_result(result, parse_dxf_file(dxf_path), dxf_path)
+        _merge_dxf_result(result, parse_dxf_file(dxf_path, use_fast_path=use_fast_path), dxf_path)
         return result
     except Exception as e:
         result.log("error", f"Could not save recovered file: {str(e)}")

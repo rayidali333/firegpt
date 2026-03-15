@@ -2,6 +2,101 @@ import React, { useState } from "react";
 import { MapPin, Download, Check, X, Edit2 } from "lucide-react";
 import { SymbolInfo } from "../types";
 
+function SymbolMarker({ color, code, shape, svgIcon }: { color: string; code: string; shape: string; svgIcon?: string }) {
+  // Prefer AI-generated SVG icon when available
+  if (svgIcon) {
+    return (
+      <span
+        className="symbol-svg-icon"
+        style={{ color }}
+        dangerouslySetInnerHTML={{ __html: svgIcon }}
+      />
+    );
+  }
+
+  if (!code) {
+    return <span className="symbol-dot" style={{ backgroundColor: color }} />;
+  }
+
+  // Fallback: hardcoded shape + code text
+  const isLong = code.length > 3;
+  const w = isLong ? 38 : 26;
+  const h = 22;
+  const cx = w / 2;
+  const cy = h / 2;
+  const fontSize = isLong ? 7.5 : (code.length > 2 ? 8 : 9);
+
+  let shapePath: React.ReactNode;
+  const stroke = color;
+  const fill = "none";
+  const sw = 1.5;
+
+  switch (shape) {
+    case "pentagon": {
+      const r = 9;
+      const pts = Array.from({ length: 5 }, (_, i) => {
+        const angle = (Math.PI * 2 / 5) * i - Math.PI / 2;
+        return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`;
+      }).join(" ");
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "hexagon": {
+      const r = 9;
+      const pts = Array.from({ length: 6 }, (_, i) => {
+        const angle = (Math.PI / 3) * i - Math.PI / 2;
+        return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`;
+      }).join(" ");
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "triangle": {
+      const pts = `${cx},${cy - 9} ${cx + 10},${cy + 7} ${cx - 10},${cy + 7}`;
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "diamond": {
+      const pts = `${cx},${cy - 9} ${cx + 10},${cy} ${cx},${cy + 9} ${cx - 10},${cy}`;
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "star": {
+      const outer = 9, inner = 4.5;
+      const pts = Array.from({ length: 10 }, (_, i) => {
+        const r = i % 2 === 0 ? outer : inner;
+        const angle = (Math.PI / 5) * i - Math.PI / 2;
+        return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`;
+      }).join(" ");
+      shapePath = <polygon points={pts} fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+    case "square": {
+      const pad = isLong ? 2 : 3;
+      shapePath = (
+        <rect x={pad} y={cy - 9} width={w - pad * 2} height={18}
+          rx="2" fill={fill} stroke={stroke} strokeWidth={sw} />
+      );
+      break;
+    }
+    default: {
+      const r = isLong ? Math.min(cx - 2, 10) : 9;
+      shapePath = <ellipse cx={cx} cy={cy} rx={isLong ? cx - 2 : r} ry={r}
+        fill={fill} stroke={stroke} strokeWidth={sw} />;
+      break;
+    }
+  }
+
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="symbol-marker-svg">
+      {shapePath}
+      <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
+        fill={color} fontSize={fontSize} fontWeight="bold" fontFamily="Monaco, Menlo, monospace">
+        {code}
+      </text>
+    </svg>
+  );
+}
+
 interface Props {
   symbols: SymbolInfo[];
   total: number;
@@ -25,9 +120,10 @@ function shortBlockName(name: string): string {
   return first.length > 40 ? first.slice(0, 37) + "..." : first;
 }
 
-const CONFIDENCE_BADGE: Record<string, { label: string; className: string; title: string }> = {
-  high: { label: "Dict", className: "badge-high", title: "Matched via dictionary — high confidence" },
-  medium: { label: "AI", className: "badge-medium", title: "Classified by AI — verify if critical" },
+const SOURCE_BADGE: Record<string, { label: string; className: string; title: string }> = {
+  dictionary: { label: "Dict", className: "badge-high", title: "Matched via built-in dictionary — high confidence" },
+  legend: { label: "Legend", className: "badge-legend", title: "Classified using uploaded legend sheet" },
+  ai: { label: "AI", className: "badge-medium", title: "Classified by AI — verify if critical" },
   manual: { label: "Manual", className: "badge-manual", title: "Manually overridden by user" },
 };
 
@@ -110,7 +206,7 @@ export default function SymbolTable({
           symbols.map((s) => {
             const isSelected = selectedSymbol === s.block_name;
             const isEditing = editingBlock === s.block_name;
-            const badge = CONFIDENCE_BADGE[s.confidence] || CONFIDENCE_BADGE.high;
+            const badge = SOURCE_BADGE[s.source] || SOURCE_BADGE.dictionary;
             return (
               <div
                 key={s.block_name}
@@ -120,10 +216,7 @@ export default function SymbolTable({
                 }
               >
                 <div className="symbol-color-indicator">
-                  <span
-                    className="symbol-dot"
-                    style={{ backgroundColor: s.color }}
-                  />
+                  <SymbolMarker color={s.color} code={s.legend_code || ""} shape={s.shape_code || "circle"} svgIcon={s.svg_icon || ""} />
                 </div>
                 <div className="symbol-info">
                   {isEditing ? (
