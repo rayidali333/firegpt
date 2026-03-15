@@ -17,8 +17,8 @@ interface Props {
   uploading: boolean;
   onReset: () => void;
   messageCount: number;
-  activeTab: "symbols" | "drawing" | "analysis";
-  onTabChange: (tab: "symbols" | "drawing" | "analysis") => void;
+  activeTab: "symbols" | "drawing" | "analysis" | "legend";
+  onTabChange: (tab: "symbols" | "drawing" | "analysis" | "legend") => void;
   legend: LegendData | null;
 }
 
@@ -82,7 +82,11 @@ export default function Sidebar({
             <span className="sidebar-section-arrow">&#9660;</span>
             Legend
           </div>
-          <div className="sidebar-nav-item active">
+          <div
+            className={`sidebar-nav-item ${drawing && activeTab === "legend" ? "active" : ""}`}
+            onClick={() => drawing && onTabChange("legend")}
+            style={{ cursor: drawing ? "pointer" : "default" }}
+          >
             <BookOpen />
             <span className="sidebar-file-name">{legend.filename}</span>
             <span className="sidebar-badge">{legend.total_symbols}</span>

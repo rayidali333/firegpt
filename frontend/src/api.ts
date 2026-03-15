@@ -1,4 +1,4 @@
-import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData, LegendSymbol } from "./types";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
@@ -151,4 +151,58 @@ export async function overrideSymbol(
 
 export function getExportUrl(drawingId: string): string {
   return `${API_BASE}/api/drawings/${drawingId}/export`;
+}
+
+// ── Legend CRUD ──
+
+export async function updateLegendSymbol(
+  legendId: string,
+  symbolIdx: number,
+  update: Partial<LegendSymbol>
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/api/legends/${legendId}/symbols/${symbolIdx}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(update),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Update failed" }));
+    throw new Error(err.detail || "Update failed");
+  }
+}
+
+export async function addLegendSymbol(
+  legendId: string,
+  symbol: LegendSymbol
+): Promise<{ index: number }> {
+  const res = await fetch(
+    `${API_BASE}/api/legends/${legendId}/symbols`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(symbol),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Add failed" }));
+    throw new Error(err.detail || "Add failed");
+  }
+  return res.json();
+}
+
+export async function deleteLegendSymbol(
+  legendId: string,
+  symbolIdx: number
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/api/legends/${legendId}/symbols/${symbolIdx}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Delete failed" }));
+    throw new Error(err.detail || "Delete failed");
+  }
 }

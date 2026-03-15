@@ -202,23 +202,23 @@ git push origin main  # Render auto-deploys from main
 
 ## Development Roadmap
 
-### Phase 1: Legend Extraction — Get to 100% [ ]
+### Phase 1: Legend Extraction — Get to 100% [x]
 Fix the legend parsing pipeline so every symbol on the legend sheet is extracted.
 
-- **1A. Page-by-page PDF extraction**: Add `pymupdf` to split multi-page PDFs into individual pages, send each page separately to Claude Vision. Each page has ~15-30 symbols — well within token limits.
-- **1B. Section-aware extraction prompt**: Pre-scan pass to count sections and symbols per section, then extract per-section with a self-check count target.
-- **1C. Bump token budget**: Increase `max_tokens` from 16384 to 32768 for legend extraction calls.
-- **1D. Replace verification pass with reconciliation**: After merging all pages/sections, reconcile against expected section counts instead of open-ended "find what I missed."
-- **1E. Truncation recovery**: If `stop_reason == "max_tokens"`, retry that page/section with increased budget.
+- **1A. Page-by-page PDF extraction**: ✅ Add `pymupdf` to split multi-page PDFs into individual pages, send each page separately to Claude Vision. Each page has ~15-30 symbols — well within token limits.
+- **1B. Section-aware extraction prompt**: ✅ Pre-scan pass to count sections and symbols per section, then extract per-section with a self-check count target.
+- **1C. Bump token budget**: ✅ Increase `max_tokens` from 16384 to 32768 for legend extraction calls.
+- **1D. Replace verification pass with reconciliation**: ✅ After merging all pages/sections, reconcile against expected section counts instead of open-ended "find what I missed."
+- **1E. Truncation recovery**: ✅ If `stop_reason == "max_tokens"`, retry that page/section with increased budget.
 
-### Phase 2: Legend Review & Edit UI [ ]
+### Phase 2: Legend Review & Edit UI [x]
 Let users verify and correct the AI-extracted legend before processing drawings.
 
-- **2A. Legend review table component**: New `LegendReview.tsx` showing all extracted symbols grouped by category with Code, Name, Category, Shape, Filled, SVG Icon columns.
-- **2B. Inline editing**: Click cells to fix codes/names/categories. Add/delete rows for missed or hallucinated entries.
-- **2C. Re-parse option**: "Re-analyze" button to re-run the vision pipeline.
-- **2D. Legend persistence**: `PATCH /api/legends/{id}/symbols` endpoint. Confirmed legend becomes source of truth.
-- **2E. Visual confirmation**: AI-generated SVG icons displayed for quick scan verification.
+- **2A. Legend review table component**: ✅ New `LegendReview.tsx` showing all extracted symbols grouped by category with Code, Name, Category, Shape, SVG Icon columns.
+- **2B. Inline editing**: ✅ Click cells to fix codes/names/categories. Add/delete rows for missed or hallucinated entries.
+- **2C. Re-parse option**: ✅ "Re-analyze" button to re-run the vision pipeline.
+- **2D. Legend persistence**: ✅ `PATCH /api/legends/{id}/symbols` endpoint. Confirmed legend becomes source of truth.
+- **2E. Visual confirmation**: ✅ AI-generated SVG icons displayed for quick scan verification.
 
 ### Phase 3: Drawing-to-Legend Matching Accuracy [ ]
 Improve how extracted legend symbols get matched to DXF blocks.

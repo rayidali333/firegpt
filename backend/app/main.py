@@ -25,7 +25,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 from app.models import (
-    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendData,
+    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendData, LegendSymbol,
     ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
 )
 
@@ -119,6 +119,88 @@ async def upload_legend(file: UploadFile):
     legend_store[legend_data.legend_id] = legend_data
     logger.info("=== LEGEND UPLOAD COMPLETE ===")
     return legend_data
+
+
+@app.get("/api/legends/{legend_id}", response_model=LegendData)
+async def get_legend(legend_id: str):
+    """Retrieve a specific legend by ID."""
+    if legend_id not in legend_store:
+        raise HTTPException(404, "Legend not found")
+    return legend_store[legend_id]
+
+
+@app.patch("/api/legends/{legend_id}/symbols/{symbol_idx}")
+async def update_legend_symbol(legend_id: str, symbol_idx: int, update: dict):
+    """Update a specific legend symbol by its index.
+
+    Accepts partial updates — only provided fields are changed.
+    Valid fields: code, name, category, shape, shape_code, filled.
+    """
+    if legend_id not in legend_store:
+        raise HTTPException(404, "Legend not found")
+
+    legend = legend_store[legend_id]
+    if symbol_idx < 0 or symbol_idx >= len(legend.symbols):
+        raise HTTPException(404, f"Symbol index {symbol_idx} out of range (0-{len(legend.symbols)-1})")
+
+    sym = legend.symbols[symbol_idx]
+    allowed_fields = {"code", "name", "category", "shape", "shape_code", "filled"}
+    for field, value in update.items():
+        if field in allowed_fields:
+            setattr(sym, field, value)
+
+    logger.info(f"Legend {legend_id}: updated symbol [{symbol_idx}] → code={sym.code!r}, name={sym.name!r}")
+    return {"status": "ok", "symbol": sym.model_dump()}
+
+
+@app.post("/api/legends/{legend_id}/symbols")
+async def add_legend_symbol(legend_id: str, symbol: LegendSymbol):
+    """Add a new symbol to a legend."""
+    if legend_id not in legend_store:
+        raise HTTPException(404, "Legend not found")
+
+    legend = legend_store[legend_id]
+    legend.symbols.append(symbol)
+    legend.total_symbols = len(legend.symbols)
+
+    # Update systems list if new category
+    if symbol.category and symbol.category not in legend.systems:
+        legend.systems.append(symbol.category)
+
+    logger.info(f"Legend {legend_id}: added symbol code={symbol.code!r}, name={symbol.name!r}")
+    return {"status": "ok", "index": len(legend.symbols) - 1, "symbol": symbol.model_dump()}
+
+
+@app.delete("/api/legends/{legend_id}/symbols/{symbol_idx}")
+async def delete_legend_symbol(legend_id: str, symbol_idx: int):
+    """Delete a symbol from a legend by its index."""
+    if legend_id not in legend_store:
+        raise HTTPException(404, "Legend not found")
+
+    legend = legend_store[legend_id]
+    if symbol_idx < 0 or symbol_idx >= len(legend.symbols):
+        raise HTTPException(404, f"Symbol index {symbol_idx} out of range")
+
+    removed = legend.symbols.pop(symbol_idx)
+    legend.total_symbols = len(legend.symbols)
+
+    logger.info(f"Legend {legend_id}: deleted symbol [{symbol_idx}] code={removed.code!r}")
+    return {"status": "ok", "removed": removed.model_dump()}
+
+
+@app.put("/api/legends/{legend_id}/symbols")
+async def replace_all_legend_symbols(legend_id: str, symbols: list[LegendSymbol]):
+    """Replace all symbols in a legend (bulk update after review)."""
+    if legend_id not in legend_store:
+        raise HTTPException(404, "Legend not found")
+
+    legend = legend_store[legend_id]
+    legend.symbols = symbols
+    legend.total_symbols = len(symbols)
+    legend.systems = list({s.category for s in symbols if s.category})
+
+    logger.info(f"Legend {legend_id}: bulk replaced with {len(symbols)} symbols")
+    return {"status": "ok", "total_symbols": len(symbols)}
 
 
 @app.post("/api/upload", response_model=ParseResponse)
