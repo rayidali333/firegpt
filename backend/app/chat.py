@@ -1151,7 +1151,7 @@ async def classify_blocks_with_ai(
             entry["description"] = block.description
         blocks_data.append(entry)
 
-    blocks_json = json.dumps(blocks_data, indent=2)
+    # ── Build shared prompt parts (same for all batches) ──
 
     # Build rich drawing context
     context_parts = []
@@ -1180,10 +1180,10 @@ async def classify_blocks_with_ai(
 
     drawing_context = "\n".join(context_parts)
 
-    # Build prompt — legend-aware or standard
+    # Legend-specific prompt parts (reused across batches)
+    legend_entries = ""
+    valid_labels_json = ""
     if legend:
-        # Legend-aware prompt: use legend as authoritative source
-        # Build a numbered list of valid labels so the AI MUST pick from this exact set
         valid_labels = []
         legend_entries_lines = []
         for idx, s in enumerate(legend.symbols):
@@ -1192,11 +1192,12 @@ async def classify_blocks_with_ai(
                 f'  {idx+1}. Code: "{s.code}" → "{s.name}" [{s.category}]'
             )
         legend_entries = "\n".join(legend_entries_lines)
-
-        # Build a JSON-style list of the exact valid label strings
         valid_labels_json = json.dumps(valid_labels)
 
-        prompt = f"""You are a fire alarm and building systems expert analyzing a CAD construction drawing.
+    def _build_prompt(batch_blocks_json: str) -> str:
+        """Build the classification prompt for a batch of blocks."""
+        if legend:
+            return f"""You are a fire alarm and building systems expert analyzing a CAD construction drawing.
 
 You have been provided with the OFFICIAL LEGEND/KEY for this project. Use it as the AUTHORITATIVE
 source of truth to classify every block in the drawing.
@@ -1208,7 +1209,7 @@ DRAWING CONTEXT:
 {drawing_context}
 
 BLOCKS TO CLASSIFY:
-{blocks_json}
+{batch_blocks_json}
 
 CLASSIFICATION RULES:
 1. The legend above is the ONLY valid source. You MUST use the EXACT name string from the legend.
@@ -1228,9 +1229,8 @@ CLASSIFICATION RULES:
 
 Respond with ONLY a JSON object mapping block names to EXACT legend names or null:
 {{"block_name_1": "Heat Detector", "block_name_2": null, ...}}"""
-    else:
-        # Standard prompt — no legend available
-        prompt = f"""You are a fire alarm systems expert analyzing a CAD construction drawing.
+        else:
+            return f"""You are a fire alarm systems expert analyzing a CAD construction drawing.
 
 Your job: classify each unidentified block as either a fire alarm / building safety device,
 or as NOT a fire alarm device (furniture, plumbing, structural, annotation, etc.).
@@ -1239,7 +1239,7 @@ DRAWING CONTEXT:
 {drawing_context}
 
 BLOCKS TO CLASSIFY:
-{blocks_json}
+{batch_blocks_json}
 
 CLASSIFICATION GUIDELINES:
 1. Use the drawing's naming convention — look at already-identified blocks and layer names
@@ -1273,78 +1273,113 @@ IMPORTANT:
 Respond with ONLY a JSON object. Fire devices get their label, everything else gets null:
 {{"block_name_1": "Smoke Detector", "block_name_2": null, ...}}"""
 
-    try:
-        api_client = _get_client()
+    # ── Split blocks into batches ──
+    # Large block sets overwhelm Claude — it can't produce valid JSON for 60+ mappings
+    # in one response. Batches of ~20 are reliable and if one fails, others succeed.
+    BATCH_SIZE = 20
+    batches = [blocks_data[i:i + BATCH_SIZE] for i in range(0, len(blocks_data), BATCH_SIZE)]
+
+    api_client = _get_client()
+    all_identified: dict[str, str] = {}
+    total_null = 0
+
+    logger.info(
+        f"=== AI BLOCK CLASSIFICATION START ===\n"
+        f"  Blocks to classify: {len(blocks_data)}\n"
+        f"  Legend: {'yes (' + str(len(legend.symbols)) + ' symbols)' if legend else 'no'}\n"
+        f"  Batches: {len(batches)} (batch size: {BATCH_SIZE})"
+    )
+
+    for batch_idx, batch in enumerate(batches, 1):
+        batch_json = json.dumps(batch, indent=2)
+        prompt = _build_prompt(batch_json)
 
         logger.info(
-            f"=== AI BLOCK CLASSIFICATION START ===\n"
-            f"  Blocks to classify: {len(ai_candidate_blocks)}\n"
-            f"  Legend: {'yes (' + str(len(legend.symbols)) + ' symbols)' if legend else 'no'}\n"
-            f"  Prompt length: {len(prompt)} chars"
+            f"  Batch {batch_idx}/{len(batches)}: {len(batch)} blocks, "
+            f"prompt {len(prompt)} chars"
         )
 
-        response = await api_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=16384,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            response = await api_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=16384,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-        logger.info(
-            f"  Claude response: stop_reason={response.stop_reason}, "
-            f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
-        )
+            logger.info(
+                f"    Response: stop_reason={response.stop_reason}, "
+                f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
+            )
 
-        if response.stop_reason == "max_tokens":
-            logger.warning("AI classification response was TRUNCATED (hit max_tokens)")
+            # ── Safety: empty content check ──
+            if not response.content or not response.content[0].text.strip():
+                logger.warning(f"    Batch {batch_idx}: empty response, skipping")
+                continue
 
-        response_text = response.content[0].text.strip()
-        logger.debug(f"  Response text (first 500 chars): {response_text[:500]}")
+            response_text = response.content[0].text.strip()
 
-        # Extract JSON from response (handle markdown code blocks)
-        if response_text.startswith("```"):
-            lines = response_text.split("\n")
-            json_lines = []
-            in_block = False
-            for line in lines:
-                if line.startswith("```") and not in_block:
-                    in_block = True
-                    continue
-                if line.startswith("```") and in_block:
-                    break
-                if in_block:
-                    json_lines.append(line)
-            response_text = "\n".join(json_lines)
+            # ── Truncation retry with 2x budget ──
+            if response.stop_reason == "max_tokens":
+                logger.warning(f"    Batch {batch_idx}: truncated, retrying with 2x budget...")
+                try:
+                    response = await api_client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=32768,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    if not response.content or not response.content[0].text.strip():
+                        logger.warning(f"    Batch {batch_idx}: retry also empty, skipping")
+                        continue
+                    response_text = response.content[0].text.strip()
+                    if response.stop_reason == "max_tokens":
+                        logger.warning(f"    Batch {batch_idx}: still truncated after retry")
+                except Exception as retry_err:
+                    logger.warning(f"    Batch {batch_idx}: retry failed: {retry_err}")
+                    # Fall through — try to parse whatever we got from the first attempt
 
-        result = json.loads(response_text)
+            # ── Robust JSON extraction ──
+            try:
+                result = _extract_json_object(response_text)
+            except ValueError:
+                logger.warning(
+                    f"    Batch {batch_idx}: JSON extraction failed, "
+                    f"response text (first 300 chars): {response_text[:300]}"
+                )
+                continue
 
-        # Filter out null values — only return positively identified blocks
-        identified = {}
-        null_count = 0
-        for block_name, label in result.items():
-            if label and isinstance(label, str) and len(label.strip()) > 1:
-                identified[block_name] = label.strip()
-            else:
-                null_count += 1
+            # Filter out null values — only keep positively identified blocks
+            batch_identified = 0
+            for block_name, label in result.items():
+                if label and isinstance(label, str) and len(label.strip()) > 1:
+                    all_identified[block_name] = label.strip()
+                    batch_identified += 1
+                else:
+                    total_null += 1
 
-        logger.info(
-            f"  Classification result: {len(identified)} identified, {null_count} null/skipped\n"
-            f"  ==========================="
-        )
-        if identified:
-            for name, label in list(identified.items())[:20]:
-                logger.info(f"    {name!r} → {label!r}")
-            if len(identified) > 20:
-                logger.info(f"    ... and {len(identified) - 20} more")
+            logger.info(
+                f"    Batch {batch_idx}: {batch_identified} identified, "
+                f"{len(result) - batch_identified} null"
+            )
 
-        return identified
+        except Exception as e:
+            logger.warning(
+                f"    Batch {batch_idx} FAILED ({type(e).__name__}: {e}), "
+                f"continuing with remaining batches..."
+            )
+            continue
 
-    except json.JSONDecodeError as e:
-        logger.error(f"AI block classification returned invalid JSON: {e}")
-        logger.error(f"Response text:\n{response_text[:1000]}")
-        raise  # Re-raise so caller can surface in analysis log
-    except Exception as e:
-        logger.error(f"AI block classification failed: {type(e).__name__}: {e}")
-        raise  # Re-raise so caller can surface in analysis log
+    logger.info(
+        f"  === CLASSIFICATION COMPLETE ===\n"
+        f"  Total identified: {len(all_identified)}, total null: {total_null}\n"
+        f"  ==========================="
+    )
+    if all_identified:
+        for name, label in list(all_identified.items())[:20]:
+            logger.info(f"    {name!r} → {label!r}")
+        if len(all_identified) > 20:
+            logger.info(f"    ... and {len(all_identified) - 20} more")
+
+    return all_identified
 
 
 def _build_system_prompt(drawing: ParseResponse, legend: LegendData | None = None) -> str:
