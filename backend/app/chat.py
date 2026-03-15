@@ -400,10 +400,14 @@ def _get_pdf_page_count(pdf_bytes: bytes) -> int:
         return 1
 
 
-def _split_pdf_to_pages(pdf_bytes: bytes, dpi: int = 200) -> list[tuple[bytes, int]]:
-    """Render each PDF page to a PNG image at the given DPI.
+def _split_pdf_to_pages(pdf_bytes: bytes) -> list[tuple[bytes, int]]:
+    """Split a multi-page PDF into individual single-page PDFs.
 
-    Returns a list of (png_bytes, 1-indexed page_number) tuples.
+    Each page is extracted as a separate PDF document (not rendered to PNG)
+    to preserve full vector text quality. This is critical for reading small
+    legend codes, subscripts, and fine text that gets lost in rasterization.
+
+    Returns a list of (single_page_pdf_bytes, 1-indexed page_number) tuples.
     Falls back to empty list if pymupdf is unavailable or the PDF is unreadable.
     """
     try:
@@ -421,15 +425,15 @@ def _split_pdf_to_pages(pdf_bytes: bytes, dpi: int = 200) -> list[tuple[bytes, i
     pages: list[tuple[bytes, int]] = []
     try:
         for page_idx in range(len(doc)):
-            page = doc[page_idx]
-            # Render at the requested DPI (default 200 — good text clarity, reasonable size)
-            mat = fitz.Matrix(dpi / 72, dpi / 72)
-            pix = page.get_pixmap(matrix=mat)
-            png_bytes = pix.tobytes("png")
-            pages.append((png_bytes, page_idx + 1))
+            # Extract as a separate single-page PDF (preserves vector text quality)
+            new_doc = fitz.open()
+            new_doc.insert_pdf(doc, from_page=page_idx, to_page=page_idx)
+            page_pdf_bytes = new_doc.tobytes()
+            new_doc.close()
+            pages.append((page_pdf_bytes, page_idx + 1))
             logger.info(
                 f"  PDF page {page_idx + 1}/{len(doc)}: "
-                f"{pix.width}x{pix.height}px, {len(png_bytes) / 1024:.0f}KB PNG"
+                f"{len(page_pdf_bytes) / 1024:.0f}KB single-page PDF"
             )
     finally:
         doc.close()
@@ -498,12 +502,8 @@ CRITICAL RULES FOR COMPLETENESS:
 
 {_LEGEND_FIELD_RULES}
 
-MANDATORY COUNTING STEP — do this BEFORE generating JSON:
-1. Identify every section header visible (e.g., "FIRE ALARM SYSTEM", "ACCESS CONTROL", etc.)
-2. Under each section, count the number of distinct symbol rows — go row by row, top to bottom
-3. Sum the counts across all sections — this is your EXPECTED TOTAL
-4. Your JSON array MUST contain exactly that many entries
-5. If your array has fewer entries than your count, STOP and re-examine what you missed
+BEFORE YOU START: Scan the entire legend and count the total number of symbol rows across ALL sections.
+Then extract every single one. Your JSON array should have that exact number of entries.
 
 Respond with ONLY a JSON array:
 [{{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "hexagon with S inside", "shape_code": "hexagon", "filled": false}}, ...]"""
@@ -758,10 +758,11 @@ async def parse_legend_with_vision(
     all_raw_symbols: list[dict] = []
 
     if is_multi_page:
-        # Split PDF into per-page PNGs and extract from each independently
-        page_images = _split_pdf_to_pages(image_data, dpi=200)
+        # Split PDF into individual single-page PDFs and extract from each
+        # independently. Uses native PDF format (not PNG) to preserve text quality.
+        page_pdfs = _split_pdf_to_pages(image_data)
 
-        if not page_images:
+        if not page_pdfs:
             # Fallback: pymupdf failed, try single-shot with full PDF
             logger.warning(
                 "PDF page splitting failed — falling back to single-shot extraction"
@@ -770,10 +771,10 @@ async def parse_legend_with_vision(
                 api_client, image_data, media_type, page_context="",
             )
         else:
-            for png_data, page_num in page_images:
+            for page_data, page_num in page_pdfs:
                 page_context = f"page {page_num} of {page_count}"
                 page_symbols = await _extract_symbols_from_page(
-                    api_client, png_data, "image/png", page_context,
+                    api_client, page_data, "application/pdf", page_context,
                 )
                 logger.info(
                     f"  Page {page_num}: extracted {len(page_symbols)} symbols"
