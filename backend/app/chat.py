@@ -349,6 +349,7 @@ _LEGEND_FIELD_RULES = """For each symbol row, provide:
    - For subscript variants, append the subscript: e.g., "S" with subscript "WP" → "SWP", or "S" with subscript "80" → "S80"
    - If the symbol is purely graphical (no text inside), describe what you see: e.g., "smoke_heat_combo" for a combined detector icon.
    - Do NOT make up codes. Only use what you can actually read in the image.
+   - IMPORTANT: Each code must be UNIQUE. If you already extracted a symbol with code "H", do NOT extract another symbol with the same code "H" — re-read the image carefully to distinguish them.
 2. "name": The full device name exactly as written next to the symbol (e.g., "Main Fire Alarm Control Panel", "Proximity Card Reader", "Addressable Input Module Weatherproof")
 3. "category": The system category it belongs to. Use EXACTLY one of these:
    - "Fire Alarm" — detectors, panels, modules, manual stations, sirens, strobes, telephone, cables
@@ -491,12 +492,15 @@ async def _extract_symbols_from_page(
 
     prompt = f"""{header}
 
-CRITICAL RULES FOR COMPLETENESS:
+CRITICAL RULES:
+- Extract ONLY symbols that are LITERALLY VISIBLE as distinct rows in this legend image.
+- Do NOT invent, assume, or infer symbols that are not explicitly drawn and labeled.
+- Do NOT assume weatherproof variants exist unless you can clearly see them as separate rows.
+- Do NOT generate devices from general fire alarm knowledge — only from what is on the page.
 - Each ROW in the legend is a SEPARATE symbol, even if two rows look similar.
-- "Weatherproof" variants are SEPARATE symbols from their non-weatherproof counterparts.
-- Subscript/suffix variants (like a symbol with "WP", "_T", "_F", "_P") are SEPARATE symbols.
 - If a symbol code has a small subscript letter (like S with subscript "80"), include it (e.g., code="S80").
 - If two symbols have the same shape but different descriptions, they are TWO separate entries.
+- If you are UNSURE whether a row exists, DO NOT include it.
 - Count EVERY row in EVERY section. Do NOT summarize or group similar entries.
 - Process ALL system sections visible: Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, and any others.
 
@@ -580,20 +584,33 @@ Respond with ONLY a JSON array:
 
 
 def _deduplicate_symbols(symbols: list[dict]) -> list[dict]:
-    """Remove duplicate symbols by (code, name) pair, case-insensitive.
+    """Remove duplicate symbols by (code, name) pair AND detect code collisions.
 
+    - Exact (code, name) duplicates: second occurrence is dropped.
+    - Code collisions (same code, different name): second occurrence is dropped
+      and logged as a warning, since legend codes should be unique.
     Preserves insertion order — the first occurrence wins.
     """
     seen: set[tuple[str, str]] = set()
+    seen_codes: dict[str, str] = {}  # code -> first name seen
     unique: list[dict] = []
     for sym in symbols:
-        key = (
-            sym.get("code", "").upper().strip(),
-            sym.get("name", "").upper().strip(),
-        )
-        if key not in seen:
-            seen.add(key)
-            unique.append(sym)
+        code = sym.get("code", "").upper().strip()
+        name = sym.get("name", "").upper().strip()
+        key = (code, name)
+        if key in seen:
+            continue
+        # Check for code collision (same code, different name)
+        if code and code in seen_codes and seen_codes[code] != name:
+            logger.warning(
+                f"Dedup: code collision — code '{code}' used by both "
+                f"'{seen_codes[code]}' and '{name}'. Keeping first."
+            )
+            continue
+        seen.add(key)
+        if code:
+            seen_codes[code] = name
+        unique.append(sym)
     return unique
 
 
@@ -663,8 +680,8 @@ Your ONLY task is to count the number of distinct SYMBOL ROWS in each system sec
 
 Rules for counting:
 - Each row with a symbol graphic + text description = 1 symbol row
-- Weatherproof variants are SEPARATE rows (count them!)
-- Subscript/suffix variants are SEPARATE rows (count them!)
+- Only count rows that are ACTUALLY VISIBLE — do not estimate or assume
+- If a section has rows you cannot clearly read, count only the ones you can see
 - Cable/line symbols ARE rows (count them!)
 - Section headers, column headers, notes, and title blocks are NOT symbol rows
 
@@ -754,6 +771,7 @@ async def _reconciliation_pass(
     # ── Build the prompt ──
     if target_counts:
         # Gap-aware reconciliation: compare extracted vs expected per section
+        # Apply 15% tolerance — pre-scan counts are estimates, not ground truth
         comparison_lines = []
         gap_sections: list[tuple[str, int, int, int]] = []  # (cat, expected, actual, missing)
 
@@ -763,19 +781,21 @@ async def _reconciliation_pass(
         for section in all_sections:
             expected = target_counts.get(section, 0)
             actual = len(by_category.get(section, []))
-            if expected > actual:
+            # Allow 15% tolerance — if we're within 85% of expected, consider it OK
+            tolerance_threshold = max(1, int(expected * 0.85))
+            if actual < tolerance_threshold:
                 gap = expected - actual
                 gap_sections.append((section, expected, actual, gap))
-                comparison_lines.append(f"  [{section}] extracted: {actual}, expected: {expected} — ⚠ MISSING {gap}")
+                comparison_lines.append(f"  [{section}] extracted: {actual}, expected: ~{expected} — ⚠ MISSING ~{gap}")
             elif expected > 0:
-                comparison_lines.append(f"  [{section}] extracted: {actual}, expected: {expected} — ✓ OK")
+                comparison_lines.append(f"  [{section}] extracted: {actual}, expected: ~{expected} — ✓ OK")
             elif actual > 0 and expected == 0:
                 comparison_lines.append(f"  [{section}] extracted: {actual} (not in pre-scan)")
 
         total_missing = sum(g[3] for g in gap_sections)
 
         if total_missing == 0:
-            logger.info("Gap analysis: no gaps detected — all sections match pre-scan counts")
+            logger.info("Gap analysis: no significant gaps detected (within 15% tolerance)")
             return extracted
 
         # Build detailed gap info with already-extracted symbols for context
@@ -801,8 +821,12 @@ Details for sections with GAPS:
 
 TASK: For each section marked as MISSING above, carefully examine the legend and find the specific symbol rows I missed.
 - Look row by row in each section, comparing against my "Already extracted" list
-- Pay special attention to weatherproof variants, subscript variants, and cable/line symbols
-- Only add symbols you can ACTUALLY SEE as distinct rows in the legend
+- Only add symbols you can ACTUALLY SEE as distinct rows with a visible symbol graphic and text label
+- Do NOT invent devices from general fire alarm knowledge
+- Do NOT assume weatherproof or other variants exist — only add them if you can clearly see them as separate rows
+- Do NOT add symbols just to reach the expected count — the expected counts are ESTIMATES and may be wrong
+- Each code MUST be unique — do not add a symbol with a code that already exists in my extracted list
+- It is BETTER to return fewer symbols than to hallucinate entries that don't exist
 
 Return ONLY a JSON array of the missing symbols:
 [{{"code": "...", "name": "...", "category": "...", "shape": "...", "shape_code": "...", "filled": false}}, ...]
@@ -842,9 +866,12 @@ Pay special attention to:
 - Cable/line symbols that look different from the boxed/shaped device symbols
 - Sections I may have missed entirely
 
-IMPORTANT: Only add symbols you can ACTUALLY SEE as distinct rows in the legend.
-- Do NOT add devices from general knowledge
+IMPORTANT: Only add symbols you can ACTUALLY SEE as distinct rows with a visible symbol graphic and text label.
+- Do NOT add devices from general fire alarm knowledge
+- Do NOT assume weatherproof or other variants exist unless you can clearly see them
 - Do NOT decompose one entry's description into sub-devices
+- Each code MUST be unique — do not add a symbol with a code already in my list
+- It is BETTER to return fewer symbols than to hallucinate entries that don't exist
 
 If you find missed symbols, return them as a JSON array:
 [{{"code": "...", "name": "...", "category": "...", "shape": "...", "shape_code": "...", "filled": false}}, ...]
@@ -895,25 +922,47 @@ Respond with ONLY the JSON array."""
         logger.info("Reconciliation confirmed: no missed symbols")
         return extracted
 
-    # Deduplicate against existing
+    # Deduplicate against existing — also check for code collisions
     existing_keys = {
         (s.get("code", "").upper().strip(), s.get("name", "").upper().strip())
         for s in extracted
     }
+    existing_codes = {
+        s.get("code", "").upper().strip() for s in extracted
+    }
+    # Cap reconciliation additions at 20% of current count to prevent runaway hallucination
+    max_additions = max(5, len(extracted) // 5)
     added = 0
+    skipped_code_collision = 0
     for entry in missed:
-        key = (
-            entry.get("code", "").upper().strip(),
-            entry.get("name", "").upper().strip(),
-        )
-        if key not in existing_keys:
-            extracted.append(entry)
-            existing_keys.add(key)
-            added += 1
+        if added >= max_additions:
+            logger.warning(
+                f"Reconciliation hit addition cap ({max_additions}), "
+                f"skipping remaining {len(missed) - added} candidates"
+            )
+            break
+        code_upper = entry.get("code", "").upper().strip()
+        name_upper = entry.get("name", "").upper().strip()
+        key = (code_upper, name_upper)
+        if key in existing_keys:
+            continue
+        # Reject if code already exists (collision)
+        if code_upper and code_upper in existing_codes:
+            skipped_code_collision += 1
+            logger.info(
+                f"Reconciliation: skipping code collision '{code_upper}' "
+                f"('{entry.get('name', '')}' vs existing)"
+            )
+            continue
+        extracted.append(entry)
+        existing_keys.add(key)
+        existing_codes.add(code_upper)
+        added += 1
 
     logger.info(
         f"Reconciliation found {len(missed)} candidates, "
-        f"added {added} new (after dedup). Total: {len(extracted)}"
+        f"added {added} new (after dedup, {skipped_code_collision} code collisions skipped). "
+        f"Total: {len(extracted)}"
     )
     return extracted
 
@@ -1038,7 +1087,23 @@ async def parse_legend_with_vision(
             f"{type(recon_err).__name__}: {recon_err}"
         )
 
-    # ── Step 5: Convert to LegendSymbol + shape correction ──
+    # ── Step 5: Post-extraction validation ──
+    # Final dedup pass after reconciliation (catches code collisions from recon)
+    unique_symbols = _deduplicate_symbols(unique_symbols)
+
+    # Remove entries with empty/missing codes or names
+    pre_validation = len(unique_symbols)
+    unique_symbols = [
+        s for s in unique_symbols
+        if s.get("code", "").strip() and s.get("name", "").strip()
+    ]
+    if len(unique_symbols) < pre_validation:
+        logger.info(
+            f"Validation: removed {pre_validation - len(unique_symbols)} entries "
+            f"with empty code or name"
+        )
+
+    # ── Step 6: Convert to LegendSymbol + shape correction ──
     symbols: list[LegendSymbol] = []
     for i, entry in enumerate(unique_symbols):
         try:
@@ -1055,7 +1120,7 @@ async def parse_legend_with_vision(
         except Exception as sym_err:
             logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")
 
-    # ── Step 6: Generate SVG icons ──
+    # ── Step 7: Generate SVG icons ──
     systems = sorted(set(s.category for s in symbols))
     logger.info(
         f"Legend extraction complete: {len(symbols)} symbols "
@@ -1067,7 +1132,7 @@ async def parse_legend_with_vision(
     except Exception as svg_err:
         logger.warning(f"SVG icon generation failed (non-fatal): {svg_err}")
 
-    # ── Step 7: Return ──
+    # ── Step 8: Return ──
     legend_id = str(uuid.uuid4())
     return LegendData(
         legend_id=legend_id,
