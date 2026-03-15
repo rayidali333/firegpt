@@ -26,7 +26,10 @@ export default function UploadZone({
   const legendInputRef = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState("");
+  const [legendProgress, setLegendProgress] = useState(0);
+  const [legendStage, setLegendStage] = useState("");
 
+  // Drawing upload progress
   useEffect(() => {
     if (!uploading) {
       setProgress(0);
@@ -74,6 +77,42 @@ export default function UploadZone({
 
     return () => clearInterval(interval);
   }, [uploading, legend]);
+
+  // Legend upload progress
+  useEffect(() => {
+    if (!legendUploading) {
+      setLegendProgress(0);
+      setLegendStage("");
+      return;
+    }
+    setLegendProgress(0);
+    setLegendStage("Uploading legend file...");
+
+    const stages = [
+      { at: 8, label: "Uploading legend file..." },
+      { at: 18, label: "Sending to AI vision model..." },
+      { at: 30, label: "Scanning legend sections..." },
+      { at: 42, label: "Extracting symbol definitions..." },
+      { at: 55, label: "Reading device codes and names..." },
+      { at: 65, label: "Classifying symbol shapes..." },
+      { at: 75, label: "Verifying completeness..." },
+      { at: 85, label: "Generating symbol icons..." },
+      { at: 93, label: "Finalizing legend data..." },
+    ];
+
+    let p = 0;
+    const interval = setInterval(() => {
+      const remaining = 95 - p;
+      const increment = Math.max(0.25, remaining * 0.03);
+      p = Math.min(95, p + increment);
+      setLegendProgress(p);
+
+      const s = [...stages].reverse().find((s) => p >= s.at);
+      if (s) setLegendStage(s.label);
+    }, 200);
+
+    return () => clearInterval(interval);
+  }, [legendUploading]);
 
   const handleDrawingFile = useCallback(
     (file: File) => {
@@ -159,6 +198,21 @@ export default function UploadZone({
             <p className="preview-progress-stage">{stage}</p>
             <p className="preview-progress-hint">Large drawings may take up to a minute</p>
           </div>
+        ) : legendUploading ? (
+          <div className="upload-spinner">
+            <div className="spinner" />
+            <p style={{ fontWeight: 500, marginBottom: 4 }}>
+              Parsing legend with AI...
+            </p>
+            <div className="preview-progress-bar" style={{ width: 240 }}>
+              <div
+                className="preview-progress-fill"
+                style={{ width: `${legendProgress}%` }}
+              />
+            </div>
+            <p className="preview-progress-stage">{legendStage}</p>
+            <p className="preview-progress-hint">Legend parsing may take up to 30 seconds</p>
+          </div>
         ) : (
           <>
             <Upload className="upload-icon" />
@@ -171,12 +225,7 @@ export default function UploadZone({
 
             {/* Legend upload section */}
             <div className="legend-section">
-              {legendUploading ? (
-                <div className="legend-uploading">
-                  <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
-                  <span>Parsing legend with AI...</span>
-                </div>
-              ) : legend ? (
+              {legend ? (
                 <div className="legend-attached">
                   <CheckCircle size={14} />
                   <span>

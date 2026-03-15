@@ -9,26 +9,31 @@ Python FastAPI backend that handles DXF/DWG file uploads, symbol parsing (dictio
 ### app/main.py
 - FastAPI application entry point (version 2.0.0)
 - CORS middleware (all origins allowed for dev)
-- Routes: /api/upload, /api/chat, /api/drawings, /api/drawings/{id}/preview, /api/drawings/{id}/export, /api/health
+- Routes: /api/upload, /api/upload-legend, /api/chat, /api/drawings, /api/drawings/{id}/preview, /api/drawings/{id}/export, /api/health
+- Legend upload endpoint: parses PDF/image legend sheets via Claude Vision
+- Direct legend code matching: 5 strategies (sub-group attribs, all attribs, attdef defaults, block internal text, block name segments)
+- AI classification pipeline: sends ambiguous blocks to Claude with full drawing context + legend constraints
 - Symbol consolidation: merges block variants of same device type into single rows with combined counts
-- AI classification pipeline: sends ambiguous blocks to Claude with full drawing context
+- Legend coverage analysis: reports which legend symbols were/weren't found in the drawing
 - Manual override endpoint: PATCH symbol count/label with audit trail
 - CSV export endpoint for device schedule comparison
-- In-memory stores: `drawings_store` (ParseResponse), `file_paths_store` (DXF paths), `preview_cache` (SVG data)
+- In-memory stores: `drawings_store`, `file_paths_store`, `preview_cache`, `legend_store`, `drawing_legend_map`
 - Static file serving from `./static` directory
 - SPA catch-all route for React routing
-- File validation: .dxf/.dwg only, max 50MB
+- File validation: .dxf/.dwg only (max 50MB), legend: .pdf/.png/.jpg/.jpeg/.gif/.webp (max 20MB)
 
 ### app/models.py
-- **SymbolInfo**: block_name, label, count, locations (all coords), color, confidence, source, block_variants, original_count
-- **AuditEntry**: block_name, label, count, method (exact/substring/intl/ai), confidence, matched_term, layers
-- **AnalysisStep**: type (info/success/warning/error), message
+- **SymbolInfo**: block_name, label, count, locations, color, confidence, source, block_variants, original_count, shape_code, category, legend_code, legend_shape, svg_icon
+- **AuditEntry**: block_name, label, count, method (exact/substring/intl/ai/legend_direct/legend_ai), confidence, matched_term, layers
+- **AnalysisStep**: type (info/success/warning/error/detail/section), message
 - **ParseResponse**: drawing_id (UUID), filename, file_type, symbols list, total_symbols, analysis, audit, xref_warnings, legend_texts
 - **ChatHistoryMessage**: role + content for multi-turn conversations
 - **ChatRequest**: drawing_id + message + history
 - **ChatResponse**: response string from Claude
 - **PreviewResponse**: svg, viewBox, width, height, symbol_positions (block_name → [[x,y],...]), position_debug
 - **SymbolOverride**: label + count for manual edits
+- **LegendSymbol**: code, name, category, shape, shape_code, filled, svg_icon
+- **LegendData**: legend_id, filename, symbols list, total_symbols, systems list
 
 ### app/parser.py
 - Core DXF/DWG parsing engine using ezdxf library
@@ -60,10 +65,14 @@ Python FastAPI backend that handles DXF/DWG file uploads, symbol parsing (dictio
 
 ### app/chat.py
 - Claude AI integration using AsyncAnthropic client
-- `chat_with_drawing(message, drawing, history)`: Multi-turn chat with full drawing context
-- `classify_blocks_with_ai(...)`: AI-first block classification — sends ambiguous blocks with full context
-- System prompt includes: full symbol JSON, filename, file type, cost estimation guidelines (2024-2025 US market rates)
-- Model: claude-sonnet-4-20250514, max_tokens: 4096 (chat), 2048 (classification)
+- `parse_legend_with_vision(image_data, media_type, filename)`: Two-pass legend extraction via Claude Vision + verification pass + SVG icon generation
+- `_correct_legend_shape(sym)`: Domain knowledge overrides for AI shape classifications (detectors→hexagon, panels→square, etc.)
+- `_generate_symbol_svgs(symbols)`: Batched AI calls to generate SVG icons for each legend symbol
+- `_sanitize_svg(svg)`: XSS prevention for AI-generated SVG content
+- `classify_blocks_with_ai(...)`: AI block classification — legend-aware or standard mode
+- `chat_with_drawing(message, drawing, history, legend)`: Multi-turn chat with full drawing + legend context
+- `_build_system_prompt(drawing, legend)`: Injects symbol JSON + legend data + cost estimation guidelines
+- Model: claude-sonnet-4-20250514, max_tokens: 4096 (chat), 16384 (classification + legend parsing)
 
 ### Known Symbol Mappings (57 total)
 Key patterns: SD (Smoke Detector), HD (Heat Detector), PS (Pull Station), HS/H/S (Horn/Strobe), DUCT/DD (Duct Detector), FACP (Fire Alarm Control Panel), NAC (Notification Appliance Circuit), SPK (Speaker), and 50+ more variations.
@@ -78,15 +87,26 @@ Key patterns: SD (Smoke Detector), HD (Heat Detector), PS (Pull Station), HS/H/S
 - **drawings_store**: In-memory dict, NOT persistent across restarts
 - **file_paths_store**: Maps drawing_id → DXF file path (for preview generation)
 - **preview_cache**: Cached SVG previews (in-memory)
+- **legend_store**: Parsed legend data keyed by legend_id (in-memory)
+- **drawing_legend_map**: drawing_id → legend_id association (in-memory)
 - **uploads/**: File system directory for uploaded drawings
 - No database configured
 
 ## Current State
 - All API endpoints functional
+- Legend parsing via Claude Vision with two-pass extraction + SVG icon generation
 - Parser handles DXF files reliably, DWG via ODA converter + recovery mode
-- AI classification working for ambiguous blocks
-- SVG preview generation with symbol overlay markers
+- Direct legend code matching (5 strategies) + AI classification fallback
+- Nearby text label scanning associates TEXT entities with INSERT positions
+- Sub-grouping: splits blocks by differentiating ATTRIB values (e.g., TYPE=AIM vs TYPE=AOM)
+- SVG preview generation with shape-coded symbol overlay markers
 - OCS→WCS recovery fixing mirrored coordinates from Revit exports
-- Chat integration working with Claude Sonnet 4 + multi-turn history
+- Chat integration with Claude Sonnet 4 + multi-turn history + legend context
 - Cost estimation with detailed material + labor breakdowns
 - Static file serving configured for React build
+
+## Known Issues
+- Legend parsing extracts ~80-90/105 symbols on dense legends (single-shot token limit + attention loss)
+- No page-level PDF processing for multi-page legends
+- Single-character legend codes ("S", "H") skipped by direct matching Strategy 5 (requires len >= 2)
+- AI classification sometimes returns labels not in the legend's valid set
