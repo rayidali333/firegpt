@@ -336,40 +336,14 @@ Example: {{"1": "<svg viewBox=\\"0 0 24 24\\" xmlns=\\"http://www.w3.org/2000/sv
     return symbols
 
 
-async def parse_legend_with_vision(
-    image_data: bytes,
-    media_type: str,
-    filename: str,
-) -> LegendData:
-    """Use Claude Vision to parse a legend sheet image/PDF into structured symbol data.
+# ────────────────────────────────────────────────────────
+# Legend parsing — page-by-page PDF extraction pipeline
+# ────────────────────────────────────────────────────────
 
-    Sends the legend image to Claude and extracts all symbol definitions with their
-    codes, names, categories, and visual shapes.
-    """
-    import base64
-    import uuid
-
-    logger.info("=== parse_legend_with_vision START ===")
-    logger.info(f"Filename: {filename}, media_type: {media_type}, data_size: {len(image_data)} bytes")
-
-    api_client = _get_client()
-    logger.info("Anthropic client initialized successfully")
-
-    image_b64 = base64.standard_b64encode(image_data).decode("utf-8")
-    logger.info(f"Base64 encoded size: {len(image_b64)} chars")
-
-    prompt = """You are analyzing a construction drawing legend/key sheet. Your task is to extract EVERY SINGLE symbol definition shown — do NOT skip any rows.
-
-CRITICAL RULES FOR COMPLETENESS:
-- Each ROW in the legend is a SEPARATE symbol, even if two rows look similar.
-- "Weatherproof" variants are SEPARATE symbols from their non-weatherproof counterparts.
-- Subscript/suffix variants (like a symbol with "WP", "_T", "_F", "_P") are SEPARATE symbols.
-- If a symbol code has a small subscript letter (like S with subscript "80"), include it (e.g., code="S80").
-- If two symbols have the same shape but different descriptions, they are TWO separate entries.
-- Count EVERY row in EVERY section. Do NOT summarize or group similar entries.
-- Process ALL system sections: Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, and any others.
-
-For each symbol row, provide:
+# Shared extraction rules for the legend parsing prompt.
+# Kept as a constant so both per-page and single-page prompts are identical
+# in their field definitions and shape guidance.
+_LEGEND_FIELD_RULES = """For each symbol row, provide:
 1. "code": The EXACT text shown INSIDE the symbol shape. Read it carefully character by character.
    - If the symbol contains text like "MFACP", "SCM", "LHCP", "S", "H", "TJ", "CR", "DS" — use EXACTLY that text.
    - For subscript variants, append the subscript: e.g., "S" with subscript "WP" → "SWP", or "S" with subscript "80" → "S80"
@@ -406,85 +380,448 @@ IMPORTANT SHAPE GUIDANCE:
 - Fire alarm DETECTORS (smoke, heat, multi-sensor) almost always use HEXAGONS (6 sides). Count carefully!
 - Panels and modules in rectangles/boxes → "square"
 - Manual call stations / pull stations → "square"
-- If you're unsure between pentagon and hexagon, it's almost certainly a HEXAGON in fire alarm drawings.
+- If you're unsure between pentagon and hexagon, it's almost certainly a HEXAGON in fire alarm drawings."""
 
-BEFORE YOU START: Scan the entire legend and count the total number of symbol rows across ALL sections.
-Then extract every single one. Your JSON array should have that exact number of entries.
+
+def _get_pdf_page_count(pdf_bytes: bytes) -> int:
+    """Return the number of pages in a PDF. Returns 1 if pymupdf is unavailable."""
+    try:
+        import fitz
+    except ImportError:
+        logger.warning("PyMuPDF not installed — cannot count PDF pages. pip install PyMuPDF")
+        return 1
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        count = len(doc)
+        doc.close()
+        return count
+    except Exception as e:
+        logger.warning(f"Failed to read PDF page count: {e}")
+        return 1
+
+
+def _split_pdf_to_pages(pdf_bytes: bytes, dpi: int = 200) -> list[tuple[bytes, int]]:
+    """Render each PDF page to a PNG image at the given DPI.
+
+    Returns a list of (png_bytes, 1-indexed page_number) tuples.
+    Falls back to empty list if pymupdf is unavailable or the PDF is unreadable.
+    """
+    try:
+        import fitz
+    except ImportError:
+        logger.warning("PyMuPDF not installed — cannot split PDF pages")
+        return []
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        logger.error(f"Failed to open PDF for page splitting: {e}")
+        return []
+
+    pages: list[tuple[bytes, int]] = []
+    try:
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
+            # Render at the requested DPI (default 200 — good text clarity, reasonable size)
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
+            pix = page.get_pixmap(matrix=mat)
+            png_bytes = pix.tobytes("png")
+            pages.append((png_bytes, page_idx + 1))
+            logger.info(
+                f"  PDF page {page_idx + 1}/{len(doc)}: "
+                f"{pix.width}x{pix.height}px, {len(png_bytes) / 1024:.0f}KB PNG"
+            )
+    finally:
+        doc.close()
+
+    return pages
+
+
+def _build_content_block(image_data: bytes, media_type: str) -> dict:
+    """Build the Anthropic API content block for an image or PDF document."""
+    import base64
+    data_b64 = base64.standard_b64encode(image_data).decode("utf-8")
+
+    if media_type == "application/pdf":
+        return {
+            "type": "document",
+            "source": {"type": "base64", "media_type": media_type, "data": data_b64},
+        }
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": media_type, "data": data_b64},
+    }
+
+
+async def _extract_symbols_from_page(
+    api_client: AsyncAnthropic,
+    image_data: bytes,
+    media_type: str,
+    page_context: str,
+    max_tokens: int = 32768,
+) -> list[dict]:
+    """Extract symbol definitions from a single legend page or image.
+
+    Args:
+        api_client: Initialized Anthropic async client.
+        image_data: Raw bytes of the image or single-page PDF.
+        media_type: MIME type ("image/png", "application/pdf", etc.).
+        page_context: Human-readable context, e.g. "page 2 of 3" or "".
+        max_tokens: Maximum output tokens for the API call.
+
+    Returns:
+        List of raw symbol dicts (not yet converted to LegendSymbol).
+    """
+    # Build page-aware prompt header
+    if page_context:
+        header = (
+            f"You are analyzing {page_context} of a construction drawing legend/key sheet.\n\n"
+            "CRITICAL: Extract ONLY the symbols visible on THIS page. "
+            "Do not guess or infer symbols that might be on other pages."
+        )
+    else:
+        header = (
+            "You are analyzing a construction drawing legend/key sheet. "
+            "Your task is to extract EVERY SINGLE symbol definition shown — do NOT skip any rows."
+        )
+
+    prompt = f"""{header}
+
+CRITICAL RULES FOR COMPLETENESS:
+- Each ROW in the legend is a SEPARATE symbol, even if two rows look similar.
+- "Weatherproof" variants are SEPARATE symbols from their non-weatherproof counterparts.
+- Subscript/suffix variants (like a symbol with "WP", "_T", "_F", "_P") are SEPARATE symbols.
+- If a symbol code has a small subscript letter (like S with subscript "80"), include it (e.g., code="S80").
+- If two symbols have the same shape but different descriptions, they are TWO separate entries.
+- Count EVERY row in EVERY section. Do NOT summarize or group similar entries.
+- Process ALL system sections visible: Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, and any others.
+
+{_LEGEND_FIELD_RULES}
+
+MANDATORY COUNTING STEP — do this BEFORE generating JSON:
+1. Identify every section header visible (e.g., "FIRE ALARM SYSTEM", "ACCESS CONTROL", etc.)
+2. Under each section, count the number of distinct symbol rows — go row by row, top to bottom
+3. Sum the counts across all sections — this is your EXPECTED TOTAL
+4. Your JSON array MUST contain exactly that many entries
+5. If your array has fewer entries than your count, STOP and re-examine what you missed
 
 Respond with ONLY a JSON array:
-[{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "hexagon with S inside", "shape_code": "hexagon", "filled": false}, ...]"""
+[{{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "hexagon with S inside", "shape_code": "hexagon", "filled": false}}, ...]"""
 
-    # PDFs use "document" content type; images use "image" content type
-    if media_type == "application/pdf":
-        file_content_block = {
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": media_type,
-                "data": image_b64,
-            },
-        }
-    else:
-        file_content_block = {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": media_type,
-                "data": image_b64,
-            },
-        }
+    content_block = _build_content_block(image_data, media_type)
 
-    logger.info(f"Sending {media_type} to Claude API (model: claude-sonnet-4-20250514, max_tokens: 16384)...")
+    log_label = f"[{page_context}] " if page_context else ""
+    logger.info(
+        f"  {log_label}Sending {media_type} to Claude "
+        f"(max_tokens={max_tokens})..."
+    )
+
     try:
         response = await api_client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=16384,
+            max_tokens=max_tokens,
             messages=[{
                 "role": "user",
-                "content": [
-                    file_content_block,
-                    {
-                        "type": "text",
-                        "text": prompt,
-                    },
-                ],
+                "content": [content_block, {"type": "text", "text": prompt}],
             }],
         )
     except Exception as api_err:
-        logger.error(f"Claude API call failed: {type(api_err).__name__}: {api_err}")
+        logger.error(f"  {log_label}Claude API call failed: {type(api_err).__name__}: {api_err}")
         raise
 
     logger.info(
-        f"Claude API response received: stop_reason={response.stop_reason}, "
+        f"  {log_label}Response: stop_reason={response.stop_reason}, "
         f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
     )
 
-    if response.stop_reason == "max_tokens":
-        logger.warning(
-            "Legend parsing response was TRUNCATED (hit max_tokens). "
-            "Some symbols may be missing."
-        )
+    was_truncated = response.stop_reason == "max_tokens"
+    if was_truncated:
+        logger.warning(f"  {log_label}Response TRUNCATED (hit max_tokens={max_tokens})")
 
     if not response.content:
-        logger.error("Claude returned empty content array")
-        raise ValueError("Claude returned no content in response")
+        logger.error(f"  {log_label}Claude returned empty content")
+        return []
 
     response_text = response.content[0].text.strip()
-    logger.info(f"Response text length: {len(response_text)} chars")
-    logger.debug(f"Response text (first 500 chars): {response_text[:500]}")
+    logger.info(f"  {log_label}Response length: {len(response_text)} chars")
 
-    # Extract JSON array from response, handling various LLM output formats
     try:
         raw_symbols = _extract_json_array(response_text)
-    except (ValueError, json.JSONDecodeError) as parse_err:
-        logger.error(f"JSON extraction failed: {parse_err}")
-        logger.error(f"Full response text:\n{response_text}")
-        raise
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.error(f"  {log_label}JSON extraction failed: {e}")
+        logger.error(f"  {log_label}Response (first 500): {response_text[:500]}")
+        return []
 
-    logger.info(f"Extracted {len(raw_symbols)} raw symbol entries from AI response")
+    logger.info(f"  {log_label}Extracted {len(raw_symbols)} symbols")
 
-    symbols = []
-    for i, entry in enumerate(raw_symbols):
+    # ── Truncation recovery: if truncated, retry once with 2x budget ──
+    if was_truncated and max_tokens < 65536:
+        retry_budget = min(max_tokens * 2, 65536)
+        logger.info(
+            f"  {log_label}Retrying truncated extraction with "
+            f"max_tokens={retry_budget}..."
+        )
+        retry_symbols = await _extract_symbols_from_page(
+            api_client, image_data, media_type, page_context,
+            max_tokens=retry_budget,
+        )
+        # Use whichever attempt returned more symbols
+        if len(retry_symbols) > len(raw_symbols):
+            logger.info(
+                f"  {log_label}Retry improved: {len(raw_symbols)} → {len(retry_symbols)} symbols"
+            )
+            return retry_symbols
+        logger.info(
+            f"  {log_label}Retry did not improve ({len(retry_symbols)} vs {len(raw_symbols)}), "
+            f"keeping original"
+        )
+
+    return raw_symbols
+
+
+def _deduplicate_symbols(symbols: list[dict]) -> list[dict]:
+    """Remove duplicate symbols by (code, name) pair, case-insensitive.
+
+    Preserves insertion order — the first occurrence wins.
+    """
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict] = []
+    for sym in symbols:
+        key = (
+            sym.get("code", "").upper().strip(),
+            sym.get("name", "").upper().strip(),
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(sym)
+    return unique
+
+
+async def _reconciliation_pass(
+    api_client: AsyncAnthropic,
+    extracted: list[dict],
+    original_data: bytes,
+    original_media_type: str,
+) -> list[dict]:
+    """Verify extraction completeness and find any missed symbols.
+
+    Sends the original legend image/PDF back to Claude along with a structured
+    summary of what was already extracted, grouped by category. Asks Claude to
+    verify per-section counts and identify specific missed rows.
+
+    Returns the updated symbol list (extracted + any newly found symbols).
+    """
+    # Group extracted symbols by category for a structured checklist
+    by_category: dict[str, list[dict]] = {}
+    for sym in extracted:
+        cat = sym.get("category", "Other")
+        by_category.setdefault(cat, []).append(sym)
+
+    category_lines = []
+    for cat in sorted(by_category.keys()):
+        syms = by_category[cat]
+        category_lines.append(f"\n[{cat}] — {len(syms)} symbols extracted:")
+        for i, s in enumerate(syms):
+            category_lines.append(
+                f'  {i+1}. code="{s.get("code", "")}" — "{s.get("name", "")}"'
+            )
+    summary = "\n".join(category_lines)
+
+    prompt = f"""I extracted {len(extracted)} symbols from this legend, grouped by system section:
+{summary}
+
+TASK — Section-by-section verification:
+For EACH section header visible in the legend image:
+1. Count the actual number of symbol rows in that section
+2. Compare to the count I extracted above
+3. If my count is LOWER, identify the specific rows I missed
+
+Pay special attention to:
+- Weatherproof variants (same device + "WEATHERPROOF" suffix)
+- Subscript/suffix variants (small text like WP, T, F, P after the main code)
+- Devices at the very bottom of columns or at page edges
+- Cable/line symbols that look different from the boxed/shaped device symbols
+- Sections I may have missed entirely
+
+IMPORTANT: Only add symbols you can ACTUALLY SEE as distinct rows in the legend.
+- Do NOT add devices from general knowledge
+- Do NOT decompose one entry's description into sub-devices
+
+If you find missed symbols, return them as a JSON array:
+[{{"code": "...", "name": "...", "category": "...", "shape": "...", "shape_code": "...", "filled": false}}, ...]
+
+If nothing was missed, return an empty array: []
+
+Respond with ONLY the JSON array."""
+
+    content_block = _build_content_block(original_data, original_media_type)
+
+    logger.info(
+        f"Reconciliation pass: verifying {len(extracted)} symbols "
+        f"across {len(by_category)} categories..."
+    )
+
+    try:
+        response = await api_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=32768,
+            messages=[{
+                "role": "user",
+                "content": [content_block, {"type": "text", "text": prompt}],
+            }],
+        )
+    except Exception as e:
+        logger.warning(f"Reconciliation pass API call failed (non-fatal): {e}")
+        return extracted
+
+    logger.info(
+        f"Reconciliation response: stop_reason={response.stop_reason}, "
+        f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
+    )
+
+    if not response.content:
+        logger.warning("Reconciliation pass returned empty content")
+        return extracted
+
+    response_text = response.content[0].text.strip()
+
+    try:
+        missed = _extract_json_array(response_text)
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.warning(f"Reconciliation JSON parsing failed (non-fatal): {e}")
+        return extracted
+
+    if not missed:
+        logger.info("Reconciliation confirmed: no missed symbols")
+        return extracted
+
+    # Deduplicate against existing
+    existing_keys = {
+        (s.get("code", "").upper().strip(), s.get("name", "").upper().strip())
+        for s in extracted
+    }
+    added = 0
+    for entry in missed:
+        key = (
+            entry.get("code", "").upper().strip(),
+            entry.get("name", "").upper().strip(),
+        )
+        if key not in existing_keys:
+            extracted.append(entry)
+            existing_keys.add(key)
+            added += 1
+
+    logger.info(
+        f"Reconciliation found {len(missed)} candidates, "
+        f"added {added} new (after dedup). Total: {len(extracted)}"
+    )
+    return extracted
+
+
+async def parse_legend_with_vision(
+    image_data: bytes,
+    media_type: str,
+    filename: str,
+) -> LegendData:
+    """Parse a legend sheet image/PDF into structured symbol data using Claude Vision.
+
+    Pipeline:
+      1. For multi-page PDFs: split into pages, extract symbols from each page
+         separately so Claude can focus on 15-30 symbols at a time instead of 100+.
+      2. For single-page PDFs or images: extract in a single call.
+      3. Merge and deduplicate across pages.
+      4. Reconciliation pass: send the original file back with the merged list,
+         ask Claude to verify per-section counts and find any gaps.
+      5. Convert raw dicts to LegendSymbol with domain-knowledge shape corrections.
+      6. Generate SVG icons for each symbol.
+    """
+    import uuid
+
+    logger.info("=== parse_legend_with_vision START ===")
+    logger.info(
+        f"Filename: {filename}, media_type: {media_type}, "
+        f"data_size: {len(image_data)} bytes"
+    )
+
+    api_client = _get_client()
+
+    # ── Step 1: Determine processing strategy ──
+    is_pdf = media_type == "application/pdf"
+    page_count = _get_pdf_page_count(image_data) if is_pdf else 1
+    is_multi_page = is_pdf and page_count > 1
+
+    logger.info(
+        f"Strategy: {'multi-page PDF (' + str(page_count) + ' pages)' if is_multi_page else 'single page/image'}"
+    )
+
+    # ── Step 2: Extract symbols ──
+    all_raw_symbols: list[dict] = []
+
+    if is_multi_page:
+        # Split PDF into per-page PNGs and extract from each independently
+        page_images = _split_pdf_to_pages(image_data, dpi=200)
+
+        if not page_images:
+            # Fallback: pymupdf failed, try single-shot with full PDF
+            logger.warning(
+                "PDF page splitting failed — falling back to single-shot extraction"
+            )
+            all_raw_symbols = await _extract_symbols_from_page(
+                api_client, image_data, media_type, page_context="",
+            )
+        else:
+            for png_data, page_num in page_images:
+                page_context = f"page {page_num} of {page_count}"
+                page_symbols = await _extract_symbols_from_page(
+                    api_client, png_data, "image/png", page_context,
+                )
+                logger.info(
+                    f"  Page {page_num}: extracted {len(page_symbols)} symbols"
+                )
+                all_raw_symbols.extend(page_symbols)
+
+            logger.info(
+                f"All pages complete: {len(all_raw_symbols)} raw symbols "
+                f"across {page_count} pages"
+            )
+    else:
+        # Single page PDF or image — one extraction call
+        all_raw_symbols = await _extract_symbols_from_page(
+            api_client, image_data, media_type, page_context="",
+        )
+
+    if not all_raw_symbols:
+        logger.error("No symbols extracted from any page")
+        raise ValueError("Legend parsing produced no symbols")
+
+    # ── Step 3: Deduplicate across pages ──
+    pre_dedup_count = len(all_raw_symbols)
+    unique_symbols = _deduplicate_symbols(all_raw_symbols)
+    dedup_removed = pre_dedup_count - len(unique_symbols)
+    if dedup_removed > 0:
+        logger.info(
+            f"Deduplication: {pre_dedup_count} → {len(unique_symbols)} "
+            f"({dedup_removed} duplicates removed)"
+        )
+    else:
+        logger.info(f"Deduplication: {len(unique_symbols)} symbols (no duplicates)")
+
+    # ── Step 4: Reconciliation pass ──
+    # Send the original file (full PDF or image) for verification.
+    # This catches symbols missed due to page-boundary splits or attention gaps.
+    try:
+        unique_symbols = await _reconciliation_pass(
+            api_client, unique_symbols, image_data, media_type,
+        )
+    except Exception as recon_err:
+        logger.warning(
+            f"Reconciliation pass failed (non-fatal): "
+            f"{type(recon_err).__name__}: {recon_err}"
+        )
+
+    # ── Step 5: Convert to LegendSymbol + shape correction ──
+    symbols: list[LegendSymbol] = []
+    for i, entry in enumerate(unique_symbols):
         try:
             sym = LegendSymbol(
                 code=entry.get("code", ""),
@@ -494,110 +831,24 @@ Respond with ONLY a JSON array:
                 shape_code=entry.get("shape_code", "circle"),
                 filled=bool(entry.get("filled", False)),
             )
-            # Apply domain-knowledge shape correction
             sym = _correct_legend_shape(sym)
             symbols.append(sym)
         except Exception as sym_err:
             logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")
 
-    # === COMPLETION VERIFICATION PASS ===
-    # Send the image back with the extracted list and ask for any missed symbols
-    logger.info(f"Pass 1 extracted {len(symbols)} symbols. Running completion verification pass...")
-    try:
-        existing_summary = "\n".join(
-            f'  {i+1}. [{s.category}] code="{s.code}" — "{s.name}"'
-            for i, s in enumerate(symbols)
-        )
-        verify_prompt = f"""I previously extracted {len(symbols)} symbols from this legend. Here's what I found:
-
-{existing_summary}
-
-TASK: Look at the legend image CAREFULLY and find ANY symbols I MISSED. Check:
-1. Every section header (Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, etc.)
-2. Every single row under each section — especially:
-   - Weatherproof variants (same device but with "WEATHERPROOF" in the name)
-   - Subscript/suffix variants (symbols with small text like WP, T, F, P)
-   - Devices at the bottom of columns that might be easy to miss
-   - Very similar-looking entries that are actually different devices
-3. Line/cable symbols (like "Linear Heat Sensing Cable" shown as just a line)
-
-IMPORTANT: Only add symbols you can ACTUALLY SEE as distinct rows in the legend image.
-- Each added symbol must correspond to a visible row with a symbol graphic and text description.
-- Do NOT add devices from general knowledge that aren't physically shown as rows in the legend.
-- Do NOT decompose one entry's description into sub-devices (e.g., don't create a "Flow Switch" entry from "Input Module Connected to Flow Switch").
-
-If you find genuinely missed symbols, return them as a JSON array in the same format:
-[{{"code": "...", "name": "...", "category": "...", "shape": "...", "shape_code": "...", "filled": false}}, ...]
-
-If nothing was missed, return an empty array: []
-
-Respond with ONLY the JSON array."""
-
-        verify_response = await api_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=16384,
-            messages=[{
-                "role": "user",
-                "content": [
-                    file_content_block,
-                    {"type": "text", "text": verify_prompt},
-                ],
-            }],
-        )
-
-        logger.info(
-            f"Verification pass response: stop_reason={verify_response.stop_reason}, "
-            f"usage={{input: {verify_response.usage.input_tokens}, output: {verify_response.usage.output_tokens}}}"
-        )
-
-        verify_text = verify_response.content[0].text.strip()
-        missed_symbols = _extract_json_array(verify_text)
-
-        if missed_symbols:
-            # Deduplicate: skip any that match existing code+name
-            existing_keys = {(s.code.upper(), s.name.upper()) for s in symbols}
-            added = 0
-            for entry in missed_symbols:
-                code = entry.get("code", "")
-                name = entry.get("name", "")
-                if (code.upper(), name.upper()) not in existing_keys:
-                    try:
-                        sym = LegendSymbol(
-                            code=code,
-                            name=name,
-                            category=entry.get("category", "Other"),
-                            shape=entry.get("shape", ""),
-                            shape_code=entry.get("shape_code", "circle"),
-                            filled=bool(entry.get("filled", False)),
-                        )
-                        sym = _correct_legend_shape(sym)
-                        symbols.append(sym)
-                        existing_keys.add((code.upper(), name.upper()))
-                        added += 1
-                    except Exception as sym_err:
-                        logger.warning(f"Failed to parse missed symbol: {entry} — {sym_err}")
-            logger.info(
-                f"Verification pass found {len(missed_symbols)} candidates, "
-                f"added {added} new symbols (after dedup). Total: {len(symbols)}"
-            )
-        else:
-            logger.info("Verification pass confirmed: no missed symbols")
-
-    except Exception as verify_err:
-        logger.warning(f"Verification pass failed (non-fatal): {type(verify_err).__name__}: {verify_err}")
-
-    # Extract unique system categories
+    # ── Step 6: Generate SVG icons ──
     systems = sorted(set(s.category for s in symbols))
     logger.info(
-        f"Legend parsing complete: {len(symbols)} symbols across {len(systems)} systems: {systems}"
+        f"Legend extraction complete: {len(symbols)} symbols "
+        f"across {len(systems)} systems: {systems}"
     )
 
-    # Generate SVG icons for each symbol (second AI layer)
     try:
         symbols = await _generate_symbol_svgs(symbols)
     except Exception as svg_err:
-        logger.warning(f"SVG icon generation failed entirely (non-fatal): {svg_err}")
+        logger.warning(f"SVG icon generation failed (non-fatal): {svg_err}")
 
+    # ── Step 7: Return ──
     legend_id = str(uuid.uuid4())
     return LegendData(
         legend_id=legend_id,
