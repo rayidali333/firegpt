@@ -13,9 +13,12 @@ text found in the drawing. This makes detection robust across any
 naming convention, language, or CAD standard.
 """
 
+import logging
 import re
 import subprocess
 from collections import defaultdict
+
+logger = logging.getLogger("firegpt.parser")
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -719,6 +722,7 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
     block_layers: dict[str, set[str]] = defaultdict(set)
     block_attribs: dict[str, dict[str, str]] = {}
     skipped_blocks: dict[str, int] = defaultdict(int)
+    attrib_errors: dict[str, str] = {}  # Track ATTRIB extraction failures
     # Per-instance data for sub-grouping: {block_name: [{attribs: {}, location: (x,y), layer: ""}]}
     block_instances: dict[str, list[dict]] = defaultdict(list)
 
@@ -737,7 +741,7 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
             etype = entity.dxftype()
             layout_types[etype] += 1
 
-            if etype == "INSERT":
+            if etype in ("INSERT", "MINSERT"):
                 block_name = entity.dxf.name
                 total_inserts += 1
                 layout_insert_count += 1
@@ -753,7 +757,15 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
                 if not is_model_space:
                     continue
 
-                block_counts[block_name] += 1
+                # MINSERT = arrayed block insertions. Count = rows × cols.
+                if etype == "MINSERT":
+                    row_count = getattr(entity.dxf, 'row_count', 1) or 1
+                    col_count = getattr(entity.dxf, 'column_count', 1) or 1
+                    insert_multiplier = row_count * col_count
+                else:
+                    insert_multiplier = 1
+
+                block_counts[block_name] += insert_multiplier
 
                 # Collect per-instance data for sub-grouping
                 instance_data: dict = {"attribs": {}}
@@ -776,8 +788,8 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
                         # Also keep first-instance attribs for backward compat
                         if instance_attribs and block_name not in block_attribs:
                             block_attribs[block_name] = dict(instance_attribs)
-                except Exception:
-                    pass
+                except Exception as e:
+                    attrib_errors[block_name] = str(e)
 
                 try:
                     insert_point = entity.dxf.insert
@@ -787,7 +799,9 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
                 except Exception:
                     pass
 
-                block_instances[block_name].append(instance_data)
+                # For MINSERT, add multiple instances for the array
+                for _ in range(insert_multiplier):
+                    block_instances[block_name].append(instance_data)
 
         top_types = sorted(layout_types.items(), key=lambda x: -x[1])[:8]
         types_str = ", ".join(f"{t}: {c}" for t, c in top_types)
@@ -810,6 +824,59 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
         )
         result.log("info", f"Skipped system blocks: {skip_list}")
 
+    # Step 5b: ATTRIB inspection — debug what attribute data we actually collected
+    blocks_with_attribs = {bn: instances for bn, instances in block_instances.items()
+                           if any(inst.get("attribs") for inst in instances)}
+    blocks_without_attribs = {bn for bn in block_counts if bn not in blocks_with_attribs}
+    logger.info(
+        f"=== ATTRIB INSPECTION: {len(blocks_with_attribs)}/{len(block_counts)} blocks have ATTRIBs, "
+        f"{len(blocks_without_attribs)} have NONE ==="
+    )
+    for bn, instances in sorted(blocks_with_attribs.items()):
+        sample = next((inst["attribs"] for inst in instances if inst.get("attribs")), {})
+        logger.info(f"  ATTRIBS: \"{bn}\" — sample: {sample}")
+
+    result.log("section",
+        f"ATTRIB INSPECTION — {len(blocks_with_attribs)}/{len(block_counts)} blocks have per-instance ATTRIBs"
+    )
+
+    if blocks_with_attribs:
+        for bn in sorted(blocks_with_attribs.keys()):
+            instances = blocks_with_attribs[bn]
+            instances_with = sum(1 for inst in instances if inst.get("attribs"))
+            instances_without = len(instances) - instances_with
+            # Collect all unique tags and sample values
+            all_tags: dict[str, set[str]] = defaultdict(set)
+            for inst in instances:
+                for tag, val in inst.get("attribs", {}).items():
+                    all_tags[tag].add(val)
+            tag_summary = ", ".join(
+                f'{tag}=[{", ".join(sorted(list(vals))[:5])}{"..." if len(vals) > 5 else ""}] ({len(vals)} unique)'
+                for tag, vals in sorted(all_tags.items())
+            )
+            result.log("detail",
+                f'  "{bn}" — {instances_with}/{len(instances)} have attribs, '
+                f'{instances_without} empty. Tags: {tag_summary}'
+            )
+    else:
+        result.log("detail", "  No blocks have per-instance ATTRIB data at all")
+        result.log("detail", "  This means INSERT entities lack ATTRIB sub-entities (common in DWG→DXF conversion)")
+
+    if blocks_without_attribs:
+        # Show up to 10 blocks without attribs
+        no_attr_list = sorted(blocks_without_attribs)[:10]
+        result.log("detail",
+            f"  Blocks with NO attribs ({len(blocks_without_attribs)}): "
+            + ", ".join(f'"{bn}" (×{block_counts[bn]})' for bn in no_attr_list)
+            + ("..." if len(blocks_without_attribs) > 10 else "")
+        )
+
+    if attrib_errors:
+        result.log("warning",
+            f"ATTRIB extraction errors ({len(attrib_errors)}): "
+            + ", ".join(f'"{bn}": {err}' for bn, err in list(attrib_errors.items())[:5])
+        )
+
     # Step 6: Analyze block definitions — nested refs + metadata
     nested_ref_counts: dict[str, dict[str, int]] = {}
     block_def_metadata: dict[str, dict] = {}
@@ -826,6 +893,30 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
 
         if block.name in block_counts:
             block_def_metadata[block.name] = _collect_block_metadata(block, doc)
+
+    # Step 6b: Block definition content debug — show texts_inside and attdef_tags
+    blocks_with_content = {bn: meta for bn, meta in block_def_metadata.items()
+                           if meta.get("texts_inside") or meta.get("attdef_tags")}
+    if blocks_with_content:
+        result.log("section",
+            f"BLOCK DEFINITION CONTENT — {len(blocks_with_content)}/{len(block_def_metadata)} blocks have text/attdefs"
+        )
+        for bn in sorted(blocks_with_content.keys()):
+            meta = blocks_with_content[bn]
+            parts = []
+            if meta.get("texts_inside"):
+                parts.append(f'texts={meta["texts_inside"][:5]}')
+            if meta.get("attdef_tags"):
+                parts.append(f'attdefs={dict(list(meta["attdef_tags"].items())[:5])}')
+            if meta.get("description"):
+                parts.append(f'desc="{meta["description"][:80]}"')
+            result.log("detail",
+                f'  "{bn}" (×{block_counts.get(bn, "?")}) — {", ".join(parts)}'
+            )
+    else:
+        result.log("section",
+            f"BLOCK DEFINITION CONTENT — 0/{len(block_def_metadata)} blocks have text or attdef content"
+        )
 
     # Step 7: Propagate counts through nesting hierarchy (BFS)
     # IMPORTANT: Only propagate to blocks that were directly inserted on the
@@ -930,6 +1021,11 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
 
             # Try sub-grouping: check if instances have a differentiating attribute
             diff_tag = _find_differentiating_tag(instances, count)
+            n_with_attribs = sum(1 for inst in instances if inst.get("attribs"))
+            logger.debug(
+                f"Sub-group check: \"{block_name}\" — {len(instances)} instances, "
+                f"{n_with_attribs} with attribs, diff_tag={diff_tag!r}"
+            )
 
             if diff_tag:
                 # Sub-group this block by the differentiating attribute

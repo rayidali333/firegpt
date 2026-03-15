@@ -2,6 +2,7 @@ import csv
 import io
 import logging
 import os
+import re
 import traceback
 import uuid
 from pathlib import Path
@@ -203,10 +204,9 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 })
 
     # === DIRECT LEGEND CODE MATCHING ===
-    # Before AI classification, try to match sub-grouped blocks directly against
-    # legend codes. If a block's attribute value (e.g., TYPE=AIM) matches a legend
-    # code (e.g., code="AIM" → "Addressable Input Module"), we can classify it
-    # immediately without AI. This is more accurate than AI guessing from block names.
+    # Before AI classification, try to match blocks directly against legend codes
+    # using multiple strategies (attribute values, attdef defaults, block def text,
+    # block name segments). Much more accurate than AI guessing from names alone.
     all_candidates = parse_result.ai_candidate_blocks
     blocks_to_classify = []  # Blocks that still need AI classification
     direct_matched_count = 0
@@ -216,14 +216,28 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
         legend_code_lookup: dict[str, "LegendSymbol"] = {}
         for ls in legend.symbols:
             if ls.code:
-                legend_code_lookup[ls.code.upper()] = ls
+                legend_code_lookup[ls.code.upper().strip()] = ls
 
-        # Also build lookup by texts_inside the block definition
-        # (e.g., block contains TEXT "AIM" → match to legend code "AIM")
+        # Show available legend codes for debugging
         parse_result.analysis.append({
             "type": "section",
-            "message": "DIRECT LEGEND CODE MATCHING — matching block attributes to legend codes",
+            "message": f"DIRECT LEGEND CODE MATCHING — {len(legend_code_lookup)} legend codes available",
         })
+        # Show all legend codes grouped by category
+        codes_by_cat: dict[str, list[str]] = {}
+        for ls in legend.symbols:
+            if ls.code:
+                codes_by_cat.setdefault(ls.category, []).append(ls.code)
+        for cat, codes in sorted(codes_by_cat.items()):
+            parse_result.analysis.append({
+                "type": "detail",
+                "message": f'  [{cat}] codes: {", ".join(codes)}',
+            })
+
+        logger.info(
+            f"Direct legend matching: {len(legend_code_lookup)} legend codes available: "
+            f"{', '.join(sorted(legend_code_lookup.keys())[:30])}"
+        )
 
         # Track per-label colors for direct matches
         direct_label_color_map: dict[str, str] = {}
@@ -232,31 +246,60 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
         for block in all_candidates:
             matched_legend_sym = None
             match_source = ""
+            checked_values: list[str] = []  # Track what we checked for debug
 
-            # 1. Check sub-group attribute value against legend codes
+            # Strategy 1: Check sub-group attribute value against legend codes
             if block.sub_group_value:
                 val_upper = block.sub_group_value.upper().strip()
+                checked_values.append(f"sub_group({block.sub_group_tag})={val_upper}")
                 if val_upper in legend_code_lookup:
                     matched_legend_sym = legend_code_lookup[val_upper]
                     match_source = f"attrib {block.sub_group_tag}={block.sub_group_value}"
 
-            # 2. Check all attrib VALUES against legend codes
+            # Strategy 2: Check all per-instance attrib VALUES against legend codes
             if not matched_legend_sym and block.attribs:
                 for tag, value in block.attribs.items():
                     val_upper = value.upper().strip()
+                    checked_values.append(f"attrib({tag})={val_upper}")
                     if val_upper in legend_code_lookup:
                         matched_legend_sym = legend_code_lookup[val_upper]
                         match_source = f"attrib {tag}={value}"
                         break
 
-            # 3. Check block definition's internal text against legend codes
+            # Strategy 3: Check block definition ATTDEF default values
+            if not matched_legend_sym and block.attdef_tags:
+                for tag, default_val in block.attdef_tags.items():
+                    val_upper = default_val.upper().strip()
+                    checked_values.append(f"attdef({tag})={val_upper}")
+                    if val_upper in legend_code_lookup:
+                        matched_legend_sym = legend_code_lookup[val_upper]
+                        match_source = f"attdef {tag}={default_val}"
+                        break
+
+            # Strategy 4: Check block definition's internal TEXT entities
             if not matched_legend_sym and block.texts_inside:
                 for text in block.texts_inside:
                     text_upper = text.upper().strip()
+                    checked_values.append(f"text_inside={text_upper}")
                     if text_upper in legend_code_lookup:
                         matched_legend_sym = legend_code_lookup[text_upper]
                         match_source = f"text_inside={text}"
                         break
+
+            # Strategy 5: Parse block name segments and match against legend codes
+            # Block names like "IT-DVC-FAM-Fire Modules-111" → segments: IT, DVC, FAM, Fire, Modules, 111
+            # Only match codes that are 2+ chars to avoid false positives with single-char codes
+            if not matched_legend_sym:
+                segments = re.split(r'[-_\s.]+', block.block_name)
+                for segment in segments:
+                    seg_upper = segment.upper().strip()
+                    if len(seg_upper) >= 2 and seg_upper in legend_code_lookup:
+                        checked_values.append(f"name_segment={seg_upper} ✓")
+                        matched_legend_sym = legend_code_lookup[seg_upper]
+                        match_source = f"block_name_segment={segment}"
+                        break
+                    elif len(seg_upper) >= 2:
+                        checked_values.append(f"name_segment={seg_upper}")
 
             if matched_legend_sym:
                 # DIRECT MATCH — no AI needed
@@ -275,6 +318,9 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                         f' (×{block.count}) → "{label}" via {match_source}'
                     ),
                 })
+                logger.info(
+                    f"  DIRECT MATCH: \"{block.block_name}\" → \"{label}\" via {match_source}"
+                )
 
                 parse_result.symbols.append(SymbolInfo(
                     block_name=block.block_name,
@@ -302,20 +348,41 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
             else:
                 # No direct match — goes to AI
                 blocks_to_classify.append(block)
+                # Debug: show WHY this block didn't match
+                parse_result.analysis.append({
+                    "type": "detail",
+                    "message": (
+                        f'  ✗ "{block.block_name}" (×{block.count}) — no match. '
+                        f'Checked: [{", ".join(checked_values[:8])}]'
+                        f'{"..." if len(checked_values) > 8 else ""}'
+                    ),
+                })
 
         if direct_matched_count > 0:
+            total_direct_devices = sum(
+                b.count for b in all_candidates if b not in blocks_to_classify
+            )
             parse_result.analysis.append({
                 "type": "success",
                 "message": (
                     f"Direct legend code matching: {direct_matched_count} block types matched "
-                    f"({sum(b.count for b in all_candidates if b not in blocks_to_classify)} devices)"
+                    f"({total_direct_devices} devices), "
+                    f"{len(blocks_to_classify)} blocks remaining for AI"
                 ),
             })
         else:
             parse_result.analysis.append({
                 "type": "info",
-                "message": "Direct legend code matching: no attribute-to-legend matches found",
+                "message": (
+                    "Direct legend code matching: no matches found. "
+                    "Blocks had no attribs/attdefs/texts/name-segments matching legend codes. "
+                    "All blocks sent to AI."
+                ),
             })
+        logger.info(
+            f"Direct legend matching result: {direct_matched_count} matched, "
+            f"{len(blocks_to_classify)} remaining for AI"
+        )
     else:
         blocks_to_classify = list(all_candidates)
 
