@@ -358,45 +358,64 @@ async def parse_legend_with_vision(
     image_b64 = base64.standard_b64encode(image_data).decode("utf-8")
     logger.info(f"Base64 encoded size: {len(image_b64)} chars")
 
-    prompt = """You are analyzing a construction drawing legend/key sheet. Extract EVERY symbol that is PHYSICALLY SHOWN as a distinct row in the legend.
+    prompt = """You are analyzing a construction drawing legend/key sheet. Your task is to extract EVERY SINGLE symbol definition shown — do NOT skip any rows.
 
-CRITICAL ANTI-HALLUCINATION RULES:
-- ONLY extract symbols that are ACTUALLY VISIBLE as distinct rows in the legend image.
-- Each legend row has TWO parts: (1) a graphic symbol on the left, (2) a text description on the right.
-- You MUST be able to point to BOTH the symbol graphic AND the adjacent description text for every entry.
-- Do NOT invent symbols based on what you think "should" be in the legend.
-- Do NOT decompose a description into sub-devices (e.g., "Addressable Input Module Connected to Flow Switch" is ONE entry — do NOT create a separate "Flow Switch" entry unless there is a distinct row for it).
-- Do NOT add devices from general industry knowledge — ONLY what is physically drawn and labeled in this image.
-- "Weatherproof" variants ARE separate entries IF they have their own distinct row with their own symbol graphic.
+CRITICAL RULES FOR COMPLETENESS:
+- Each ROW in the legend is a SEPARATE symbol, even if two rows look similar.
+- "Weatherproof" variants are SEPARATE symbols from their non-weatherproof counterparts.
+- Subscript/suffix variants (like a symbol with "WP", "_T", "_F", "_P") are SEPARATE symbols.
+- If a symbol code has a small subscript letter (like S with subscript "80"), include it (e.g., code="S80").
+- If two symbols have the same shape but different descriptions, they are TWO separate entries.
+- Count EVERY row in EVERY section. Do NOT summarize or group similar entries.
+- Process ALL system sections: Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, and any others.
 
-WHAT COUNTS AS A VALID LEGEND ENTRY:
-✓ A row with a symbol shape (rectangle, hexagon, circle, etc.) and text description next to it
-✓ A row with a graphical icon (like a line symbol for cable) and text description next to it
-✗ A device name mentioned only within another entry's description
-✗ A device you know exists in fire alarm systems but isn't drawn in this legend
-✗ A sub-component extracted from a longer description
+ACCURACY RULES — avoid inventing entries:
+- Only extract rows that are PHYSICALLY VISIBLE in the legend with both a symbol graphic AND description text.
+- Do NOT decompose a description into sub-devices (e.g., "Addressable Input Module Connected to Flow Switch" is ONE entry — do NOT create a separate "Flow Switch" entry).
+- Do NOT add devices from general industry knowledge that aren't actually shown as rows in this legend.
+- Each entry must correspond to a real, distinct row you can point to in the image.
 
-For each visible symbol row, provide:
-1. "code": The EXACT text shown INSIDE the symbol shape. Read character by character.
-   - Text codes like "MFACP", "SCM", "S", "H", "CR", "DS" — use EXACTLY what you read.
-   - For subscripts: "S" with subscript "WP" → "SWP", "S" with subscript "80" → "S80"
-   - If the symbol has NO text inside (purely graphical), describe what you see briefly, e.g., "graphic_beam_tx" for a beam transmitter icon. Use lowercase with underscores.
-2. "name": The full device name EXACTLY as written next to the symbol. Copy the text verbatim — do NOT rephrase.
-3. "category": The section header this row falls under. Use EXACTLY one of:
-   - "Fire Alarm", "Access Control", "Structured Cabling", "BMS", "Video Surveillance", "Public Address", "Other"
-4. "shape": Describe the visual shape precisely. Count sides carefully:
-   - 6 sides = hexagon (VERY COMMON for detectors)
-   - 5 sides = pentagon
-   - 4 sides = square/rectangle
+For each symbol row, provide:
+1. "code": The EXACT text shown INSIDE the symbol shape. Read it carefully character by character.
+   - If the symbol contains text like "MFACP", "SCM", "LHCP", "S", "H", "TJ", "CR", "DS" — use EXACTLY that text.
+   - For subscript variants, append the subscript: e.g., "S" with subscript "WP" → "SWP", or "S" with subscript "80" → "S80"
+   - If the symbol is purely graphical (no text inside), describe what you see: e.g., "smoke_heat_combo" for a combined detector icon.
+   - Do NOT make up codes. Only use what you can actually read in the image.
+2. "name": The full device name exactly as written next to the symbol (e.g., "Main Fire Alarm Control Panel", "Proximity Card Reader", "Addressable Input Module Weatherproof")
+3. "category": The system category it belongs to. Use EXACTLY one of these:
+   - "Fire Alarm" — detectors, panels, modules, manual stations, sirens, strobes, telephone, cables
+   - "Access Control" — card readers, door locks, exit buttons, break glass, barriers, intercoms, biometric
+   - "Structured Cabling" — server racks, patch panels, data outlets, switches, routers, UPS
+   - "BMS" — building management system panels, workstations, converters, I/O panels
+   - "Video Surveillance" — CCTV cameras, workstations, NVR, video management
+   - "Public Address" — speakers, amplifiers, microphones, alarm racks, loudspeakers
+   - "Other" — anything that doesn't fit above
+4. "shape": Describe the visual shape precisely. Count the number of sides carefully:
    - 3 sides = triangle
+   - 4 sides (equal) = square
+   - 4 sides (rectangular) = rectangle
+   - 5 sides = pentagon
+   - 6 sides = hexagon (VERY COMMON for fire alarm detectors — count carefully!)
    - Round = circle
-5. "shape_code": "circle", "square", "diamond", "pentagon", "hexagon", "triangle", or "star"
-6. "filled": true if the shape is filled/solid, false if outline only
+   Examples: "hexagon with S inside", "rectangle with MFACP text", "filled hexagon", "small square", "circle with concentric rings (speaker)", "rectangle with radiating lines (strobe)"
+5. "shape_code": The OUTER shape. Count sides carefully. Use EXACTLY one of:
+   - "circle" — circles, round shapes, ovals
+   - "square" — squares, rectangles, boxes
+   - "diamond" — diamond/rotated squares
+   - "pentagon" — pentagons (exactly 5 sides)
+   - "hexagon" — hexagons (exactly 6 sides) — fire alarm detectors are almost always hexagons!
+   - "triangle" — triangles (exactly 3 sides)
+   - "star" — star shapes, asterisk-like
+6. "filled": true if the symbol shape is filled/solid black, false if it is just an outline
 
-SHAPE GUIDANCE:
-- Fire alarm DETECTORS almost always use HEXAGONS. Count carefully!
-- Panels and modules → "square"
-- If unsure between pentagon and hexagon → almost certainly HEXAGON
+IMPORTANT SHAPE GUIDANCE:
+- Fire alarm DETECTORS (smoke, heat, multi-sensor) almost always use HEXAGONS (6 sides). Count carefully!
+- Panels and modules in rectangles/boxes → "square"
+- Manual call stations / pull stations → "square"
+- If you're unsure between pentagon and hexagon, it's almost certainly a HEXAGON in fire alarm drawings.
+
+BEFORE YOU START: Scan the entire legend and count the total number of symbol rows across ALL sections.
+Then extract every single one. Your JSON array should have that exact number of entries.
 
 Respond with ONLY a JSON array:
 [{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "hexagon with S inside", "shape_code": "hexagon", "filled": false}, ...]"""
@@ -487,82 +506,93 @@ Respond with ONLY a JSON array:
         except Exception as sym_err:
             logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")
 
-    # === VALIDATION PASS ===
-    # Instead of asking "what did I miss?" (which encourages hallucination),
-    # ask "which of these are actually in the image?" (which encourages pruning).
-    logger.info(f"Pass 1 extracted {len(symbols)} symbols. Running validation pass to remove hallucinations...")
+    # === COMPLETION VERIFICATION PASS ===
+    # Send the image back with the extracted list and ask for missed symbols.
+    # Key guardrail: tell it NOT to invent entries that aren't visible rows.
+    logger.info(f"Pass 1 extracted {len(symbols)} symbols. Running completion verification pass...")
     try:
         existing_summary = "\n".join(
             f'  {i+1}. [{s.category}] code="{s.code}" — "{s.name}"'
             for i, s in enumerate(symbols)
         )
-        validate_prompt = f"""I extracted {len(symbols)} symbols from this construction drawing legend. But I may have HALLUCINATED some entries — inventing devices that aren't actually shown in the legend image.
+        verify_prompt = f"""I previously extracted {len(symbols)} symbols from this legend. Here's what I found:
 
-HERE IS MY LIST:
 {existing_summary}
 
-YOUR TASK: Look at the legend image VERY CAREFULLY. For each entry in my list, determine:
-- Is there ACTUALLY a distinct row in the legend with a symbol graphic and this description?
-- Or did I fabricate this entry based on general knowledge?
+TASK: Look at the legend image CAREFULLY and find ANY symbols I MISSED. Check:
+1. Every section header (Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, etc.)
+2. Every single row under each section — especially:
+   - Weatherproof variants (same device but with "WEATHERPROOF" in the name)
+   - Subscript/suffix variants (symbols with small text like WP, T, F, P)
+   - Devices at the bottom of columns that might be easy to miss
+   - Very similar-looking entries that are actually different devices
+3. Line/cable symbols (like "Linear Heat Sensing Cable" shown as just a line)
 
-HALLUCINATION RED FLAGS:
-- An entry whose name does not appear as text next to a symbol in the legend
-- An entry that was extracted from within another entry's description (e.g., "Flow Switch" extracted from "Input Module Connected to Flow Switch")
-- An entry for a device that exists in the industry but is not shown in THIS specific legend
-- An entry where the code is a descriptive word I made up (like "interface", "flow_switch") rather than actual text visible inside a symbol shape
+CRITICAL: Only add symbols that are ACTUALLY VISIBLE as distinct rows in the legend image.
+- Each row must have BOTH a symbol graphic AND a text description you can point to.
+- Do NOT invent devices from general knowledge that aren't physically drawn as rows in the legend.
+- Do NOT decompose one entry's description into multiple sub-device entries.
+- If "Addressable Input Module Connected to Flow Switch" is one row, that's ONE entry — do NOT also create a separate "Flow Switch" entry.
 
-Return a JSON array containing ONLY the INDEX NUMBERS (1-based) of entries that are HALLUCINATED (not actually in the legend).
-Example: [3, 7, 15, 22] means entries 3, 7, 15, and 22 should be removed.
-If all entries are valid, return: []
+If you find GENUINELY missed symbols (real rows you can see in the image), return them as a JSON array in the same format:
+[{{"code": "...", "name": "...", "category": "...", "shape": "...", "shape_code": "...", "filled": false}}, ...]
 
-Respond with ONLY the JSON array of indices to remove."""
+If nothing was missed, return an empty array: []
 
-        validate_response = await api_client.messages.create(
+Respond with ONLY the JSON array."""
+
+        verify_response = await api_client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=4096,
+            max_tokens=16384,
             messages=[{
                 "role": "user",
                 "content": [
                     file_content_block,
-                    {"type": "text", "text": validate_prompt},
+                    {"type": "text", "text": verify_prompt},
                 ],
             }],
         )
 
         logger.info(
-            f"Validation pass response: stop_reason={validate_response.stop_reason}, "
-            f"usage={{input: {validate_response.usage.input_tokens}, output: {validate_response.usage.output_tokens}}}"
+            f"Verification pass response: stop_reason={verify_response.stop_reason}, "
+            f"usage={{input: {verify_response.usage.input_tokens}, output: {verify_response.usage.output_tokens}}}"
         )
 
-        validate_text = validate_response.content[0].text.strip()
-        indices_to_remove = _extract_json_array(validate_text)
+        verify_text = verify_response.content[0].text.strip()
+        missed_symbols = _extract_json_array(verify_text)
 
-        if indices_to_remove and isinstance(indices_to_remove, list):
-            # Convert 1-based indices to 0-based, validate they're integers
-            remove_set = set()
-            for idx in indices_to_remove:
-                if isinstance(idx, (int, float)):
-                    remove_set.add(int(idx) - 1)  # Convert to 0-based
-
-            if remove_set:
-                removed_names = [
-                    f'"{symbols[i].code}" ({symbols[i].name})'
-                    for i in sorted(remove_set) if 0 <= i < len(symbols)
-                ]
-                symbols = [s for i, s in enumerate(symbols) if i not in remove_set]
-                logger.info(
-                    f"Validation pass removed {len(remove_set)} hallucinated entries: "
-                    f"{', '.join(removed_names[:10])}"
-                    f"{'...' if len(removed_names) > 10 else ''}"
-                    f". Remaining: {len(symbols)} symbols"
-                )
-            else:
-                logger.info("Validation pass: no hallucinated entries found")
+        if missed_symbols:
+            # Deduplicate: skip any that match existing code+name
+            existing_keys = {(s.code.upper(), s.name.upper()) for s in symbols}
+            added = 0
+            for entry in missed_symbols:
+                code = entry.get("code", "")
+                name = entry.get("name", "")
+                if (code.upper(), name.upper()) not in existing_keys:
+                    try:
+                        sym = LegendSymbol(
+                            code=code,
+                            name=name,
+                            category=entry.get("category", "Other"),
+                            shape=entry.get("shape", ""),
+                            shape_code=entry.get("shape_code", "circle"),
+                            filled=bool(entry.get("filled", False)),
+                        )
+                        sym = _correct_legend_shape(sym)
+                        symbols.append(sym)
+                        existing_keys.add((code.upper(), name.upper()))
+                        added += 1
+                    except Exception as sym_err:
+                        logger.warning(f"Failed to parse missed symbol: {entry} — {sym_err}")
+            logger.info(
+                f"Verification pass found {len(missed_symbols)} candidates, "
+                f"added {added} new symbols (after dedup). Total: {len(symbols)}"
+            )
         else:
-            logger.info("Validation pass: all entries confirmed as valid")
+            logger.info("Verification pass confirmed: no missed symbols")
 
-    except Exception as validate_err:
-        logger.warning(f"Validation pass failed (non-fatal): {type(validate_err).__name__}: {validate_err}")
+    except Exception as verify_err:
+        logger.warning(f"Verification pass failed (non-fatal): {type(verify_err).__name__}: {verify_err}")
 
     # Extract unique system categories
     systems = sorted(set(s.category for s in symbols))
