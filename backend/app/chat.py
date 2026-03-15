@@ -369,12 +369,6 @@ CRITICAL RULES FOR COMPLETENESS:
 - Count EVERY row in EVERY section. Do NOT summarize or group similar entries.
 - Process ALL system sections: Fire Alarm, Access Control, BMS, Video Surveillance, Structured Cabling, Public Address, and any others.
 
-ACCURACY RULES — avoid inventing entries:
-- Only extract rows that are PHYSICALLY VISIBLE in the legend with both a symbol graphic AND description text.
-- Do NOT decompose a description into sub-devices (e.g., "Addressable Input Module Connected to Flow Switch" is ONE entry — do NOT create a separate "Flow Switch" entry).
-- Do NOT add devices from general industry knowledge that aren't actually shown as rows in this legend.
-- Each entry must correspond to a real, distinct row you can point to in the image.
-
 For each symbol row, provide:
 1. "code": The EXACT text shown INSIDE the symbol shape. Read it carefully character by character.
    - If the symbol contains text like "MFACP", "SCM", "LHCP", "S", "H", "TJ", "CR", "DS" — use EXACTLY that text.
@@ -507,8 +501,7 @@ Respond with ONLY a JSON array:
             logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")
 
     # === COMPLETION VERIFICATION PASS ===
-    # Send the image back with the extracted list and ask for missed symbols.
-    # Key guardrail: tell it NOT to invent entries that aren't visible rows.
+    # Send the image back with the extracted list and ask for any missed symbols
     logger.info(f"Pass 1 extracted {len(symbols)} symbols. Running completion verification pass...")
     try:
         existing_summary = "\n".join(
@@ -528,13 +521,12 @@ TASK: Look at the legend image CAREFULLY and find ANY symbols I MISSED. Check:
    - Very similar-looking entries that are actually different devices
 3. Line/cable symbols (like "Linear Heat Sensing Cable" shown as just a line)
 
-CRITICAL: Only add symbols that are ACTUALLY VISIBLE as distinct rows in the legend image.
-- Each row must have BOTH a symbol graphic AND a text description you can point to.
-- Do NOT invent devices from general knowledge that aren't physically drawn as rows in the legend.
-- Do NOT decompose one entry's description into multiple sub-device entries.
-- If "Addressable Input Module Connected to Flow Switch" is one row, that's ONE entry — do NOT also create a separate "Flow Switch" entry.
+IMPORTANT: Only add symbols you can ACTUALLY SEE as distinct rows in the legend image.
+- Each added symbol must correspond to a visible row with a symbol graphic and text description.
+- Do NOT add devices from general knowledge that aren't physically shown as rows in the legend.
+- Do NOT decompose one entry's description into sub-devices (e.g., don't create a "Flow Switch" entry from "Input Module Connected to Flow Switch").
 
-If you find GENUINELY missed symbols (real rows you can see in the image), return them as a JSON array in the same format:
+If you find genuinely missed symbols, return them as a JSON array in the same format:
 [{{"code": "...", "name": "...", "category": "...", "shape": "...", "shape_code": "...", "filled": false}}, ...]
 
 If nothing was missed, return an empty array: []

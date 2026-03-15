@@ -328,8 +328,6 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 for block in blocks_to_classify:
                     if block.block_name in ai_labels:
                         label = ai_labels[block.block_name]
-                        confidence = "high" if legend else "medium"
-                        source = "legend" if legend else "ai"
 
                         # Look up legend symbol for category, shape, code, and color
                         matched_legend = legend_lookup.get(label.upper())
@@ -342,6 +340,21 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                                     matched_legend = ls
                                     match_method = "fuzzy"
                                     break
+
+                        # Source/confidence based on whether the label actually
+                        # matches a real legend entry — not just whether a legend
+                        # was uploaded. This prevents hallucinated legend entries
+                        # from getting the "LEGEND" badge.
+                        if legend and matched_legend:
+                            confidence = "high"
+                            source = "legend"
+                        elif legend:
+                            # Legend uploaded but AI label doesn't match any entry
+                            confidence = "medium"
+                            source = "ai"
+                        else:
+                            confidence = "medium"
+                            source = "ai"
 
                         # === DEBUG: Log each legend lookup result ===
                         if legend:
@@ -360,7 +373,7 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                                     "type": "detail",
                                     "message": (
                                         f'  ✗ "{label}" → NO LEGEND MATCH '
-                                        f'(AI returned a label not in the legend!)'
+                                        f'(AI returned a label not in the legend — source set to "ai")'
                                     ),
                                 })
 
@@ -403,7 +416,7 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                             block_name=block.block_name,
                             label=label,
                             count=block.count,
-                            method="legend_ai" if legend else "ai",
+                            method="legend_ai" if (legend and matched_legend) else "ai",
                             confidence=confidence,
                             layers=block.layers,
                         ))
