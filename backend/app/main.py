@@ -202,13 +202,122 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                     "message": f"  • {', '.join(parts)}",
                 })
 
-    # AI classification: send blocks to Claude for classification.
-    # When legend is provided: ALL blocks go to AI with legend context (no fast-path).
-    # When no legend: only ambiguous blocks go to AI (fast-path handles known patterns).
-    blocks_to_classify = (
-        parse_result.ai_candidate_blocks if not legend
-        else parse_result.ai_candidate_blocks  # When legend present, parser sends ALL blocks as candidates
-    )
+    # === DIRECT LEGEND CODE MATCHING ===
+    # Before AI classification, try to match sub-grouped blocks directly against
+    # legend codes. If a block's attribute value (e.g., TYPE=AIM) matches a legend
+    # code (e.g., code="AIM" → "Addressable Input Module"), we can classify it
+    # immediately without AI. This is more accurate than AI guessing from block names.
+    all_candidates = parse_result.ai_candidate_blocks
+    blocks_to_classify = []  # Blocks that still need AI classification
+    direct_matched_count = 0
+
+    if legend:
+        # Build lookup: legend code (uppercase) → LegendSymbol
+        legend_code_lookup: dict[str, "LegendSymbol"] = {}
+        for ls in legend.symbols:
+            if ls.code:
+                legend_code_lookup[ls.code.upper()] = ls
+
+        # Also build lookup by texts_inside the block definition
+        # (e.g., block contains TEXT "AIM" → match to legend code "AIM")
+        parse_result.analysis.append({
+            "type": "section",
+            "message": "DIRECT LEGEND CODE MATCHING — matching block attributes to legend codes",
+        })
+
+        # Track per-label colors for direct matches
+        direct_label_color_map: dict[str, str] = {}
+        direct_color_index = 0
+
+        for block in all_candidates:
+            matched_legend_sym = None
+            match_source = ""
+
+            # 1. Check sub-group attribute value against legend codes
+            if block.sub_group_value:
+                val_upper = block.sub_group_value.upper().strip()
+                if val_upper in legend_code_lookup:
+                    matched_legend_sym = legend_code_lookup[val_upper]
+                    match_source = f"attrib {block.sub_group_tag}={block.sub_group_value}"
+
+            # 2. Check all attrib VALUES against legend codes
+            if not matched_legend_sym and block.attribs:
+                for tag, value in block.attribs.items():
+                    val_upper = value.upper().strip()
+                    if val_upper in legend_code_lookup:
+                        matched_legend_sym = legend_code_lookup[val_upper]
+                        match_source = f"attrib {tag}={value}"
+                        break
+
+            # 3. Check block definition's internal text against legend codes
+            if not matched_legend_sym and block.texts_inside:
+                for text in block.texts_inside:
+                    text_upper = text.upper().strip()
+                    if text_upper in legend_code_lookup:
+                        matched_legend_sym = legend_code_lookup[text_upper]
+                        match_source = f"text_inside={text}"
+                        break
+
+            if matched_legend_sym:
+                # DIRECT MATCH — no AI needed
+                direct_matched_count += 1
+                label = matched_legend_sym.name
+
+                if label not in direct_label_color_map:
+                    direct_label_color_map[label] = get_symbol_palette_color(direct_color_index)
+                    direct_color_index += 1
+
+                parse_result.analysis.append({
+                    "type": "detail",
+                    "message": (
+                        f'  ✓ "{block.block_name}"'
+                        f'{f" [{block.sub_group_value}]" if block.sub_group_value else ""}'
+                        f' (×{block.count}) → "{label}" via {match_source}'
+                    ),
+                })
+
+                parse_result.symbols.append(SymbolInfo(
+                    block_name=block.block_name,
+                    label=label,
+                    count=block.count,
+                    locations=block.locations,
+                    color=direct_label_color_map[label],
+                    confidence="high",
+                    source="legend",
+                    shape_code=matched_legend_sym.shape_code or "circle",
+                    category=matched_legend_sym.category,
+                    legend_code=matched_legend_sym.code,
+                    legend_shape=matched_legend_sym.shape,
+                    svg_icon=matched_legend_sym.svg_icon,
+                ))
+                parse_result.audit.append(AuditEntry(
+                    block_name=block.block_name,
+                    label=label,
+                    count=block.count,
+                    method="legend_direct",
+                    confidence="high",
+                    matched_term=match_source,
+                    layers=block.layers,
+                ))
+            else:
+                # No direct match — goes to AI
+                blocks_to_classify.append(block)
+
+        if direct_matched_count > 0:
+            parse_result.analysis.append({
+                "type": "success",
+                "message": (
+                    f"Direct legend code matching: {direct_matched_count} block types matched "
+                    f"({sum(b.count for b in all_candidates if b not in blocks_to_classify)} devices)"
+                ),
+            })
+        else:
+            parse_result.analysis.append({
+                "type": "info",
+                "message": "Direct legend code matching: no attribute-to-legend matches found",
+            })
+    else:
+        blocks_to_classify = list(all_candidates)
 
     logger.info(
         f"Blocks to classify: {len(blocks_to_classify)}, "
@@ -224,6 +333,8 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
         })
         for blk in sorted(blocks_to_classify, key=lambda b: -b.count):
             parts = [f'count={blk.count}']
+            if blk.sub_group_value:
+                parts.append(f'{blk.sub_group_tag}={blk.sub_group_value}')
             if blk.layers:
                 parts.append(f'layers=[{", ".join(blk.layers[:3])}]')
             if blk.texts_inside:
@@ -326,8 +437,14 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                 color_index = 0
 
                 for block in blocks_to_classify:
-                    if block.block_name in ai_labels:
-                        label = ai_labels[block.block_name]
+                    # Build the lookup key matching what we sent to the AI.
+                    # Sub-grouped blocks use composite keys: "block_name|TAG=VALUE"
+                    if block.sub_group_value:
+                        ai_key = f"{block.block_name}|{block.sub_group_tag}={block.sub_group_value}"
+                    else:
+                        ai_key = block.block_name
+                    if ai_key in ai_labels:
+                        label = ai_labels[ai_key]
 
                         # Look up legend symbol for category, shape, code, and color
                         matched_legend = legend_lookup.get(label.upper())

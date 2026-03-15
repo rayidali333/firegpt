@@ -647,14 +647,28 @@ async def classify_blocks_with_ai(
     if not os.getenv("ANTHROPIC_API_KEY"):
         return {}
 
-    # Build structured metadata for each candidate block
+    # Build structured metadata for each candidate block.
+    # For sub-grouped blocks (same block_name, different attrib values),
+    # use a composite key so the AI can return distinct labels per sub-group.
     blocks_data = []
+    # Map composite keys back to original block info for response parsing
+    composite_key_map: dict[str, tuple[str, str, str]] = {}  # composite_key → (block_name, sub_tag, sub_value)
+
     for block in ai_candidate_blocks:
+        # Use composite key for sub-grouped blocks to avoid key collisions
+        if block.sub_group_value:
+            display_key = f"{block.block_name}|{block.sub_group_tag}={block.sub_group_value}"
+            composite_key_map[display_key] = (block.block_name, block.sub_group_tag, block.sub_group_value)
+        else:
+            display_key = block.block_name
+
         entry = {
-            "block_name": block.block_name,
+            "block_name": display_key,
             "count": block.count,
             "layers": block.layers,
         }
+        if block.sub_group_value:
+            entry["instance_attribute"] = f"{block.sub_group_tag}={block.sub_group_value}"
         if block.entity_types:
             entry["geometry_inside"] = block.entity_types
         if block.attribs:
