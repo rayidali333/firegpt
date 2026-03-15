@@ -14,6 +14,7 @@ naming convention, language, or CAD standard.
 """
 
 import logging
+import math
 import re
 import subprocess
 from collections import defaultdict
@@ -505,6 +506,130 @@ def _collect_block_metadata(block_def, doc) -> dict:
     }
 
 
+def _collect_model_texts(doc) -> list[dict]:
+    """Scan all TEXT/MTEXT entities in model space and return their content + positions.
+
+    These are the device code labels placed near symbols on the drawing —
+    e.g., "S" next to a smoke detector, "AIM" next to an addressable module.
+    They're standalone text entities, not ATTRIBs or block-internal text.
+    """
+    texts = []
+    try:
+        for layout in doc.layouts:
+            if layout.name != "Model":
+                continue
+            for entity in layout:
+                etype = entity.dxftype()
+                text = ""
+                if etype == "TEXT":
+                    text = entity.dxf.text.strip()
+                elif etype == "MTEXT":
+                    try:
+                        text = entity.plain_text().strip()
+                    except Exception:
+                        text = entity.text.strip() if hasattr(entity, 'text') and entity.text else ""
+                else:
+                    continue
+
+                if not text or len(text) > 20:
+                    continue  # Skip empty or very long text (not a device code)
+
+                try:
+                    pos = entity.dxf.insert
+                    texts.append({
+                        "text": text,
+                        "x": pos.x,
+                        "y": pos.y,
+                    })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return texts
+
+
+def _compute_search_radius(block_locations: dict[str, list[tuple[float, float]]]) -> float:
+    """Compute an adaptive search radius for text-to-INSERT association.
+
+    Uses 1.5% of the smaller drawing dimension. This captures text labels
+    placed close to their symbol while avoiding false matches from neighboring
+    symbols. Fire alarm text labels are typically placed within 1-3 feet of
+    the symbol, which is a small fraction of the floor plan extent.
+    """
+    all_x = []
+    all_y = []
+    for locs in block_locations.values():
+        for x, y in locs:
+            all_x.append(x)
+            all_y.append(y)
+
+    if not all_x:
+        return 500.0  # Safe default
+
+    width = max(all_x) - min(all_x)
+    height = max(all_y) - min(all_y)
+    smaller_dim = min(width, height) if min(width, height) > 0 else max(width, height)
+
+    if smaller_dim <= 0:
+        return 500.0
+
+    radius = smaller_dim * 0.015  # 1.5% of smaller dimension
+    # Clamp to reasonable range
+    return max(50.0, min(radius, 5000.0))
+
+
+def _associate_text_with_inserts(
+    block_instances: dict[str, list[dict]],
+    model_texts: list[dict],
+    radius: float,
+) -> dict[str, int]:
+    """Find the nearest short text entity for each INSERT instance.
+
+    For each instance in block_instances, find TEXT entities within `radius`
+    distance. If found, inject the text as a synthetic attribute '_NEARBY_LABEL'
+    on the instance. This allows the existing sub-grouping and legend-matching
+    code to use these text labels automatically.
+
+    Returns:
+        dict mapping text_value → count of instances matched (for logging).
+    """
+    if not model_texts:
+        return {}
+
+    # Pre-filter: only consider short text likely to be device codes (1-10 chars)
+    code_texts = [t for t in model_texts if 1 <= len(t["text"]) <= 10]
+    if not code_texts:
+        return {}
+
+    match_counts: dict[str, int] = defaultdict(int)
+    total_matched = 0
+
+    for block_name, instances in block_instances.items():
+        for inst in instances:
+            if "location" not in inst:
+                continue
+
+            ix, iy = inst["location"]
+            best_text = None
+            best_dist = float("inf")
+
+            for ct in code_texts:
+                dist = math.sqrt((ct["x"] - ix) ** 2 + (ct["y"] - iy) ** 2)
+                if dist < best_dist and dist <= radius:
+                    best_dist = dist
+                    best_text = ct["text"]
+
+            if best_text:
+                # Inject as synthetic attribute — the existing sub-grouping
+                # and legend-matching code will pick this up automatically
+                inst["attribs"]["_NEARBY_LABEL"] = best_text
+                match_counts[best_text] += 1
+                total_matched += 1
+
+    return dict(match_counts)
+
+
 def _find_differentiating_tag(
     instances: list[dict],
     total_count: int,
@@ -823,6 +948,51 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
             f"{n} ({c})" for n, c in sorted(skipped_blocks.items())[:10]
         )
         result.log("info", f"Skipped system blocks: {skip_list}")
+
+    # Step 5a: Nearby text label scanning
+    # Fire alarm drawings have device code labels ("S", "H", "AIM", "AOM") placed
+    # as TEXT/MTEXT entities near each symbol. These are the codes shown in the legend.
+    # We scan all text in model space, find the nearest short text to each INSERT,
+    # and inject it as a synthetic attribute '_NEARBY_LABEL' on the instance data.
+    # This feeds directly into sub-grouping and legend code matching.
+    model_texts = _collect_model_texts(doc)
+    if model_texts:
+        search_radius = _compute_search_radius(block_locations)
+        result.log("info",
+            f"Text label scan: {len(model_texts)} TEXT/MTEXT entities in model space, "
+            f"search radius: {search_radius:.0f} units"
+        )
+
+        text_match_counts = _associate_text_with_inserts(
+            block_instances, model_texts, search_radius
+        )
+
+        if text_match_counts:
+            total_labeled = sum(text_match_counts.values())
+            total_inserts_in_model = sum(block_counts.values())
+            # Show top labels found
+            top_labels = sorted(text_match_counts.items(), key=lambda x: -x[1])[:20]
+            label_summary = ", ".join(f'"{t}"×{c}' for t, c in top_labels)
+            result.log("success",
+                f"Nearby text labels found: {total_labeled}/{total_inserts_in_model} "
+                f"INSERT instances matched to text labels"
+            )
+            result.log("section",
+                f"TEXT LABEL SCAN — {len(text_match_counts)} unique labels across {total_labeled} instances"
+            )
+            for text, count in top_labels:
+                result.log("detail", f'  "{text}" — found near {count} INSERT instances')
+            logger.info(
+                f"=== TEXT LABEL SCAN: {total_labeled}/{total_inserts_in_model} instances labeled. "
+                f"Top: {label_summary} ==="
+            )
+        else:
+            result.log("info",
+                "Text label scan: no short text found near INSERT positions "
+                f"(radius={search_radius:.0f} units)"
+            )
+    else:
+        result.log("info", "Text label scan: no TEXT/MTEXT entities found in model space")
 
     # Step 5b: ATTRIB inspection — debug what attribute data we actually collected
     blocks_with_attribs = {bn: instances for bn, instances in block_instances.items()
