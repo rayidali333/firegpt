@@ -76,6 +76,31 @@ KNOWN_SYMBOLS = {
     "TB": "Terminal Box",
     "JB": "Junction Box",
     "WP": "Weatherproof",
+    # Full descriptive terms — Revit MEP exports use long block names like
+    # "IT-DVC-DET-Detectors - SMOKE DETECTOR-3159778-SheetName"
+    # where the device type is spelled out rather than abbreviated.
+    "SMOKE DETECTOR": "Smoke Detector",
+    "HEAT DETECTOR": "Heat Detector",
+    "DUCT DETECTOR": "Duct Detector",
+    "BEAM DETECTOR": "Beam Detector",
+    "FIRE DETECTOR": "Fire Detector",
+    "PULL STATION": "Pull Station",
+    "MANUAL STATION": "Pull Station",
+    "MANUAL CALL POINT": "Manual Call Point",
+    "BREAK GLASS": "Break Glass",
+    "HORN STROBE": "Horn/Strobe",
+    "FIRE ALARM CONTROL PANEL": "Fire Alarm Control Panel",
+    "FIRE ALARM TELEPHONE": "Fire Alarm Telephone",
+    "TELEPHONE JACK": "Fire Alarm Telephone",
+    "STROBE LIGHT": "Strobe",
+    "FLOW MONITOR": "Flow Monitor Module",
+    "SIGNAL CONTROL MODULE": "Signal Control Module",
+    "TELEPHONE CONTROL MODULE": "Telephone Control Module",
+    "DOOR HOLDER": "Fire Door Holder",
+    "ANNUNCIATOR PANEL": "Annunciator",
+    "NOTIFICATION APPLIANCE": "Notification Appliance",
+    "SOUND RACK": "Sound Rack",
+    "FIRE CONTROL PANEL": "Fire Alarm Control Panel",
 }
 
 # International terms — substring matched against normalized block names
@@ -221,6 +246,12 @@ SYMBOL_COLORS: dict[str, str] = {
     "Gas Shutoff Valve": "#C0392B",
     "First Aid Kit": "#27AE60",
     "Evacuation Route": "#2ECC71",
+    "Fire Alarm Telephone": "#34495E",
+    "Flow Monitor Module": "#27AE60",
+    "Signal Control Module": "#16A085",
+    "Telephone Control Module": "#2C3E50",
+    "Notification Appliance": "#3498DB",
+    "Sound Rack": "#7F8C8D",
 }
 
 DEFAULT_COLOR = "#95A5A6"
