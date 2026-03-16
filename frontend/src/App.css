@@ -1966,6 +1966,24 @@
   color: #5D4E37;
 }
 
+/* Verdict section highlight */
+.analysis-section-verdict {
+  border: 1px solid #C9A96E;
+  border-radius: 4px;
+  margin: 4px 0;
+  background: #FDF8F0;
+}
+
+.analysis-section-verdict .analysis-section-header {
+  background: #F5EBD8;
+}
+
+/* Anatomy section */
+.analysis-section-anatomy .analysis-section-body {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
 .analysis-success .analysis-message {
   color: var(--text);
   font-weight: 500;

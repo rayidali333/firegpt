@@ -50,6 +50,61 @@ function groupAnalysisSteps(analysis: AnalysisStep[]) {
   return groups;
 }
 
+/**
+ * Renders a detail message with inline color-coded tags.
+ * Recognizes patterns like [TEXT+GEOMETRY], [GEOMETRY-ONLY], [TEXT], [GEOM], [REF], etc.
+ */
+function DetailMessage({ message }: { message: string }) {
+  // Split on bracket-tags and colorize them
+  const TAG_COLORS: Record<string, { bg: string; fg: string }> = {
+    "TEXT+GEOMETRY": { bg: "#D4EDDA", fg: "#155724" },
+    "TEXT-ONLY": { bg: "#D4EDDA", fg: "#155724" },
+    "GEOMETRY-ONLY": { bg: "#FFF3CD", fg: "#856404" },
+    "NESTED-REFS-ONLY": { bg: "#D6E9F8", fg: "#0C5460" },
+    "EMPTY": { bg: "#E2E3E5", fg: "#383D41" },
+    "OTHER": { bg: "#E2E3E5", fg: "#383D41" },
+    "HAS-TEXT": { bg: "#D4EDDA", fg: "#155724" },
+    "NO-TEXT": { bg: "#F8D7DA", fg: "#721C24" },
+    "TEXT": { bg: "#D4EDDA", fg: "#155724" },
+    "GEOM": { bg: "#FFF3CD", fg: "#856404" },
+    "REF": { bg: "#D6E9F8", fg: "#0C5460" },
+  };
+
+  const parts = message.split(/(\[[A-Z][A-Z0-9+\-_]*\])/g);
+
+  return (
+    <span className="analysis-detail-message">
+      {parts.map((part, i) => {
+        const tagMatch = part.match(/^\[([A-Z][A-Z0-9+\-_]*)\]$/);
+        if (tagMatch) {
+          const tagName = tagMatch[1];
+          const colors = TAG_COLORS[tagName];
+          if (colors) {
+            return (
+              <span
+                key={i}
+                style={{
+                  background: colors.bg,
+                  color: colors.fg,
+                  padding: "1px 5px",
+                  borderRadius: 3,
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  marginRight: 4,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {tagName}
+              </span>
+            );
+          }
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </span>
+  );
+}
+
 function CollapsibleSection({
   title,
   steps,
@@ -61,7 +116,9 @@ function CollapsibleSection({
   sectionIndex: number;
   filter: string;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  // Auto-expand sections that contain diagnostic keywords
+  const isAnatomySection = title.includes("ANATOMY") || title.includes("VERDICT") || title.includes("NESTED BLOCK");
+  const [expanded, setExpanded] = useState(isAnatomySection);
 
   // Filter steps if there's a search query
   const filteredSteps = filter
@@ -73,8 +130,13 @@ function CollapsibleSection({
     return null;
   }
 
+  // Determine section type for styling
+  const isVerdict = title.includes("VERDICT");
+  const isAnatomy = title.includes("ANATOMY");
+  const isNested = title.includes("NESTED");
+
   return (
-    <div className="analysis-section">
+    <div className={`analysis-section${isVerdict ? " analysis-section-verdict" : ""}${isAnatomy ? " analysis-section-anatomy" : ""}`}>
       <div
         className="analysis-section-header"
         onClick={() => setExpanded(!expanded)}
@@ -83,14 +145,16 @@ function CollapsibleSection({
         <span className="analysis-section-chevron">
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
-        <span className="analysis-section-title">{title}</span>
+        <span className="analysis-section-title">
+          {isVerdict && "🔬 "}{isAnatomy && "🧬 "}{isNested && "🔗 "}{title}
+        </span>
         <span className="analysis-section-count">{steps.length} items</span>
       </div>
       {expanded && (
         <div className="analysis-section-body">
           {filteredSteps.map(({ step, index }) => (
             <div key={index} className="analysis-entry analysis-detail">
-              <span className="analysis-detail-message">{step.message}</span>
+              <DetailMessage message={step.message} />
             </div>
           ))}
         </div>

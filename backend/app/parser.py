@@ -1064,29 +1064,206 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
         if block.name in block_counts:
             block_def_metadata[block.name] = _collect_block_metadata(block, doc)
 
-    # Step 6b: Block definition content debug — show texts_inside and attdef_tags
-    blocks_with_content = {bn: meta for bn, meta in block_def_metadata.items()
-                           if meta.get("texts_inside") or meta.get("attdef_tags")}
-    if blocks_with_content:
+    # Step 6b: BLOCK DEFINITION ANATOMY — detailed entity breakdown for every block
+    # This is the key diagnostic for the "text hypothesis" — we need to know
+    # whether block definitions contain machine-readable TEXT/MTEXT/ATTDEF entities
+    # or just geometry (LINE, ARC, SOLID, HATCH, etc.)
+
+    TEXT_ENTITY_TYPES = {"TEXT", "MTEXT", "ATTDEF", "ATTRIB"}
+    GEOMETRY_ENTITY_TYPES = {
+        "LINE", "LWPOLYLINE", "POLYLINE", "CIRCLE", "ARC", "ELLIPSE",
+        "SPLINE", "SOLID", "3DSOLID", "HATCH", "POINT", "TRACE",
+        "3DFACE", "MESH", "REGION", "BODY", "SURFACE",
+    }
+
+    blocks_with_text = []
+    blocks_geometry_only = []
+    blocks_with_nested = []
+
+    result.log("section",
+        f"BLOCK DEFINITION ANATOMY — entity breakdown for {len(block_def_metadata)} blocks"
+    )
+
+    for bn in sorted(block_def_metadata.keys(), key=lambda x: -block_counts.get(x, 0)):
+        meta = block_def_metadata[bn]
+        entity_types = meta.get("entity_types", {})
+        texts_inside = meta.get("texts_inside", [])
+        attdef_tags = meta.get("attdef_tags", {})
+        description = meta.get("description", "")
+        count = block_counts.get(bn, 0)
+
+        # Classify this block
+        has_text_entities = any(et in entity_types for et in TEXT_ENTITY_TYPES)
+        has_geometry = any(et in entity_types for et in GEOMETRY_ENTITY_TYPES)
+        has_inserts = "INSERT" in entity_types
+        total_entities = sum(entity_types.values())
+
+        # Count text vs geometry entities
+        text_entity_count = sum(entity_types.get(et, 0) for et in TEXT_ENTITY_TYPES)
+        geometry_entity_count = sum(entity_types.get(et, 0) for et in GEOMETRY_ENTITY_TYPES)
+        insert_count = entity_types.get("INSERT", 0)
+
+        # Build classification tag
+        if has_text_entities and has_geometry:
+            tag = "TEXT+GEOMETRY"
+            blocks_with_text.append(bn)
+        elif has_text_entities:
+            tag = "TEXT-ONLY"
+            blocks_with_text.append(bn)
+        elif has_geometry:
+            tag = "GEOMETRY-ONLY"
+            blocks_geometry_only.append(bn)
+        elif has_inserts:
+            tag = "NESTED-REFS-ONLY"
+        elif total_entities == 0:
+            tag = "EMPTY"
+        else:
+            tag = "OTHER"
+
+        if has_inserts:
+            blocks_with_nested.append(bn)
+
+        # Entity type summary sorted by count
+        et_parts = []
+        for et, c in sorted(entity_types.items(), key=lambda x: -x[1]):
+            marker = ""
+            if et in TEXT_ENTITY_TYPES:
+                marker = " [TEXT]"
+            elif et in GEOMETRY_ENTITY_TYPES:
+                marker = " [GEOM]"
+            elif et == "INSERT":
+                marker = " [REF]"
+            et_parts.append(f"{et}={c}{marker}")
+
+        detail_line = f'  [{tag}] "{bn}" (×{count}) — {total_entities} entities: {", ".join(et_parts)}'
+
+        # Add text content if found
+        extras = []
+        if texts_inside:
+            extras.append(f'texts_found={texts_inside[:5]}')
+        if attdef_tags:
+            extras.append(f'attdefs={dict(list(attdef_tags.items())[:5])}')
+        if description:
+            extras.append(f'desc="{description[:60]}"')
+        if has_inserts and bn in nested_ref_counts:
+            nested = nested_ref_counts[bn]
+            extras.append(f'nested_blocks={dict(list(nested.items())[:5])}')
+
+        if extras:
+            detail_line += f' | {", ".join(extras)}'
+
+        result.log("detail", detail_line)
+
+        # Console logging with full detail
+        logger.info(f"BLOCK ANATOMY: {detail_line}")
+
+    # Step 6c: Nested block deep inspection — recursively check what nested blocks contain
+    # When a block contains INSERT references to other blocks, we need to check those too.
+    # The identifying text might be in a child block, not the parent.
+    if blocks_with_nested:
         result.log("section",
-            f"BLOCK DEFINITION CONTENT — {len(blocks_with_content)}/{len(block_def_metadata)} blocks have text/attdefs"
+            f"NESTED BLOCK INSPECTION — {len(blocks_with_nested)} blocks contain INSERT references to other blocks"
         )
-        for bn in sorted(blocks_with_content.keys()):
-            meta = blocks_with_content[bn]
-            parts = []
-            if meta.get("texts_inside"):
-                parts.append(f'texts={meta["texts_inside"][:5]}')
-            if meta.get("attdef_tags"):
-                parts.append(f'attdefs={dict(list(meta["attdef_tags"].items())[:5])}')
-            if meta.get("description"):
-                parts.append(f'desc="{meta["description"][:80]}"')
-            result.log("detail",
-                f'  "{bn}" (×{block_counts.get(bn, "?")}) — {", ".join(parts)}'
-            )
+        for bn in blocks_with_nested:
+            if bn not in nested_ref_counts:
+                continue
+            nested = nested_ref_counts[bn]
+            for child_name, ref_count in sorted(nested.items()):
+                # Get child block definition metadata
+                child_meta = {}
+                try:
+                    child_block = doc.blocks.get(child_name)
+                    if child_block:
+                        child_meta = _collect_block_metadata(child_block, doc)
+                except Exception:
+                    pass
+
+                child_etypes = child_meta.get("entity_types", {})
+                child_texts = child_meta.get("texts_inside", [])
+                child_attdefs = child_meta.get("attdef_tags", {})
+                child_has_text = any(et in child_etypes for et in TEXT_ENTITY_TYPES)
+                child_total = sum(child_etypes.values())
+
+                child_tag = "HAS-TEXT" if child_has_text else "NO-TEXT"
+                et_str = ", ".join(f"{et}={c}" for et, c in sorted(child_etypes.items(), key=lambda x: -x[1]))
+
+                child_line = (
+                    f'  "{bn}" → "{child_name}" (×{ref_count}) [{child_tag}] '
+                    f'{child_total} entities: {et_str}'
+                )
+                if child_texts:
+                    child_line += f' | texts={child_texts[:5]}'
+                if child_attdefs:
+                    child_line += f' | attdefs={dict(list(child_attdefs.items())[:3])}'
+
+                result.log("detail", child_line)
+                logger.info(f"NESTED BLOCK: {child_line}")
+
+    # Step 6d: TEXT HYPOTHESIS VERDICT — summarize what we found
+    total_blocks = len(block_def_metadata)
+    n_with_text = len(blocks_with_text)
+    n_geom_only = len(blocks_geometry_only)
+    n_nested = len(blocks_with_nested)
+
+    # Also check: do the GEOMETRY-ONLY blocks have any nearby TEXT from model space?
+    geom_only_with_nearby_text = []
+    geom_only_no_text_at_all = []
+    for bn in blocks_geometry_only:
+        instances = block_instances.get(bn, [])
+        has_nearby = any(
+            inst.get("attribs", {}).get("_NEARBY_LABEL")
+            for inst in instances
+        )
+        if has_nearby:
+            geom_only_with_nearby_text.append(bn)
+        else:
+            geom_only_no_text_at_all.append(bn)
+
+    result.log("section",
+        f"TEXT HYPOTHESIS VERDICT — {total_blocks} blocks analyzed"
+    )
+    result.log("detail",
+        f"  Blocks with TEXT/MTEXT/ATTDEF inside definition: {n_with_text}/{total_blocks}"
+    )
+    result.log("detail",
+        f"  Blocks with GEOMETRY only (no text entities): {n_geom_only}/{total_blocks}"
+    )
+    result.log("detail",
+        f"  Blocks with nested INSERT references: {n_nested}/{total_blocks}"
+    )
+
+    if geom_only_with_nearby_text:
+        result.log("detail",
+            f"  Geometry-only blocks WITH nearby text labels: {len(geom_only_with_nearby_text)} — "
+            + ", ".join(f'"{bn}"' for bn in geom_only_with_nearby_text[:8])
+        )
+    if geom_only_no_text_at_all:
+        result.log("detail",
+            f"  Geometry-only blocks with NO text anywhere: {len(geom_only_no_text_at_all)} — "
+            + ", ".join(f'"{bn}"' for bn in geom_only_no_text_at_all[:8])
+        )
+
+    if n_geom_only > n_with_text:
+        verdict = (
+            f"MOSTLY GEOMETRY: {n_geom_only}/{total_blocks} blocks have NO machine-readable text. "
+            "Symbol identification relies on visual appearance, not text extraction. "
+            "This is consistent with Revit/MEP exports where labels are rendered as geometry."
+        )
+        result.log("warning", verdict)
+    elif n_with_text > n_geom_only:
+        verdict = (
+            f"TEXT AVAILABLE: {n_with_text}/{total_blocks} blocks contain TEXT/MTEXT/ATTDEF entities. "
+            "Text-based matching should work for most symbols in this drawing."
+        )
+        result.log("success", verdict)
     else:
-        result.log("section",
-            f"BLOCK DEFINITION CONTENT — 0/{len(block_def_metadata)} blocks have text or attdef content"
+        verdict = (
+            f"MIXED: {n_with_text} blocks have text, {n_geom_only} are geometry-only. "
+            "Both text matching and visual matching are needed."
         )
+        result.log("info", verdict)
+
+    logger.info(f"TEXT HYPOTHESIS VERDICT: {verdict}")
 
     # Step 7: Propagate counts through nesting hierarchy (BFS)
     # IMPORTANT: Only propagate to blocks that were directly inserted on the
