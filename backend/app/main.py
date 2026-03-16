@@ -383,6 +383,49 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                     elif len(seg_upper) >= 2:
                         checked_values.append(f"name_segment={seg_upper}")
 
+            # Strategy 6: Match legend NAMES against block name description text
+            # Handles Revit-style blocks like "IT-DVC-DET-Detectors - SMOKE DETECTOR-3159778-..."
+            # where the legend code ("S") doesn't appear but the device name ("Smoke Detector") does.
+            # Uses multi-word matching: extract the descriptive part of the block name and check
+            # if any legend symbol name appears as a substring.
+            if not matched_legend_sym:
+                block_name_upper = block.block_name.upper()
+                # Build a name-based lookup: legend name (uppercase) → LegendSymbol
+                # Sort by name length (longest first) to prefer more specific matches
+                # e.g., "ABOVE FALSE CEILING PHOTOELECTRIC SMOKE DETECTOR" before "SMOKE DETECTOR"
+                best_match_len = 0
+                for ls in sorted(legend.symbols, key=lambda s: -len(s.name)):
+                    legend_name_upper = ls.name.upper().strip()
+                    # Require at least 2 words to avoid false positives on short names
+                    word_count = len(legend_name_upper.split())
+                    if word_count < 2:
+                        continue
+                    if legend_name_upper in block_name_upper and len(legend_name_upper) > best_match_len:
+                        matched_legend_sym = ls
+                        match_source = f"name_description_match=\"{ls.name}\""
+                        best_match_len = len(legend_name_upper)
+                        # Don't break — keep looking for a longer (more specific) match
+
+                # Also try matching key descriptive phrases from block name against legend names
+                # e.g., block "MANUAL STATION INDOOR" → legend "Manual Call Station"
+                if not matched_legend_sym:
+                    # Extract descriptive phrases from block name (after the Revit prefix)
+                    # "IT-DVC-DET-Detectors - SMOKE DETECTOR-3159778-..." → "SMOKE DETECTOR"
+                    # "IT-LGT-ALR-Siren With Strobe - ALARM SIREN INDOOR-..." → "ALARM SIREN"
+                    desc_match = re.search(r' - ([A-Z][A-Z /_]+?)(?:-\d|-V\d|$)', block_name_upper)
+                    if desc_match:
+                        block_desc = desc_match.group(1).strip()
+                        checked_values.append(f"desc_phrase={block_desc}")
+                        for ls in sorted(legend.symbols, key=lambda s: -len(s.name)):
+                            legend_name_upper = ls.name.upper().strip()
+                            # Check if the descriptive phrase contains the legend name or vice versa
+                            if len(legend_name_upper) >= 5 and (
+                                legend_name_upper in block_desc or block_desc in legend_name_upper
+                            ):
+                                matched_legend_sym = ls
+                                match_source = f"desc_phrase_match=\"{ls.name}\" (from \"{block_desc}\")"
+                                break
+
             if matched_legend_sym:
                 # DIRECT MATCH — no AI needed
                 direct_matched_count += 1
@@ -599,13 +642,26 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                         matched_legend = legend_lookup.get(label.upper())
                         match_method = "exact" if matched_legend else None
                         if not matched_legend:
-                            # Fuzzy: find best match
+                            # Fuzzy matching — prefer the closest match by:
+                            # 1. The AI label is a substring of a legend name, or vice versa
+                            # 2. Among all matches, prefer the SHORTEST legend name
+                            #    (avoids "Smoke Detector" matching "Above False Ceiling
+                            #     Photoelectric Smoke Detector" instead of "Smoke Detector")
                             label_upper = label.upper()
+                            best_fuzzy = None
+                            best_fuzzy_len = float('inf')
                             for lname, ls in legend_lookup.items():
-                                if lname in label_upper or label_upper in lname:
-                                    matched_legend = ls
-                                    match_method = "fuzzy"
+                                if lname == label_upper:
+                                    best_fuzzy = ls
+                                    best_fuzzy_len = 0
                                     break
+                                if label_upper in lname or lname in label_upper:
+                                    if len(lname) < best_fuzzy_len:
+                                        best_fuzzy = ls
+                                        best_fuzzy_len = len(lname)
+                            if best_fuzzy:
+                                matched_legend = best_fuzzy
+                                match_method = "fuzzy"
 
                         # Source/confidence based on whether the label actually
                         # matches a real legend entry — not just whether a legend
