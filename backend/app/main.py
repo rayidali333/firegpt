@@ -321,6 +321,29 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
             f"{', '.join(sorted(legend_code_lookup.keys())[:30])}"
         )
 
+        # Pre-compute legend names sorted by length (longest first) for Strategy 6.
+        # Longest-first ensures the most specific match wins (e.g., "Above False Ceiling
+        # Photoelectric Smoke Detector" matches before "Smoke Detector").
+        # Filter to 2+ word names to avoid false positives on single-word names.
+        _NOISE_WORDS = {"FOR", "THE", "AND", "WITH", "TO", "OF", "IN", "AT", "ON", "A", "AN"}
+        legend_names_by_length: list["LegendSymbol"] = []
+        # Separate dict for pre-computed match words (avoids monkey-patching Pydantic model)
+        legend_match_words: dict[str, list[str]] = {}  # keyed by "code:name" to handle duplicates
+        for ls in sorted(legend.symbols, key=lambda s: -len(s.name)):
+            name_upper = ls.name.upper().strip()
+            if len(name_upper.split()) < 2:
+                continue
+            # Pre-compute significant words for word-overlap matching (Strategy 6c).
+            # Strip noise words, parenthesized suffixes, and short tokens.
+            clean_name = re.sub(r'\([^)]*\)', '', name_upper)  # remove (Weatherproof) etc.
+            words = [
+                w for w in re.split(r'[-_\s.,/]+', clean_name)
+                if len(w) >= 2 and w not in _NOISE_WORDS
+            ]
+            key = f"{ls.code}:{ls.name}"
+            legend_match_words[key] = words
+            legend_names_by_length.append(ls)
+
         # Track per-label colors for direct matches
         direct_label_color_map: dict[str, str] = {}
         direct_color_index = 0
@@ -386,45 +409,79 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
             # Strategy 6: Match legend NAMES against block name description text
             # Handles Revit-style blocks like "IT-DVC-DET-Detectors - SMOKE DETECTOR-3159778-..."
             # where the legend code ("S") doesn't appear but the device name ("Smoke Detector") does.
-            # Uses multi-word matching: extract the descriptive part of the block name and check
-            # if any legend symbol name appears as a substring.
+            #
+            # Three sub-strategies, tried in order:
+            #   6a. Full legend name substring match (longest legend name wins for specificity)
+            #   6b. Block description extracted from Revit naming pattern, matched bidirectionally
+            #   6c. Word-overlap: ALL significant words from a legend name appear in the block name
             if not matched_legend_sym:
                 block_name_upper = block.block_name.upper()
-                # Build a name-based lookup: legend name (uppercase) → LegendSymbol
-                # Sort by name length (longest first) to prefer more specific matches
-                # e.g., "ABOVE FALSE CEILING PHOTOELECTRIC SMOKE DETECTOR" before "SMOKE DETECTOR"
-                best_match_len = 0
-                for ls in sorted(legend.symbols, key=lambda s: -len(s.name)):
-                    legend_name_upper = ls.name.upper().strip()
-                    # Require at least 2 words to avoid false positives on short names
-                    word_count = len(legend_name_upper.split())
-                    if word_count < 2:
-                        continue
-                    if legend_name_upper in block_name_upper and len(legend_name_upper) > best_match_len:
-                        matched_legend_sym = ls
-                        match_source = f"name_description_match=\"{ls.name}\""
-                        best_match_len = len(legend_name_upper)
-                        # Don't break — keep looking for a longer (more specific) match
 
-                # Also try matching key descriptive phrases from block name against legend names
-                # e.g., block "MANUAL STATION INDOOR" → legend "Manual Call Station"
+                # 6a: Check if any legend name (2+ words) appears as a substring in the block name.
+                # Pre-sorted longest-first so the first hit is the most specific match.
+                for ls in legend_names_by_length:
+                    legend_name_upper = ls.name.upper().strip()
+                    if legend_name_upper in block_name_upper:
+                        matched_legend_sym = ls
+                        match_source = f"name_substring=\"{ls.name}\""
+                        checked_values.append(f"name_substr={legend_name_upper} ✓")
+                        break
+                else:
+                    checked_values.append("name_substr=none")
+
+                # 6b: Extract the device description from Revit-style block names and match
+                # bidirectionally against legend names.
+                # "IT-DVC-DET-Detectors - SMOKE DETECTOR-3159778-..." → "SMOKE DETECTOR"
+                # "IT-LGT-ALR-Siren With Strobe - ALARM SIREN INDOOR-..." → "ALARM SIREN INDOOR"
                 if not matched_legend_sym:
-                    # Extract descriptive phrases from block name (after the Revit prefix)
-                    # "IT-DVC-DET-Detectors - SMOKE DETECTOR-3159778-..." → "SMOKE DETECTOR"
-                    # "IT-LGT-ALR-Siren With Strobe - ALARM SIREN INDOOR-..." → "ALARM SIREN"
-                    desc_match = re.search(r' - ([A-Z][A-Z /_]+?)(?:-\d|-V\d|$)', block_name_upper)
+                    # Try multiple patterns to extract the descriptive portion:
+                    # Pattern 1: "prefix - DESCRIPTION-number..." (Revit standard)
+                    # Pattern 2: "prefix - DESCRIPTION-Vnumber..." (Revit variant suffix)
+                    desc_match = re.search(
+                        r' - ([A-Z][A-Z /_()\d]+?)(?:-\d{4,}|-V\d)',
+                        block_name_upper,
+                    )
                     if desc_match:
                         block_desc = desc_match.group(1).strip()
                         checked_values.append(f"desc_phrase={block_desc}")
-                        for ls in sorted(legend.symbols, key=lambda s: -len(s.name)):
-                            legend_name_upper = ls.name.upper().strip()
-                            # Check if the descriptive phrase contains the legend name or vice versa
-                            if len(legend_name_upper) >= 5 and (
-                                legend_name_upper in block_desc or block_desc in legend_name_upper
-                            ):
+                        for ls in legend_names_by_length:
+                            ln = ls.name.upper().strip()
+                            # Bidirectional: legend name in desc, or desc in legend name
+                            if ln in block_desc or block_desc in ln:
                                 matched_legend_sym = ls
-                                match_source = f"desc_phrase_match=\"{ls.name}\" (from \"{block_desc}\")"
+                                match_source = f"desc_match=\"{ls.name}\" (desc=\"{block_desc}\")"
                                 break
+
+                # 6c: Word-overlap — check if ALL significant words from a legend name
+                # appear somewhere in the block name. This catches cases like:
+                #   block "...SIGNAL CONTROL MODULE-3768932-..." matches legend "Signal Control Module"
+                #   even though the full legend name "Signal Control Module (Weatherproof)" doesn't
+                #   appear as a substring (because of the "(Weatherproof)" suffix).
+                #
+                # When multiple legend entries match (e.g., "Fire Alarm Siren" and
+                # "Fire Alarm Siren (Weatherproof)" both have the same core words),
+                # prefer the one with the SHORTEST name — that's the base/indoor variant.
+                # The weatherproof variant should only match blocks that explicitly say
+                # "WEATHERPROOF" (which would have been caught by 6a substring match).
+                if not matched_legend_sym:
+                    best_word_match: LegendSymbol | None = None
+                    best_word_match_name_len = float('inf')
+                    best_word_match_words: list[str] = []
+                    for ls in legend_names_by_length:
+                        key = f"{ls.code}:{ls.name}"
+                        legend_words = legend_match_words.get(key, [])
+                        if len(legend_words) < 2:
+                            continue
+                        if all(w in block_name_upper for w in legend_words):
+                            name_len = len(ls.name)
+                            if name_len < best_word_match_name_len:
+                                best_word_match = ls
+                                best_word_match_name_len = name_len
+                                best_word_match_words = legend_words
+                    if best_word_match:
+                        matched_legend_sym = best_word_match
+                        match_source = f"word_overlap=\"{best_word_match.name}\" (words: {best_word_match_words})"
+                        checked_values.append(f"word_overlap={best_word_match.name} ✓")
 
             if matched_legend_sym:
                 # DIRECT MATCH — no AI needed
