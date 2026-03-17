@@ -464,6 +464,7 @@ async def _extract_symbols_from_page(
     media_type: str,
     page_context: str,
     max_tokens: int = 32768,
+    prompt_variant: str = "default",
 ) -> list[dict]:
     """Extract symbol definitions from a single legend page or image.
 
@@ -473,6 +474,7 @@ async def _extract_symbols_from_page(
         media_type: MIME type ("image/png", "application/pdf", etc.).
         page_context: Human-readable context, e.g. "page 2 of 3" or "".
         max_tokens: Maximum output tokens for the API call.
+        prompt_variant: Extraction strategy — "default", "bottom_up", or "section_by_section".
 
     Returns:
         List of raw symbol dicts (not yet converted to LegendSymbol).
@@ -488,6 +490,25 @@ async def _extract_symbols_from_page(
         header = (
             "You are analyzing a construction drawing legend/key sheet. "
             "Your task is to extract EVERY SINGLE symbol definition shown — do NOT skip any rows."
+        )
+
+    # Variant-specific scanning instructions
+    if prompt_variant == "bottom_up":
+        scan_instruction = (
+            "SCANNING ORDER: Start from the BOTTOM of the page and work UPWARD. "
+            "Read the LAST section first, then the second-to-last, and so on until you reach the top. "
+            "This ensures you don't miss entries at the bottom of the page."
+        )
+    elif prompt_variant == "section_by_section":
+        scan_instruction = (
+            "SCANNING ORDER: First, list ALL section headers you see on this page. "
+            "Then process each section one at a time, counting the rows in each section BEFORE extracting. "
+            "After extracting all sections, verify your total matches the sum of your per-section counts."
+        )
+    else:
+        scan_instruction = (
+            "BEFORE YOU START: Scan the entire legend and count the total number of symbol rows across ALL sections. "
+            "Then extract every single one. Your JSON array should have that exact number of entries."
         )
 
     prompt = f"""{header}
@@ -506,8 +527,7 @@ CRITICAL RULES:
 
 {_LEGEND_FIELD_RULES}
 
-BEFORE YOU START: Scan the entire legend and count the total number of symbol rows across ALL sections.
-Then extract every single one. Your JSON array should have that exact number of entries.
+{scan_instruction}
 
 Respond with ONLY a JSON array:
 [{{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "shape": "hexagon with S inside", "shape_code": "hexagon", "filled": false}}, ...]"""
@@ -515,8 +535,9 @@ Respond with ONLY a JSON array:
     content_block = _build_content_block(image_data, media_type)
 
     log_label = f"[{page_context}] " if page_context else ""
+    variant_label = f" ({prompt_variant})" if prompt_variant != "default" else ""
     logger.info(
-        f"  {log_label}Sending {media_type} to Claude "
+        f"  {log_label}Sending {media_type} to Claude{variant_label} "
         f"(max_tokens={max_tokens})..."
     )
 
@@ -534,7 +555,7 @@ Respond with ONLY a JSON array:
         raise
 
     logger.info(
-        f"  {log_label}Response: stop_reason={response.stop_reason}, "
+        f"  {log_label}Response{variant_label}: stop_reason={response.stop_reason}, "
         f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
     )
 
@@ -556,7 +577,7 @@ Respond with ONLY a JSON array:
         logger.error(f"  {log_label}Response (first 500): {response_text[:500]}")
         return []
 
-    logger.info(f"  {log_label}Extracted {len(raw_symbols)} symbols")
+    logger.info(f"  {log_label}Extracted {len(raw_symbols)} symbols{variant_label}")
 
     # ── Truncation recovery: if truncated, retry once with 2x budget ──
     if was_truncated and max_tokens < 65536:
@@ -568,6 +589,7 @@ Respond with ONLY a JSON array:
         retry_symbols = await _extract_symbols_from_page(
             api_client, image_data, media_type, page_context,
             max_tokens=retry_budget,
+            prompt_variant=prompt_variant,
         )
         # Use whichever attempt returned more symbols
         if len(retry_symbols) > len(raw_symbols):
@@ -581,6 +603,163 @@ Respond with ONLY a JSON array:
         )
 
     return raw_symbols
+
+
+async def _multi_pass_extract_page(
+    api_client: AsyncAnthropic,
+    image_data: bytes,
+    media_type: str,
+    page_context: str,
+) -> list[dict]:
+    """Run multiple extraction passes with varied prompts, then union the results.
+
+    Each pass uses a different scanning strategy (top-down, bottom-up,
+    section-by-section) to catch symbols that any single pass might miss due
+    to attention drift on dense pages. Results are merged by (code, name)
+    deduplication — first occurrence wins.
+
+    Returns the union of all passes (deduplicated).
+    """
+    log_label = f"[{page_context}] " if page_context else ""
+
+    # Pass 1: default top-down scan
+    pass1 = await _extract_symbols_from_page(
+        api_client, image_data, media_type, page_context,
+        prompt_variant="default",
+    )
+    logger.info(f"  {log_label}Multi-pass: pass 1 (default) → {len(pass1)} symbols")
+
+    # Pass 2: bottom-up scan — catches symbols at the bottom that top-down misses
+    pass2 = await _extract_symbols_from_page(
+        api_client, image_data, media_type, page_context,
+        prompt_variant="bottom_up",
+    )
+    logger.info(f"  {log_label}Multi-pass: pass 2 (bottom_up) → {len(pass2)} symbols")
+
+    # Pass 3: section-by-section — forces explicit section counting before extraction
+    pass3 = await _extract_symbols_from_page(
+        api_client, image_data, media_type, page_context,
+        prompt_variant="section_by_section",
+    )
+    logger.info(f"  {log_label}Multi-pass: pass 3 (section_by_section) → {len(pass3)} symbols")
+
+    # Union all passes — deduplicate by (code, name)
+    union = _deduplicate_symbols(pass1 + pass2 + pass3)
+
+    # Log what extra symbols the additional passes found
+    pass1_codes = {(s.get("code", "").upper().strip(), s.get("name", "").upper().strip()) for s in pass1}
+    new_from_pass2 = [s for s in pass2 if (s.get("code", "").upper().strip(), s.get("name", "").upper().strip()) not in pass1_codes]
+    all_so_far = pass1_codes | {(s.get("code", "").upper().strip(), s.get("name", "").upper().strip()) for s in pass2}
+    new_from_pass3 = [s for s in pass3 if (s.get("code", "").upper().strip(), s.get("name", "").upper().strip()) not in all_so_far]
+
+    if new_from_pass2:
+        logger.info(
+            f"  {log_label}Multi-pass: pass 2 found {len(new_from_pass2)} NEW symbols: "
+            + ", ".join(f'"{s.get("code", "")}"' for s in new_from_pass2[:10])
+        )
+    if new_from_pass3:
+        logger.info(
+            f"  {log_label}Multi-pass: pass 3 found {len(new_from_pass3)} NEW symbols: "
+            + ", ".join(f'"{s.get("code", "")}"' for s in new_from_pass3[:10])
+        )
+
+    logger.info(
+        f"  {log_label}Multi-pass union: {len(pass1)} + {len(new_from_pass2)} + {len(new_from_pass3)} "
+        f"= {len(union)} unique symbols"
+    )
+    return union
+
+
+def _render_page_to_crops(page_pdf_bytes: bytes, dpi: int = 300) -> list[tuple[bytes, str]]:
+    """Render a single-page PDF into overlapping half-page PNG crops.
+
+    Splits the page into top-half and bottom-half with 15% overlap in the
+    middle to avoid cutting through symbol rows. Higher DPI than the full-page
+    render makes small text and subscripts more legible.
+
+    Returns list of (png_bytes, region_label) tuples.
+    """
+    try:
+        import fitz
+    except ImportError:
+        logger.warning("PyMuPDF not installed — cannot render page crops")
+        return []
+
+    try:
+        doc = fitz.open(stream=page_pdf_bytes, filetype="pdf")
+        page = doc[0]
+        rect = page.rect
+        page_height = rect.height
+
+        # Define overlapping regions: top 57.5% and bottom 57.5% (15% overlap)
+        overlap_fraction = 0.15
+        top_clip = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y0 + page_height * (0.5 + overlap_fraction / 2))
+        bottom_clip = fitz.Rect(rect.x0, rect.y0 + page_height * (0.5 - overlap_fraction / 2), rect.x1, rect.y1)
+
+        crops = []
+        for clip, label in [(top_clip, "top-half"), (bottom_clip, "bottom-half")]:
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
+            pix = page.get_pixmap(matrix=mat, clip=clip)
+            png_bytes = pix.tobytes("png")
+            crops.append((png_bytes, label))
+
+        doc.close()
+        return crops
+    except Exception as e:
+        logger.warning(f"Failed to render page crops: {e}")
+        return []
+
+
+async def _cropped_extraction_pass(
+    api_client: AsyncAnthropic,
+    page_pdf_bytes: bytes,
+    page_context: str,
+    existing_symbols: list[dict],
+) -> list[dict]:
+    """Extract symbols from high-res cropped regions of a page.
+
+    Renders the page into overlapping top/bottom halves at high DPI, then
+    extracts from each crop. Deduplicates against already-known symbols and
+    returns only genuinely new ones.
+    """
+    log_label = f"[{page_context}] " if page_context else ""
+
+    crops = _render_page_to_crops(page_pdf_bytes)
+    if not crops:
+        return []
+
+    existing_keys = {
+        (s.get("code", "").upper().strip(), s.get("name", "").upper().strip())
+        for s in existing_symbols
+    }
+
+    all_crop_symbols: list[dict] = []
+    for crop_bytes, region_label in crops:
+        crop_context = f"{page_context} {region_label}" if page_context else region_label
+        crop_symbols = await _extract_symbols_from_page(
+            api_client, crop_bytes, "image/png", crop_context,
+        )
+        logger.info(f"  {log_label}Crop ({region_label}): {len(crop_symbols)} symbols")
+        all_crop_symbols.extend(crop_symbols)
+
+    # Deduplicate crop results internally
+    crop_unique = _deduplicate_symbols(all_crop_symbols)
+
+    # Filter to only genuinely new symbols
+    new_symbols = [
+        s for s in crop_unique
+        if (s.get("code", "").upper().strip(), s.get("name", "").upper().strip()) not in existing_keys
+    ]
+
+    if new_symbols:
+        logger.info(
+            f"  {log_label}Crop extraction found {len(new_symbols)} NEW symbols: "
+            + ", ".join(f'"{s.get("code", "")}"' for s in new_symbols[:10])
+        )
+    else:
+        logger.info(f"  {log_label}Crop extraction found no new symbols beyond existing {len(existing_symbols)}")
+
+    return new_symbols
 
 
 def _deduplicate_symbols(symbols: list[dict]) -> list[dict]:
@@ -771,7 +950,7 @@ async def _reconciliation_pass(
     # ── Build the prompt ──
     if target_counts:
         # Gap-aware reconciliation: compare extracted vs expected per section
-        # Apply 15% tolerance — pre-scan counts are estimates, not ground truth
+        # Apply 10% tolerance — pre-scan counts are estimates, not ground truth
         comparison_lines = []
         gap_sections: list[tuple[str, int, int, int]] = []  # (cat, expected, actual, missing)
 
@@ -781,8 +960,9 @@ async def _reconciliation_pass(
         for section in all_sections:
             expected = target_counts.get(section, 0)
             actual = len(by_category.get(section, []))
-            # Allow 15% tolerance — if we're within 85% of expected, consider it OK
-            tolerance_threshold = max(1, int(expected * 0.85))
+            # Allow 10% tolerance — if we're within 90% of expected, consider it OK
+            # (tighter than before since multi-pass extraction gets closer to target)
+            tolerance_threshold = max(1, int(expected * 0.90))
             if actual < tolerance_threshold:
                 gap = expected - actual
                 gap_sections.append((section, expected, actual, gap))
@@ -976,15 +1156,16 @@ async def parse_legend_with_vision(
 
     Pipeline:
       0. Pre-scan: count symbols per section for ground-truth verification targets.
-      1. For multi-page PDFs: split into pages, extract symbols from each page
-         separately so Claude can focus on 15-30 symbols at a time instead of 100+.
-      2. For single-page PDFs or images: extract in a single call.
+      1. For multi-page PDFs: split into pages.
+      2. Multi-pass extraction: run 3 varied prompts per page (top-down, bottom-up,
+         section-by-section) and union results to catch attention-drift misses.
       3. Merge and deduplicate across pages.
-      4. Gap-targeted reconciliation: compare extracted counts against pre-scan
-         targets, then ask Claude to find the specific missing rows in each
-         under-extracted section.
-      5. Convert raw dicts to LegendSymbol with domain-knowledge shape corrections.
-      6. Generate SVG icons for each symbol.
+      4. Gap check: if extracted count is still below pre-scan target, run high-res
+         cropped extraction (top/bottom halves at 300 DPI) to recover small-text symbols.
+      5. Gap-targeted reconciliation: compare extracted counts against pre-scan
+         targets, then ask Claude to find the specific missing rows.
+      6. Convert raw dicts to LegendSymbol with domain-knowledge shape corrections.
+      7. Generate SVG icons for each symbol.
     """
     import uuid
 
@@ -1018,42 +1199,47 @@ async def parse_legend_with_vision(
         f"Strategy: {'multi-page PDF (' + str(page_count) + ' pages)' if is_multi_page else 'single page/image'}"
     )
 
-    # ── Step 2: Extract symbols ──
+    # ── Step 2: Multi-pass extraction ──
+    # Each page gets 3 extraction passes with varied prompts (top-down, bottom-up,
+    # section-by-section). The union catches symbols that any single pass misses.
     all_raw_symbols: list[dict] = []
+    # Keep per-page PDF bytes for potential crop pass later
+    page_pdf_map: list[tuple[bytes, str]] = []  # (pdf_bytes, page_context)
 
     if is_multi_page:
-        # Split PDF into individual single-page PDFs and extract from each
-        # independently. Uses native PDF format (not PNG) to preserve text quality.
         page_pdfs = _split_pdf_to_pages(image_data)
 
         if not page_pdfs:
-            # Fallback: pymupdf failed, try single-shot with full PDF
             logger.warning(
-                "PDF page splitting failed — falling back to single-shot extraction"
+                "PDF page splitting failed — falling back to single-shot multi-pass extraction"
             )
-            all_raw_symbols = await _extract_symbols_from_page(
+            page_symbols = await _multi_pass_extract_page(
                 api_client, image_data, media_type, page_context="",
             )
+            all_raw_symbols = page_symbols
         else:
             for page_data, page_num in page_pdfs:
                 page_context = f"page {page_num} of {page_count}"
-                page_symbols = await _extract_symbols_from_page(
+                page_symbols = await _multi_pass_extract_page(
                     api_client, page_data, "application/pdf", page_context,
                 )
                 logger.info(
-                    f"  Page {page_num}: extracted {len(page_symbols)} symbols"
+                    f"  Page {page_num}: multi-pass extracted {len(page_symbols)} symbols"
                 )
                 all_raw_symbols.extend(page_symbols)
+                page_pdf_map.append((page_data, page_context))
 
             logger.info(
                 f"All pages complete: {len(all_raw_symbols)} raw symbols "
-                f"across {page_count} pages"
+                f"across {page_count} pages (multi-pass)"
             )
     else:
-        # Single page PDF or image — one extraction call
-        all_raw_symbols = await _extract_symbols_from_page(
+        # Single page PDF or image — multi-pass extraction
+        all_raw_symbols = await _multi_pass_extract_page(
             api_client, image_data, media_type, page_context="",
         )
+        if is_pdf:
+            page_pdf_map.append((image_data, ""))
 
     if not all_raw_symbols:
         logger.error("No symbols extracted from any page")
@@ -1071,7 +1257,43 @@ async def parse_legend_with_vision(
     else:
         logger.info(f"Deduplication: {len(unique_symbols)} symbols (no duplicates)")
 
-    # ── Step 4: Reconciliation pass ──
+    # ── Step 4: Cropped extraction for dense pages ──
+    # If we have pre-scan targets and are still significantly below them,
+    # render each page as high-res top/bottom crops and extract again.
+    # This catches small text and symbols lost at full-page resolution.
+    if target_counts and page_pdf_map:
+        expected_total = sum(target_counts.values())
+        current_total = len(unique_symbols)
+        gap_pct = (expected_total - current_total) / max(expected_total, 1)
+        if gap_pct > 0.08:  # More than 8% gap — worth trying crops
+            logger.info(
+                f"Crop pass triggered: {current_total}/{expected_total} symbols "
+                f"({gap_pct:.0%} gap). Rendering high-res crops..."
+            )
+            for page_data, page_ctx in page_pdf_map:
+                try:
+                    new_from_crops = await _cropped_extraction_pass(
+                        api_client, page_data, page_ctx, unique_symbols,
+                    )
+                    if new_from_crops:
+                        unique_symbols.extend(new_from_crops)
+                        unique_symbols = _deduplicate_symbols(unique_symbols)
+                except Exception as crop_err:
+                    logger.warning(
+                        f"Crop extraction failed for {page_ctx} (non-fatal): "
+                        f"{type(crop_err).__name__}: {crop_err}"
+                    )
+            logger.info(
+                f"After crop pass: {len(unique_symbols)} symbols "
+                f"(was {current_total})"
+            )
+        else:
+            logger.info(
+                f"Crop pass skipped: {current_total}/{expected_total} symbols "
+                f"({gap_pct:.0%} gap — within 8% tolerance)"
+            )
+
+    # ── Step 5: Reconciliation pass ──
     # When pre-scan target counts are available, this does a targeted gap-fill:
     # compares extracted per-category counts against targets, then asks Claude
     # to find the specific missing rows in each under-extracted section.
@@ -1087,7 +1309,7 @@ async def parse_legend_with_vision(
             f"{type(recon_err).__name__}: {recon_err}"
         )
 
-    # ── Step 5: Post-extraction validation ──
+    # ── Step 6: Post-extraction validation ──
     # Final dedup pass after reconciliation (catches code collisions from recon)
     unique_symbols = _deduplicate_symbols(unique_symbols)
 
@@ -1103,7 +1325,7 @@ async def parse_legend_with_vision(
             f"with empty code or name"
         )
 
-    # ── Step 6: Convert to LegendSymbol + shape correction ──
+    # ── Step 7: Convert to LegendSymbol + shape correction ──
     symbols: list[LegendSymbol] = []
     for i, entry in enumerate(unique_symbols):
         try:
@@ -1120,7 +1342,7 @@ async def parse_legend_with_vision(
         except Exception as sym_err:
             logger.warning(f"Failed to parse symbol entry {i}: {entry} — {sym_err}")
 
-    # ── Step 7: Generate SVG icons ──
+    # ── Step 8: Generate SVG icons ──
     systems = sorted(set(s.category for s in symbols))
     logger.info(
         f"Legend extraction complete: {len(symbols)} symbols "
@@ -1132,7 +1354,7 @@ async def parse_legend_with_vision(
     except Exception as svg_err:
         logger.warning(f"SVG icon generation failed (non-fatal): {svg_err}")
 
-    # ── Step 8: Return ──
+    # ── Step 9: Return ──
     legend_id = str(uuid.uuid4())
     return LegendData(
         legend_id=legend_id,
