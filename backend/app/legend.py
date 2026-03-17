@@ -28,15 +28,17 @@ from app.models import AnalysisStep, LegendDevice, LegendParseResponse
 
 logger = logging.getLogger(__name__)
 
-# PDF rendering DPI — 300 gives excellent symbol clarity for Claude Vision
-PDF_RENDER_DPI = 300
+# PDF rendering DPI — 150 balances clarity with memory usage.
+# Render free tier has only 512MB RAM; 300 DPI creates ~50MB pixmaps per page
+# which OOM-kills the process. 150 DPI is still very readable for Claude Vision.
+PDF_RENDER_DPI = 150
 
-# Maximum image dimension before resizing (Claude handles up to ~8000px but
-# recommends keeping images reasonable for speed)
-MAX_IMAGE_DIMENSION = 4096
+# Maximum image dimension before resizing
+MAX_IMAGE_DIMENSION = 2048
 
-# Maximum total image payload size in bytes (keep under 20MB per image)
-MAX_IMAGE_BYTES = 18 * 1024 * 1024  # 18MB safety margin
+# Maximum total image payload size in bytes (keep under 5MB per image
+# to stay well within Render free tier 512MB memory limit)
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 # Supported file types
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -116,6 +118,9 @@ async def parse_legend_file(
     except Exception as e:
         _log(analysis, "error", f"Image preparation failed: {e}")
         return _empty_response(filename, analysis)
+    finally:
+        # Free raw file bytes — images are now in base64 form
+        del file_bytes
 
     if not images:
         _log(analysis, "error", "No usable images could be extracted from the file")
@@ -241,8 +246,8 @@ def _prepare_pdf_images(
         _log(analysis, "warning", "PDF has no pages")
         return []
 
-    # Limit to first 10 pages (legends are rarely longer)
-    max_pages = min(page_count, 10)
+    # Limit to first 5 pages to stay within memory budget (512MB on Render free)
+    max_pages = min(page_count, 5)
     if page_count > max_pages:
         _log(analysis, "warning",
              f"PDF has {page_count} pages — processing first {max_pages} only")
@@ -251,7 +256,7 @@ def _prepare_pdf_images(
     for page_num in range(max_pages):
         try:
             page = pdf_doc[page_num]
-            # Render at high DPI for symbol clarity
+            # Render at moderate DPI to stay within memory limits
             mat = fitz.Matrix(PDF_RENDER_DPI / 72, PDF_RENDER_DPI / 72)
             pix = page.get_pixmap(matrix=mat, alpha=False)
 
@@ -262,20 +267,25 @@ def _prepare_pdf_images(
 
             # Convert to PNG bytes
             png_bytes = pix.tobytes("png")
+            # Free the pixmap immediately to reclaim memory
+            pix = None
 
             # Check size — if too large, re-render at lower DPI
             if len(png_bytes) > MAX_IMAGE_BYTES:
-                lower_dpi = int(PDF_RENDER_DPI * 0.6)
+                lower_dpi = int(PDF_RENDER_DPI * 0.5)
                 _log(analysis, "info",
                      f"  Page {page_num + 1} image too large "
                      f"({len(png_bytes) / 1024 / 1024:.1f}MB), "
                      f"re-rendering at {lower_dpi} DPI")
+                png_bytes = None  # Free before re-rendering
                 mat = fitz.Matrix(lower_dpi / 72, lower_dpi / 72)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 png_bytes = pix.tobytes("png")
                 width, height = pix.width, pix.height
+                pix = None  # Free immediately
 
             b64 = base64.standard_b64encode(png_bytes).decode("ascii")
+            png_bytes = None  # Free raw bytes, keep only b64
             images.append({
                 "base64": b64,
                 "media_type": "image/png",

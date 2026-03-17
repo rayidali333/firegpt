@@ -372,6 +372,8 @@ async def upload_legend(file: UploadFile):
         import logging
         logging.getLogger(__name__).error(f"Legend parsing failed: {e}", exc_info=True)
         raise HTTPException(500, f"Failed to parse legend: {str(e)}")
+    finally:
+        del contents  # Free uploaded file bytes
 
     result.legend_id = str(uuid.uuid4())
     legends_store[result.legend_id] = result
