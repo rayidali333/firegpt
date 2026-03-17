@@ -523,7 +523,7 @@ Respond with ONLY a JSON array:
 
     try:
         response = await api_client.messages.create(
-            model="claude-sonnet-4-6-20250514",
+            model="claude-sonnet-4-20250514",
             max_tokens=max_tokens,
             messages=[{
                 "role": "user",
@@ -858,7 +858,7 @@ Output ONLY a JSON object mapping category to count:
 
     try:
         response = await api_client.messages.create(
-            model="claude-sonnet-4-6-20250514",
+            model="claude-sonnet-4-20250514",
             max_tokens=1024,
             messages=[{
                 "role": "user",
@@ -1049,7 +1049,7 @@ Respond with ONLY the JSON array."""
 
     try:
         response = await api_client.messages.create(
-            model="claude-sonnet-4-6-20250514",
+            model="claude-sonnet-4-20250514",
             max_tokens=32768,
             messages=[{
                 "role": "user",
