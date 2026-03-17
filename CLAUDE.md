@@ -73,6 +73,9 @@ FireGPT is a full-stack web application built for fire alarm contractors. Users 
 - Three-panel layout: sidebar navigation | main content (tabs) | AI chat
 - Tabbed content: Symbols table, Drawing view, Analysis log
 - Docker deployment on Render
+- Streaming chat responses via SSE with incremental rendering and blinking cursor
+- Nearby text label matching for single-character legend codes
+- Fuzzy code matching with separator normalization and Levenshtein distance
 - Static file serving (React build served by FastAPI)
 
 ### Design System
@@ -95,6 +98,7 @@ The UI uses a warm, vintage aesthetic:
 | `GET` | `/api/drawings/{id}/export` | Export symbol data as CSV |
 | `GET` | `/api/drawings` | List all uploaded drawings |
 | `POST` | `/api/chat` | Send message + drawing_id + history → Claude response |
+| `POST` | `/api/chat/stream` | Streaming chat via SSE — same payload, returns text/event-stream |
 | `GET` | `/{path}` | SPA catch-all (serves React index.html) |
 
 ## Data Flow
@@ -155,6 +159,12 @@ git push origin main  # Render auto-deploys from main
 | `PORT` | No | Server port (default: 8000, Render sets automatically) |
 
 ## Change Log
+
+### v1.2.0 - Matching Accuracy & Streaming Chat
+- **Nearby Text Label Matching (Strategy 7)**: Matches device codes placed as TEXT entities near symbols on the floor plan. Enables single-character legend codes ("S", "H") that were previously filtered by the `len >= 2` requirement in block name segment matching.
+- **Fuzzy Code Matching (Strategy 8)**: Separator normalization (`FM-AIM` matches `FMAIM`), Levenshtein distance matching for close-but-not-exact codes (edit distance ≤1 for short codes, ≤2 for longer).
+- **`nearby_labels` on BlockInfo**: Parser now carries `_NEARBY_LABEL` text through sub-grouping into `BlockInfo.nearby_labels`, making nearby text available to the full matching pipeline.
+- **Streaming Chat (SSE)**: New `/api/chat/stream` endpoint using Anthropic streaming API. Frontend renders tokens incrementally with blinking cursor animation. Falls back to non-streaming on failure.
 
 ### v1.1.0 - Symbol Position Recovery & OCS Fix
 - **OCS→WCS Recovery**: Fixed missing markers for smoke detectors, speakers, and heat detectors in Revit-exported drawings
@@ -221,14 +231,14 @@ Let users verify and correct the AI-extracted legend before processing drawings.
 - **2D. Legend persistence**: ✅ `PATCH /api/legends/{id}/symbols` endpoint. Confirmed legend becomes source of truth.
 - **2E. Visual confirmation**: ✅ AI-generated SVG icons displayed for quick scan verification.
 
-### Phase 3: Drawing-to-Legend Matching Accuracy [~60%]
+### Phase 3: Drawing-to-Legend Matching Accuracy [~85%]
 Improve how extracted legend symbols get matched to DXF blocks. AI classification with legend constraints (3C) and unmatched block diagnostics (3D) are done. Nearby text integration and fuzzy code matching still needed.
 
-- **3A. Enable single-character code matching**: [ ] Allow single-char legend codes ("S", "H") to match via nearby text labels. Currently filtered out by `len >= 2` requirement in matching pipeline.
-- **3B. Improve nearby text → INSERT association**: [ ] `_collect_model_texts()` and adaptive search radius exist in parser.py, but `_NEARBY_LABEL` is never fed into the legend matching pipeline (Strategies 1-6). Need: wire nearby text into matching, add directional bias (text typically right/below symbol), improve clustering.
+- **3A. Enable single-character code matching**: ✅ Strategy 7 matches single-char legend codes ("S", "H") via nearby text labels. `nearby_labels` field on `BlockInfo` carries `_NEARBY_LABEL` through to matching pipeline.
+- **3B. Improve nearby text → INSERT association**: ✅ `_NEARBY_LABEL` now flows from parser.py instance data through sub-grouping into `BlockInfo.nearby_labels`. Strategy 7 in main.py matches nearby text labels against legend codes (including single-char codes). Fuzzy fallback included.
 - **3C. Tighten AI classification with legend constraints**: ✅ Post-processing validation fuzzy-matches AI labels to closest legend entry. Confidence tagging, legend shape/color inheritance all working.
 - **3D. Unmatched block diagnostics**: ✅ LEGEND COVERAGE section in Analysis tab shows matched/unmatched legend symbols, per-block strategy trace, AI classification trace.
-- **3E. Fuzzy code matching**: [~] Name/description matching works (Strategy 6 word-overlap). Missing: separator normalization (`FM-AIM` ≠ `FMAIM`), subscript handling, Levenshtein distance for close matches.
+- **3E. Fuzzy code matching**: ✅ Strategy 8 adds separator normalization (`FM-AIM` = `FMAIM`), Levenshtein distance (edit distance ≤1 for short codes, ≤2 for longer). Applied to sub_group values, attribs, block name segments, and nearby labels.
 
 ### Phase 4: Multi-Sheet & Batch Processing [ ]
 Support real-world projects with multiple drawing sheets. No project model or batch support exists yet — all storage is single-drawing, in-memory dicts.
@@ -238,8 +248,8 @@ Support real-world projects with multiple drawing sheets. No project model or ba
 - **4C. Aggregated symbol table**: New `/api/projects/{id}/summary` endpoint. Project summary merging counts across all sheets with per-sheet breakdown.
 - **4D. Sheet navigation**: Extend sidebar to show sheets within a project, click to switch active drawing without re-uploading.
 
-### Phase 5: Chat & Streaming [ ]
+### Phase 5: Chat & Streaming [~50%]
 Real-time chat experience with project-wide context.
 
-- **5A. Streaming chat responses**: FastAPI `StreamingResponse` + Anthropic streaming API with SSE. Frontend: incremental text render in ChatPanel.
+- **5A. Streaming chat responses**: ✅ FastAPI `StreamingResponse` + Anthropic `messages.stream()` with SSE via `/api/chat/stream`. Frontend: `chatWithDrawingStream()` reads SSE chunks, updates ChatPanel incrementally with blinking cursor. Falls back to non-streaming `/api/chat` on failure.
 - **5B. Enhanced chat context**: Once Phase 4 exists, inject aggregated symbol JSON across all sheets into system prompt for project-wide queries.

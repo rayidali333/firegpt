@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
-import { uploadDrawing, uploadLegend, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
+import { uploadDrawing, uploadLegend, getDrawingPreview, chatWithDrawingStream, overrideSymbol, getExportUrl } from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
@@ -105,29 +105,46 @@ function App() {
       content: message,
       timestamp: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+    const assistantMsg: ChatMessage = {
+      role: "assistant",
+      content: "",
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setChatSending(true);
 
     try {
-      // Send full conversation history for multi-turn context
-      const response = await chatWithDrawing(
+      // Stream the response — update the last message incrementally
+      await chatWithDrawingStream(
         drawing.drawing_id,
         message,
-        messages
-      );
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: response, timestamp: Date.now() },
-      ]);
-    } catch (e: any) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: `Error: ${e.message || "Failed to get response"}`,
-          timestamp: Date.now(),
+        messages,
+        (chunk: string) => {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last && last.role === "assistant") {
+              updated[updated.length - 1] = {
+                ...last,
+                content: last.content + chunk,
+              };
+            }
+            return updated;
+          });
         },
-      ]);
+      );
+    } catch (e: any) {
+      setMessages((prev) => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last && last.role === "assistant") {
+          updated[updated.length - 1] = {
+            ...last,
+            content: `Error: ${e.message || "Failed to get response"}`,
+          };
+        }
+        return updated;
+      });
     } finally {
       setChatSending(false);
     }

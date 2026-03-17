@@ -1581,6 +1581,19 @@
   }
 }
 
+/* Streaming cursor: blinking caret at end of streaming message */
+.message-content.streaming::after {
+  content: "▊";
+  animation: streamCursor 0.8s step-end infinite;
+  color: var(--text-muted);
+  font-weight: normal;
+}
+
+@keyframes streamCursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
 .chat-input-area {
   padding: 6px;
   background: var(--window-bg);

@@ -365,6 +365,7 @@ class BlockInfo:
     # sub-groups. Each sub-group gets its own BlockInfo.
     sub_group_tag: str = ""    # Which ATTRIB tag was used to split (e.g., "TYPE")
     sub_group_value: str = ""  # The value for this sub-group (e.g., "AIM")
+    nearby_labels: list[str] = field(default_factory=list)  # Unique _NEARBY_LABEL values from instances
 
 
 @dataclass
@@ -769,6 +770,11 @@ def _sub_group_block_instances(
         layers = sorted(set(inst.get("layer", "") for inst in group_instances if inst.get("layer")))
         # Use representative attribs from first instance
         rep_attribs = group_instances[0].get("attribs", {}) if group_instances else {}
+        # Collect unique nearby text labels from all instances in this sub-group
+        nearby = sorted(set(
+            inst.get("attribs", {}).get("_NEARBY_LABEL", "")
+            for inst in group_instances
+        ) - {""})
 
         result.append(BlockInfo(
             block_name=block_name,
@@ -782,12 +788,17 @@ def _sub_group_block_instances(
             attdef_tags=block_def_meta.get("attdef_tags", {}),
             sub_group_tag=diff_tag,
             sub_group_value=value,
+            nearby_labels=nearby,
         ))
 
     # Catch-all for instances without the differentiating attribute
     remainder_count = len(no_attrib_instances) + unaccounted
     if remainder_count > 0:
         remainder_locations = [inst["location"] for inst in no_attrib_instances if "location" in inst]
+        remainder_nearby = sorted(set(
+            inst.get("attribs", {}).get("_NEARBY_LABEL", "")
+            for inst in no_attrib_instances
+        ) - {""})
         result.append(BlockInfo(
             block_name=block_name,
             count=remainder_count,
@@ -800,6 +811,7 @@ def _sub_group_block_instances(
             attdef_tags=block_def_meta.get("attdef_tags", {}),
             sub_group_tag="",
             sub_group_value="",
+            nearby_labels=remainder_nearby,
         ))
 
     return result
@@ -1428,6 +1440,11 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
             else:
                 # No sub-grouping — single BlockInfo as before
                 ai_candidate_count += 1
+                # Collect unique nearby labels from all instances
+                inst_nearby = sorted(set(
+                    inst.get("attribs", {}).get("_NEARBY_LABEL", "")
+                    for inst in instances
+                ) - {""})
                 result.ai_candidate_blocks.append(BlockInfo(
                     block_name=block_name,
                     count=count,
@@ -1438,6 +1455,7 @@ def parse_dxf_file(filepath: str, use_fast_path: bool = True) -> ParseResult:
                     description=meta.get("description", ""),
                     locations=block_locations.get(block_name, []),
                     attdef_tags=meta.get("attdef_tags", {}),
+                    nearby_labels=inst_nearby,
                 ))
 
     if use_fast_path:

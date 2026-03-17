@@ -128,6 +128,82 @@ export async function chatWithDrawing(
   return data.response;
 }
 
+/**
+ * Stream a chat response via SSE. Calls onChunk with each text fragment
+ * as it arrives, enabling real-time incremental display.
+ *
+ * Falls back to non-streaming /api/chat if streaming fails.
+ */
+export async function chatWithDrawingStream(
+  drawingId: string,
+  message: string,
+  history: ChatMessage[] = [],
+  onChunk: (text: string) => void,
+): Promise<string> {
+  const res = await fetch(`${API_BASE}/api/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      drawing_id: drawingId,
+      message,
+      history: history.map((m) => ({ role: m.role, content: m.content })),
+    }),
+  });
+
+  if (!res.ok) {
+    // Fall back to non-streaming endpoint
+    console.warn("[FireGPT] Streaming failed, falling back to non-streaming chat");
+    return chatWithDrawing(drawingId, message, history);
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    return chatWithDrawing(drawingId, message, history);
+  }
+
+  const decoder = new TextDecoder();
+  let fullText = "";
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // Parse SSE events from buffer
+    const lines = buffer.split("\n");
+    // Keep the last potentially incomplete line in buffer
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const jsonStr = line.slice(6).trim();
+      if (!jsonStr) continue;
+
+      try {
+        const event = JSON.parse(jsonStr);
+        if (event.done) {
+          return fullText;
+        }
+        if (event.error) {
+          throw new Error(event.error);
+        }
+        if (event.text) {
+          fullText += event.text;
+          onChunk(event.text);
+        }
+      } catch (e) {
+        // Ignore parse errors from incomplete chunks
+        if (e instanceof SyntaxError) continue;
+        throw e;
+      }
+    }
+  }
+
+  return fullText;
+}
+
 export async function overrideSymbol(
   drawingId: string,
   blockName: string,

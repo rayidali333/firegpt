@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color, get_category_color, get_symbol_palette_color
 from app.preview import generate_drawing_preview
-from app.chat import chat_with_drawing, classify_blocks_with_ai, parse_legend_with_vision
+from app.chat import chat_with_drawing, chat_with_drawing_stream, classify_blocks_with_ai, parse_legend_with_vision
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,82 @@ preview_cache: dict[str, dict] = {}
 legend_store: dict[str, LegendData] = {}
 # Track which legend is associated with which drawing
 drawing_legend_map: dict[str, str] = {}  # drawing_id → legend_id
+
+
+# ── Fuzzy matching utilities for Phase 3E ──
+
+def _normalize_code(code: str) -> str:
+    """Strip separators (-_. /()) and uppercase for fuzzy comparison.
+
+    Handles: FM-AIM → FMAIM, SMOKE_DETECTOR → SMOKEDETECTOR, etc.
+    """
+    return re.sub(r'[-_.\s/()]+', '', code).upper()
+
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Compute Levenshtein edit distance between two strings."""
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+
+    prev_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        curr_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            cost = 0 if c1 == c2 else 1
+            curr_row.append(min(
+                curr_row[j] + 1,        # insert
+                prev_row[j + 1] + 1,    # delete
+                prev_row[j] + cost,     # substitute
+            ))
+        prev_row = curr_row
+
+    return prev_row[-1]
+
+
+def _fuzzy_legend_lookup(
+    value: str,
+    legend_code_lookup: dict[str, "LegendSymbol"],
+) -> tuple["LegendSymbol | None", str]:
+    """Try to match a value against legend codes using fuzzy strategies.
+
+    Returns (matched_symbol, match_description) or (None, "").
+    Strategies tried in order:
+    1. Exact match (already done upstream, but included for completeness)
+    2. Separator-normalized match (FM-AIM == FMAIM)
+    3. Levenshtein distance (edit distance <= 1 for codes <= 4 chars, <= 2 for longer)
+    """
+    val_upper = value.upper().strip()
+
+    # 1. Exact (already checked upstream, skip)
+
+    # 2. Separator-normalized match
+    val_norm = _normalize_code(val_upper)
+    if len(val_norm) >= 2:  # Only for non-trivial codes
+        for code, sym in legend_code_lookup.items():
+            if _normalize_code(code) == val_norm:
+                return sym, f"separator_normalized({value}→{val_norm}={code})"
+
+    # 3. Levenshtein distance for close matches
+    if len(val_upper) >= 2:
+        max_dist = 1 if len(val_upper) <= 4 else 2
+        best_match = None
+        best_dist = max_dist + 1
+        best_code = ""
+        for code, sym in legend_code_lookup.items():
+            # Only compare codes of similar length (within ±2)
+            if abs(len(code) - len(val_upper)) > max_dist:
+                continue
+            dist = _levenshtein_distance(val_upper, code)
+            if dist <= max_dist and dist < best_dist:
+                best_dist = dist
+                best_match = sym
+                best_code = code
+        if best_match:
+            return best_match, f"levenshtein({value}~{best_code}, dist={best_dist})"
+
+    return None, ""
 
 
 @app.get("/api/health")
@@ -483,6 +560,74 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                         matched_legend_sym = best_word_match
                         match_source = f"word_overlap=\"{best_word_match.name}\" (words: {best_word_match_words})"
                         checked_values.append(f"word_overlap={best_word_match.name} ✓")
+
+            # Strategy 7: Nearby text labels — match device codes placed as TEXT
+            # near each symbol on the drawing. This is the primary way single-char
+            # legend codes ("S", "H") get matched: they appear as standalone TEXT
+            # entities placed next to the device symbol on the floor plan.
+            # Unlike Strategy 5 (block name segments), single-char codes ARE allowed
+            # here because nearby text labels are high-confidence — they're the same
+            # codes shown in the project legend.
+            if not matched_legend_sym and block.nearby_labels:
+                for nl in block.nearby_labels:
+                    nl_upper = nl.upper().strip()
+                    checked_values.append(f"nearby_label={nl_upper}")
+                    if nl_upper in legend_code_lookup:
+                        matched_legend_sym = legend_code_lookup[nl_upper]
+                        match_source = f"nearby_text_label={nl}"
+                        checked_values.append(f"nearby_label={nl_upper} ✓")
+                        break
+                    # Also try fuzzy match on nearby labels
+                    fuzzy_sym, fuzzy_desc = _fuzzy_legend_lookup(nl_upper, legend_code_lookup)
+                    if fuzzy_sym:
+                        matched_legend_sym = fuzzy_sym
+                        match_source = f"nearby_text_fuzzy={fuzzy_desc}"
+                        checked_values.append(f"nearby_fuzzy={nl_upper} ✓")
+                        break
+
+            # Strategy 8: Fuzzy code matching — separator normalization and
+            # Levenshtein distance for attrib values and block name segments
+            # that were close-but-not-exact matches in Strategies 1-5.
+            if not matched_legend_sym:
+                # Try fuzzy on sub_group_value
+                if block.sub_group_value:
+                    fuzzy_sym, fuzzy_desc = _fuzzy_legend_lookup(
+                        block.sub_group_value, legend_code_lookup
+                    )
+                    if fuzzy_sym:
+                        matched_legend_sym = fuzzy_sym
+                        match_source = f"fuzzy_subgroup={fuzzy_desc}"
+                        checked_values.append(f"fuzzy_subgroup ✓")
+
+                # Try fuzzy on attrib values
+                if not matched_legend_sym and block.attribs:
+                    for tag, value in block.attribs.items():
+                        if tag == "_NEARBY_LABEL":
+                            continue  # Already tried in Strategy 7
+                        fuzzy_sym, fuzzy_desc = _fuzzy_legend_lookup(
+                            value, legend_code_lookup
+                        )
+                        if fuzzy_sym:
+                            matched_legend_sym = fuzzy_sym
+                            match_source = f"fuzzy_attrib({tag})={fuzzy_desc}"
+                            checked_values.append(f"fuzzy_attrib({tag}) ✓")
+                            break
+
+                # Try fuzzy on block name segments
+                if not matched_legend_sym:
+                    segments = re.split(r'[-_\s.]+', block.block_name)
+                    for segment in segments:
+                        seg_upper = segment.upper().strip()
+                        if len(seg_upper) < 2:
+                            continue
+                        fuzzy_sym, fuzzy_desc = _fuzzy_legend_lookup(
+                            seg_upper, legend_code_lookup
+                        )
+                        if fuzzy_sym:
+                            matched_legend_sym = fuzzy_sym
+                            match_source = f"fuzzy_segment={fuzzy_desc}"
+                            checked_values.append(f"fuzzy_segment ✓")
+                            break
 
             if matched_legend_sym:
                 # DIRECT MATCH — no AI needed
@@ -1047,6 +1192,50 @@ async def chat(request: ChatRequest):
 
     response_text = await chat_with_drawing(request.message, drawing, history, legend)
     return ChatResponse(response=response_text)
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Streaming chat endpoint using Server-Sent Events (SSE).
+
+    Streams text chunks as they arrive from the AI model for real-time display.
+    Each SSE event has data: {"text": "chunk"} or data: {"done": true}.
+    """
+    if request.drawing_id not in drawings_store:
+        raise HTTPException(404, "Drawing not found. Please upload a drawing first.")
+
+    drawing = drawings_store[request.drawing_id]
+
+    history = None
+    if request.history:
+        history = [{"role": h.role, "content": h.content} for h in request.history]
+
+    legend = None
+    legend_id = drawing_legend_map.get(request.drawing_id)
+    if legend_id:
+        legend = legend_store.get(legend_id)
+
+    async def event_generator():
+        try:
+            async for chunk in chat_with_drawing_stream(
+                request.message, drawing, history, legend
+            ):
+                # SSE format: data: JSON\n\n
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        except Exception as e:
+            logger.error(f"Streaming chat error: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.patch("/api/drawings/{drawing_id}/symbols/{block_name}")

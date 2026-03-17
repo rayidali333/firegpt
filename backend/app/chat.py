@@ -1802,3 +1802,31 @@ async def chat_with_drawing(
     )
 
     return response.content[0].text
+
+
+async def chat_with_drawing_stream(
+    message: str,
+    drawing: ParseResponse,
+    history: list[dict] | None = None,
+    legend: LegendData | None = None,
+):
+    """Stream a chat response as an async generator of text chunks.
+
+    Yields individual text delta strings as they arrive from the API.
+    """
+    api_client = _get_client()
+
+    messages = []
+    if history:
+        for h in history:
+            messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": message})
+
+    async with api_client.messages.stream(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=_build_system_prompt(drawing, legend),
+        messages=messages,
+    ) as stream:
+        async for text in stream.text_stream:
+            yield text

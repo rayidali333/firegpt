@@ -184,37 +184,49 @@ export default function ChatPanel({
               </div>
             ) : (
               <>
-                {messages.map((msg, i) => (
-                  <div key={i} className={`chat-message ${msg.role}`}>
-                    <div className="message-meta">
-                      <span className="message-role">
-                        {msg.role === "user" ? "You" : "FireGPT"}
-                      </span>
+                {messages.map((msg, i) => {
+                  const isStreamingMsg =
+                    sending &&
+                    msg.role === "assistant" &&
+                    i === messages.length - 1;
+
+                  // Skip rendering the streaming placeholder if it has no content yet
+                  // — show typing indicator instead
+                  if (isStreamingMsg && !msg.content) {
+                    return (
+                      <div key={i} className="chat-message assistant">
+                        <div className="message-meta">
+                          <span className="message-role">FireGPT</span>
+                        </div>
+                        <div className="message-content typing-indicator">
+                          <span className="typing-dot" />
+                          <span className="typing-dot" />
+                          <span className="typing-dot" />
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div key={i} className={`chat-message ${msg.role}`}>
+                      <div className="message-meta">
+                        <span className="message-role">
+                          {msg.role === "user" ? "You" : "FireGPT"}
+                        </span>
+                      </div>
+                      {msg.role === "assistant" ? (
+                        <div
+                          className={`message-content${isStreamingMsg ? " streaming" : ""}`}
+                          dangerouslySetInnerHTML={{
+                            __html: renderMarkdown(msg.content),
+                          }}
+                        />
+                      ) : (
+                        <div className="message-content">{msg.content}</div>
+                      )}
                     </div>
-                    {msg.role === "assistant" ? (
-                      <div
-                        className="message-content"
-                        dangerouslySetInnerHTML={{
-                          __html: renderMarkdown(msg.content),
-                        }}
-                      />
-                    ) : (
-                      <div className="message-content">{msg.content}</div>
-                    )}
-                  </div>
-                ))}
-                {sending && (
-                  <div className="chat-message assistant">
-                    <div className="message-meta">
-                      <span className="message-role">FireGPT</span>
-                    </div>
-                    <div className="message-content typing-indicator">
-                      <span className="typing-dot" />
-                      <span className="typing-dot" />
-                      <span className="typing-dot" />
-                    </div>
-                  </div>
-                )}
+                  );
+                })}
               </>
             )}
             <div ref={messagesEndRef} />
