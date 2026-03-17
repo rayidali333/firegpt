@@ -343,6 +343,14 @@ def list_drawings():
 @app.post("/api/legend/upload", response_model=LegendParseResponse)
 async def upload_legend(file: UploadFile):
     """Upload a legend file (PDF or image) for AI-powered device extraction."""
+    # Early check: API key must be set for legend parsing
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(
+            500,
+            "ANTHROPIC_API_KEY is not configured. "
+            "Set it in the Render dashboard (or .env for local dev)."
+        )
+
     if not file.filename:
         raise HTTPException(400, "No file provided")
 
