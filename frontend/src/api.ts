@@ -1,4 +1,4 @@
-import { DrawingData, DrawingPreview, ChatMessage } from "./types";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
@@ -81,4 +81,21 @@ export async function overrideSymbol(
 
 export function getExportUrl(drawingId: string): string {
   return `${API_BASE}/api/drawings/${drawingId}/export`;
+}
+
+export async function uploadLegend(file: File): Promise<LegendData> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(`${API_BASE}/api/legend/upload`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Legend upload failed" }));
+    throw new Error(err.detail || "Legend upload failed");
+  }
+
+  return res.json();
 }

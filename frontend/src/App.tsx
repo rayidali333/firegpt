@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { DrawingData, DrawingPreview, ChatMessage } from "./types";
-import { uploadDrawing, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
+import { uploadDrawing, uploadLegend, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
@@ -8,6 +8,7 @@ import SymbolTable from "./components/SymbolTable";
 import DrawingViewer from "./components/DrawingViewer";
 import AnalysisLog from "./components/AnalysisLog";
 import ChatPanel from "./components/ChatPanel";
+import LegendTable from "./components/LegendTable";
 import "./App.css";
 
 function App() {
@@ -15,11 +16,14 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis">("symbols");
+  const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis" | "legend">("symbols");
   const [preview, setPreview] = useState<DrawingPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [chatSending, setChatSending] = useState(false);
+  const [legend, setLegend] = useState<LegendData | null>(null);
+  const [legendUploading, setLegendUploading] = useState(false);
+  const [legendSkipped, setLegendSkipped] = useState(false);
 
   // Load preview when drawing changes
   useEffect(() => {
@@ -100,6 +104,23 @@ function App() {
     }
   };
 
+  const handleLegendUpload = async (file: File) => {
+    setLegendUploading(true);
+    setError(null);
+    try {
+      const data = await uploadLegend(file);
+      setLegend(data);
+    } catch (e: any) {
+      setError(e.message || "Legend upload failed");
+    } finally {
+      setLegendUploading(false);
+    }
+  };
+
+  const handleLegendSkip = () => {
+    setLegendSkipped(true);
+  };
+
   const handleReset = () => {
     setDrawing(null);
     setMessages([]);
@@ -107,6 +128,8 @@ function App() {
     setActiveTab("symbols");
     setPreview(null);
     setSelectedSymbol(null);
+    setLegend(null);
+    setLegendSkipped(false);
   };
 
   const handleSelectSymbol = useCallback(
@@ -160,6 +183,7 @@ function App() {
         <div className="window-content">
           <Sidebar
             drawing={drawing}
+            legend={legend}
             onUpload={handleUpload}
             uploading={uploading}
             onReset={handleReset}
@@ -173,6 +197,11 @@ function App() {
                 onUpload={handleUpload}
                 uploading={uploading}
                 error={error}
+                legend={legend}
+                legendUploading={legendUploading}
+                legendSkipped={legendSkipped}
+                onLegendUpload={handleLegendUpload}
+                onLegendSkip={handleLegendSkip}
               />
             ) : (
               <div className="content-with-tabs">
@@ -198,6 +227,15 @@ function App() {
                     Analysis
                     <span className="tab-badge">{drawing.analysis?.length || 0}</span>
                   </button>
+                  {legend && (
+                    <button
+                      className={`content-tab ${activeTab === "legend" ? "active" : ""}`}
+                      onClick={() => setActiveTab("legend")}
+                    >
+                      Legend
+                      <span className="tab-badge">{legend.total_device_types}</span>
+                    </button>
+                  )}
                   <div className="content-tabs-fill" />
                   <span className="content-tabs-filename">
                     {drawing.filename}
@@ -224,6 +262,8 @@ function App() {
                       selectedSymbol={selectedSymbol}
                       onSelectSymbol={handleSelectSymbol}
                     />
+                  ) : activeTab === "legend" && legend ? (
+                    <LegendTable legend={legend} />
                   ) : (
                     <AnalysisLog
                       analysis={drawing.analysis || []}

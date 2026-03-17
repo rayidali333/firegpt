@@ -5,3 +5,4 @@ ezdxf==1.4.2
 anthropic==0.44.0
 python-dotenv==1.0.1
 pydantic==2.10.4
+PyMuPDF==1.25.3

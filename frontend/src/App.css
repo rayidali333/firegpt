@@ -1788,3 +1788,201 @@
     min-height: 200px;
   }
 }
+
+/* ── Legend Upload & Table Styles ──────────────────────────────── */
+
+.legend-step .upload-icon {
+  color: #8B7355;
+}
+
+.legend-skip-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px auto 0;
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid var(--bevel-dark);
+  border-radius: 6px;
+  color: #8B7355;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.legend-skip-btn:hover {
+  background: var(--bg-raised);
+}
+
+.legend-success-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin-bottom: 12px;
+  background: #E8F5E9;
+  border: 1px solid #A5D6A7;
+  border-radius: 8px;
+  color: #2E7D32;
+  font-size: 13px;
+}
+
+.upload-step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 16px;
+  font-size: 12px;
+  color: #8B7355;
+}
+
+.step-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #D5C4A1;
+  border: 2px solid #B8A88A;
+}
+
+.step-dot.active {
+  background: #8B7355;
+  border-color: #6B5B45;
+}
+
+.step-dot.completed {
+  background: #4CAF50;
+  border-color: #388E3C;
+}
+
+.step-line {
+  width: 32px;
+  height: 2px;
+  background: #D5C4A1;
+}
+
+.step-label {
+  margin-left: 4px;
+}
+
+/* Legend Table */
+
+.legend-table-container {
+  padding: 16px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.legend-table-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-raised);
+  border: 1px solid var(--bevel-dark);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: #5D4E37;
+}
+
+.legend-table-stats {
+  margin-left: auto;
+  color: #8B7355;
+  font-size: 12px;
+}
+
+.legend-category {
+  margin-bottom: 16px;
+}
+
+.legend-category-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #EDE8DE;
+  border: 1px solid var(--bevel-dark);
+  border-radius: 6px 6px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #5D4E37;
+}
+
+.legend-category-count {
+  margin-left: auto;
+  background: #D5C4A1;
+  color: #5D4E37;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.legend-device-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--bevel-dark);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.legend-device-table th {
+  text-align: left;
+  padding: 8px 10px;
+  background: #F5F0E8;
+  border-bottom: 1px solid var(--bevel-dark);
+  color: #8B7355;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.legend-device-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #EDE8DE;
+  color: #5D4E37;
+  vertical-align: top;
+}
+
+.legend-device-table tr:last-child td {
+  border-bottom: none;
+}
+
+.legend-device-table tr:hover td {
+  background: #FAF7F2;
+}
+
+.legend-device-name {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-weight: 500;
+  min-width: 160px;
+}
+
+.legend-device-abbr {
+  font-family: 'Monaco', 'Menlo', monospace;
+  color: #8B7355;
+  min-width: 60px;
+}
+
+.legend-device-desc {
+  color: #6B5B45;
+  line-height: 1.4;
+  max-width: 400px;
+}
+
+.legend-notes {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: #FFF8E1;
+  border: 1px solid #FFE082;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #5D4E37;
+  line-height: 1.5;
+}

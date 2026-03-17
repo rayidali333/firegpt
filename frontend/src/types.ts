@@ -43,6 +43,23 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+export interface LegendDevice {
+  name: string;
+  abbreviation: string | null;
+  category: string;
+  symbol_description: string;
+}
+
+export interface LegendData {
+  legend_id: string;
+  filename: string;
+  devices: LegendDevice[];
+  categories_found: string[];
+  total_device_types: number;
+  analysis: AnalysisStep[];
+  notes: string;
+}
+
 export interface DrawingPreview {
   svg: string;
   viewBox: string;

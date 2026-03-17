@@ -67,3 +67,23 @@ class PreviewResponse(BaseModel):
 class SymbolOverride(BaseModel):
     label: str
     count: int
+
+
+# ── Legend Models ──────────────────────────────────────────────────
+
+
+class LegendDevice(BaseModel):
+    name: str  # Full device name (e.g., "Main Fire Alarm Control Panel")
+    abbreviation: str | None = None  # Short code (e.g., "MFACP")
+    category: str  # System/section (e.g., "Fire Alarm System")
+    symbol_description: str  # Detailed visual description for SVG generation
+
+
+class LegendParseResponse(BaseModel):
+    legend_id: str
+    filename: str
+    devices: list[LegendDevice]
+    categories_found: list[str]
+    total_device_types: int
+    analysis: list[AnalysisStep] = []
+    notes: str = ""

@@ -13,9 +13,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
 from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai
+from app.legend import parse_legend_file, ALL_LEGEND_EXTENSIONS
 from app.models import (
-    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, ParseResponse,
-    PreviewResponse, SymbolInfo, SymbolOverride,
+    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendParseResponse,
+    ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
 )
 
 load_dotenv()
@@ -43,6 +44,8 @@ drawings_store: dict[str, ParseResponse] = {}
 file_paths_store: dict[str, str] = {}
 # Cache generated previews
 preview_cache: dict[str, dict] = {}
+# Store parsed legends
+legends_store: dict[str, LegendParseResponse] = {}
 
 
 @app.get("/api/health")
@@ -332,6 +335,45 @@ def list_drawings():
             for d in drawings_store.values()
         ]
     }
+
+
+# ── Legend Endpoints ──────────────────────────────────────────────────
+
+
+@app.post("/api/legend/upload", response_model=LegendParseResponse)
+async def upload_legend(file: UploadFile):
+    """Upload a legend file (PDF or image) for AI-powered device extraction."""
+    if not file.filename:
+        raise HTTPException(400, "No file provided")
+
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALL_LEGEND_EXTENSIONS:
+        raise HTTPException(
+            400,
+            f"Unsupported file type: {ext}. Supported: {', '.join(sorted(ALL_LEGEND_EXTENSIONS))}",
+        )
+
+    contents = await file.read()
+    size_mb = len(contents) / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise HTTPException(400, f"File too large ({size_mb:.1f}MB). Max is {MAX_FILE_SIZE_MB}MB.")
+
+    try:
+        result = await parse_legend_file(contents, file.filename)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Legend parsing failed: {e}", exc_info=True)
+        raise HTTPException(500, f"Failed to parse legend: {str(e)}")
+
+    legends_store[result.legend_id] = result
+    return result
+
+
+@app.get("/api/legend/{legend_id}", response_model=LegendParseResponse)
+def get_legend(legend_id: str):
+    if legend_id not in legends_store:
+        raise HTTPException(404, "Legend not found")
+    return legends_store[legend_id]
 
 
 # Serve React frontend — must be after all /api routes
