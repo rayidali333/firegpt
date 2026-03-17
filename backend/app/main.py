@@ -407,24 +407,43 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
     # These cause false positives when their block names contain segments that
     # fuzzy-match legend codes (e.g., "Grid" blocks matching "LAN", XREF blocks
     # matching "IP").
+    #
+    # IMPORTANT: When a legend is provided, SKIP this filter entirely.
+    # The legend is the authoritative source of truth — legend matching strategies
+    # and legend-constrained AI classification are sufficient to distinguish devices
+    # from non-devices. Filtering by block name patterns here would drop valid
+    # fire alarm blocks that happen to have prefixes like "AR-" (common in many
+    # CAD naming conventions for alarm/fire blocks).
     filtered_candidates = []
     filtered_out_count = 0
-    for block in parse_result.ai_candidate_blocks:
-        # Check against non-device patterns (module-level _NON_DEVICE_BLOCK_PATTERNS)
-        is_non_device = any(p.search(block.block_name) for p in _NON_DEVICE_BLOCK_PATTERNS)
-        if is_non_device:
-            filtered_out_count += block.count
-            continue
-        filtered_candidates.append(block)
 
-    if filtered_out_count > 0:
+    if legend:
+        # Legend mode: trust the legend + AI pipeline, don't pre-filter by name
+        filtered_candidates = list(parse_result.ai_candidate_blocks)
         parse_result.analysis.append({
-            "type": "detail",
+            "type": "info",
             "message": (
-                f"Filtered out {filtered_out_count} non-device entities "
-                f"(architectural, structural, furniture, plumbing blocks)"
+                "Legend provided — skipping non-device name filter "
+                "(legend matching + AI will classify all blocks)"
             ),
         })
+    else:
+        for block in parse_result.ai_candidate_blocks:
+            # Check against non-device patterns (module-level _NON_DEVICE_BLOCK_PATTERNS)
+            is_non_device = any(p.search(block.block_name) for p in _NON_DEVICE_BLOCK_PATTERNS)
+            if is_non_device:
+                filtered_out_count += block.count
+                continue
+            filtered_candidates.append(block)
+
+        if filtered_out_count > 0:
+            parse_result.analysis.append({
+                "type": "detail",
+                "message": (
+                    f"Filtered out {filtered_out_count} non-device entities "
+                    f"(architectural, structural, furniture, plumbing blocks)"
+                ),
+            })
 
     # === DIRECT LEGEND CODE MATCHING ===
     # Before AI classification, try to match blocks directly against legend codes
@@ -494,8 +513,9 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
             "FIRE", "ALARM", "VOICE", "EVACUATION", "SYSTEMS", "GROUND", "FLOOR",
             "PLAN", "OVERALL", "LEVEL", "LAYOUT", "SHEET", "DRAWING", "VIEW",
             "FIRST", "SECOND", "THIRD", "BASEMENT", "ROOF", "MEZZANINE",
-            # Revit structural/architectural prefixes
-            "IP", "IT", "AR", "ST", "ID", "EL", "ME",
+            # Revit structural/architectural prefixes (only exclude unambiguous ones;
+            # AR/ST/EL/IT can be valid fire alarm legend codes in some projects)
+            "IP", "ID", "ME",
             # Common non-device words
             "RVT", "DWG", "DXF", "CAD", "REV", "MODEL", "SPACE",
             "GRID", "HEAD", "CIRCLED", "GRIDLINES",

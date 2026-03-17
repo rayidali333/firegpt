@@ -1416,7 +1416,11 @@ CLASSIFICATION RULES:
    - Block attributes matching legend codes or names
    - Layer names suggesting the system category
 5. Title blocks, sheet frames, borders, furniture, structural elements = null
-6. When in doubt, classify as null. False negatives are better than false positives.
+6. IMPORTANT: Be INCLUSIVE — if a block has ANY signal suggesting it could be a fire alarm device
+   (fire-related layer, device-like attributes, relevant text labels, or naming pattern matching
+   a legend code), classify it as the matching legend entry. The legend constrains your output,
+   so false positives are already controlled. Missing real devices is WORSE than including an
+   ambiguous one — contractors need complete counts for accurate bids.
 
 Respond with ONLY a JSON object mapping block names to EXACT legend names or null:
 {{"block_name_1": "Heat Detector", "block_name_2": null, ...}}"""
@@ -1441,7 +1445,10 @@ CLASSIFICATION GUIDELINES:
 5. Block attributes (TYPE, DEVICE, NAME) often contain the device identity
 6. Block description fields are reliable when present
 7. Geometry alone is NOT sufficient — many non-fire blocks also use circles/lines
-8. When in doubt, classify as null (not a fire device). False negatives are better than false positives.
+8. Be INCLUSIVE for blocks on fire-related layers or with fire-alarm attributes/text.
+   Only classify as null when there is STRONG evidence the block is NOT a fire device
+   (e.g., clearly furniture, plumbing, structural, or annotation blocks).
+   Missing real devices costs contractors money — err on the side of inclusion.
 
 STANDARD FIRE ALARM LABELS (use these exact strings):
 - Detection: "Smoke Detector", "Heat Detector", "Duct Detector", "Beam Detector",
@@ -1459,7 +1466,7 @@ IMPORTANT:
 - "SPK" in fire alarm context = Speaker (voice evacuation), NOT Sprinkler
 - Title blocks, sheet frames, borders = null
 - Furniture, doors, windows, plumbing = null
-- If a block appears hundreds of times and is NOT on a fire layer, it's likely NOT fire alarm
+- High-count blocks on non-fire layers MAY still be fire devices — check attributes and text labels before rejecting
 
 Respond with ONLY a JSON object. Fire devices get their label, everything else gets null:
 {{"block_name_1": "Smoke Detector", "block_name_2": null, ...}}"""
