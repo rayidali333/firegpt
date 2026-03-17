@@ -17,7 +17,7 @@ import re
 
 from anthropic import AsyncAnthropic
 
-from app.models import LegendData, LegendSymbol, ParseResponse
+from app.models import AnalysisStep, AuditEntry, LegendData, LegendSymbol, ParseResponse, SymbolInfo
 
 logger = logging.getLogger(__name__)
 
@@ -1289,6 +1289,284 @@ async def parse_legend_with_vision(
         symbols=symbols,
         total_symbols=len(symbols),
         systems=systems,
+    )
+
+
+async def parse_drawing_pdf_with_vision(
+    pdf_data: bytes,
+    media_type: str,
+    filename: str,
+    legend: LegendData | None = None,
+) -> ParseResponse:
+    """Analyze a PDF drawing using Claude Vision to detect and count fire alarm devices.
+
+    Instead of parsing DXF vector data, this sends the PDF pages to Claude Vision
+    and asks it to visually identify fire alarm symbols on the floor plan.
+    If a legend is provided, it constrains classification to legend symbols.
+
+    Returns a ParseResponse with SymbolInfo entries (no SVG preview possible for PDFs).
+    """
+    import uuid
+
+    logger.info("=== parse_drawing_pdf_with_vision START ===")
+    logger.info(
+        f"Filename: {filename}, media_type: {media_type}, "
+        f"data_size: {len(pdf_data)} bytes, legend: {legend.filename if legend else 'none'}"
+    )
+
+    api_client = _get_client()
+    drawing_id = str(uuid.uuid4())
+    analysis: list[dict] = []
+
+    analysis.append({
+        "type": "info",
+        "message": f"PDF drawing uploaded: {filename} — using AI vision for device detection",
+    })
+
+    # Build legend context for the prompt
+    legend_context = ""
+    if legend:
+        legend_lines = []
+        for ls in legend.symbols:
+            parts = [f'Code: "{ls.code}"', f'Name: "{ls.name}"', f'Category: {ls.category}']
+            if ls.shape:
+                parts.append(f'Shape: {ls.shape}')
+            legend_lines.append("  - " + ", ".join(parts))
+        legend_context = (
+            f"\n\nYou have a LEGEND with {legend.total_symbols} known symbols. "
+            f"ONLY count devices that match these legend entries:\n"
+            + "\n".join(legend_lines)
+            + "\n\nDo NOT invent device types not in this legend. "
+            "Use the exact code and name from the legend for each device you find."
+        )
+        analysis.append({
+            "type": "success",
+            "message": f'Using legend "{legend.filename}" ({legend.total_symbols} symbols) to guide detection',
+        })
+    else:
+        legend_context = (
+            "\n\nNo legend provided. Identify common fire alarm devices: "
+            "smoke detectors, heat detectors, pull stations, horn/strobes, "
+            "speakers, strobes, duct detectors, control panels, modules, "
+            "annunciators, etc. Use standard fire alarm terminology."
+        )
+
+    # Determine pages
+    is_pdf = media_type == "application/pdf"
+    page_count = _get_pdf_page_count(pdf_data) if is_pdf else 1
+    is_multi_page = is_pdf and page_count > 1
+
+    analysis.append({
+        "type": "info",
+        "message": f"PDF has {page_count} page(s) — analyzing each with AI vision",
+    })
+
+    # Process each page
+    all_device_counts: list[dict] = []
+
+    async def _analyze_drawing_page(
+        page_data: bytes,
+        page_media_type: str,
+        page_context: str,
+    ) -> list[dict]:
+        """Send a single drawing page to Claude Vision for device counting."""
+        if page_context:
+            header = f"You are analyzing {page_context} of a construction/MEP drawing (floor plan)."
+        else:
+            header = "You are analyzing a construction/MEP drawing (floor plan)."
+
+        prompt = f"""{header}
+{legend_context}
+
+Your task: Look at this drawing and identify ALL fire alarm / low-voltage device symbols placed on the floor plan.
+
+CRITICAL RULES:
+- Count each INDIVIDUAL device symbol you can see placed on the floor plan.
+- Do NOT count devices from legend/key/schedule tables — only devices placed on the actual floor plan.
+- If you see a symbol repeated multiple times across the drawing, count each placement.
+- Group your counts by device type.
+- Be thorough — scan every room, corridor, and area on the floor plan.
+- If a device symbol appears in clusters or arrays, count each individual one.
+- For ambiguous or hard-to-read symbols, make your best guess based on shape and context.
+
+Respond with ONLY a JSON array where each entry is a device type with its count:
+[{{"code": "S", "name": "Smoke Detector", "category": "Fire Alarm", "count": 45, "confidence": "high"}}, ...]
+
+The "confidence" field should be:
+- "high" if you can clearly identify the symbol
+- "medium" if you're reasonably sure but the symbol is small or unclear
+- "low" if you're guessing based on context
+
+Count carefully. It is better to be accurate than to guess."""
+
+        content_block = _build_content_block(page_data, page_media_type)
+        log_label = f"[{page_context}] " if page_context else ""
+
+        logger.info(f"  {log_label}Sending drawing page to Claude Vision...")
+
+        try:
+            response = await api_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=16384,
+                messages=[{
+                    "role": "user",
+                    "content": [content_block, {"type": "text", "text": prompt}],
+                }],
+            )
+        except Exception as api_err:
+            logger.error(f"  {log_label}Claude API call failed: {type(api_err).__name__}: {api_err}")
+            raise
+
+        logger.info(
+            f"  {log_label}Response: stop_reason={response.stop_reason}, "
+            f"usage={{input: {response.usage.input_tokens}, output: {response.usage.output_tokens}}}"
+        )
+
+        if not response.content:
+            logger.error(f"  {log_label}Claude returned empty content")
+            return []
+
+        response_text = response.content[0].text.strip()
+        logger.info(f"  {log_label}Response length: {len(response_text)} chars")
+
+        try:
+            devices = _extract_json_array(response_text)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.error(f"  {log_label}JSON extraction failed: {e}")
+            logger.error(f"  {log_label}Response (first 500): {response_text[:500]}")
+            return []
+
+        logger.info(f"  {log_label}Detected {len(devices)} device types")
+        return devices
+
+    # Process pages
+    if is_multi_page:
+        page_pdfs = _split_pdf_to_pages(pdf_data)
+        if not page_pdfs:
+            # Fallback: send entire PDF
+            page_devices = await _analyze_drawing_page(pdf_data, media_type, "")
+            all_device_counts.extend(page_devices)
+        else:
+            for page_data_bytes, page_num in page_pdfs:
+                page_context = f"page {page_num} of {page_count}"
+                page_devices = await _analyze_drawing_page(
+                    page_data_bytes, "application/pdf", page_context,
+                )
+                analysis.append({
+                    "type": "detail",
+                    "message": f"Page {page_num}: detected {len(page_devices)} device types",
+                })
+                # Tag each device with its page
+                for d in page_devices:
+                    d["_page"] = page_num
+                all_device_counts.extend(page_devices)
+    else:
+        page_devices = await _analyze_drawing_page(pdf_data, media_type, "")
+        all_device_counts.extend(page_devices)
+
+    if not all_device_counts:
+        logger.warning("No devices detected in PDF drawing")
+        analysis.append({
+            "type": "warning",
+            "message": "No fire alarm devices detected in this drawing",
+        })
+        return ParseResponse(
+            drawing_id=drawing_id,
+            filename=filename,
+            file_type="pdf",
+            symbols=[],
+            total_symbols=0,
+            analysis=analysis,
+        )
+
+    # Merge counts across pages by (code, name)
+    merged: dict[str, dict] = {}
+    for d in all_device_counts:
+        code = d.get("code", "").strip()
+        name = d.get("name", "Unknown").strip()
+        key = f"{code}|{name}".upper()
+        if key not in merged:
+            merged[key] = {
+                "code": code,
+                "name": name,
+                "category": d.get("category", ""),
+                "count": 0,
+                "confidence": d.get("confidence", "medium"),
+            }
+        merged[key]["count"] += d.get("count", 0)
+        # Keep highest confidence
+        conf_rank = {"high": 3, "medium": 2, "low": 1}
+        if conf_rank.get(d.get("confidence", ""), 0) > conf_rank.get(merged[key]["confidence"], 0):
+            merged[key]["confidence"] = d.get("confidence", "medium")
+
+    # Build legend lookup for enrichment
+    legend_lookup: dict[str, LegendSymbol] = {}
+    if legend:
+        for ls in legend.symbols:
+            legend_lookup[ls.code.upper().strip()] = ls
+
+    # Convert to SymbolInfo
+    from app.parser import get_category_color
+    symbols: list[SymbolInfo] = []
+    total = 0
+
+    for key, d in sorted(merged.items(), key=lambda x: -x[1]["count"]):
+        code = d["code"]
+        name = d["name"]
+        count = d["count"]
+        category = d["category"]
+        confidence = d["confidence"]
+
+        # Enrich from legend if available
+        legend_sym = legend_lookup.get(code.upper().strip())
+        shape_code = "circle"
+        svg_icon = ""
+        legend_shape = ""
+        if legend_sym:
+            category = legend_sym.category or category
+            shape_code = legend_sym.shape_code or "circle"
+            svg_icon = legend_sym.svg_icon or ""
+            legend_shape = legend_sym.shape or ""
+            name = legend_sym.name or name
+
+        color = get_category_color(category) if category else "#95A5A6"
+
+        symbols.append(SymbolInfo(
+            block_name=f"PDF_{code}" if code else f"PDF_{name.replace(' ', '_')}",
+            label=name,
+            count=count,
+            locations=[],  # No precise locations from vision
+            color=color,
+            confidence=confidence,
+            source="vision",
+            block_variants=[],
+            shape_code=shape_code,
+            category=category,
+            legend_code=code,
+            legend_shape=legend_shape,
+            svg_icon=svg_icon,
+        ))
+        total += count
+
+        analysis.append({
+            "type": "success",
+            "message": f'{name} ({code}): {count} devices [{confidence} confidence]',
+        })
+
+    analysis.append({
+        "type": "success",
+        "message": f"Total: {total} devices across {len(symbols)} types detected via AI vision",
+    })
+
+    logger.info(f"PDF drawing analysis complete: {total} devices, {len(symbols)} types")
+
+    return ParseResponse(
+        drawing_id=drawing_id,
+        filename=filename,
+        file_type="pdf",
+        symbols=symbols,
+        total_symbols=total,
+        analysis=analysis,
     )
 
 

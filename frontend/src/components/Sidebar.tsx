@@ -45,7 +45,7 @@ export default function Sidebar({
     const file = e.target.files?.[0];
     if (file) {
       const ext = file.name.toLowerCase().split(".").pop();
-      if (ext === "dxf" || ext === "dwg") {
+      if (ext === "dxf" || ext === "dwg" || ext === "pdf") {
         onUpload(file);
       }
     }
@@ -77,7 +77,7 @@ export default function Sidebar({
         <input
           ref={inputRef}
           type="file"
-          accept=".dxf,.dwg"
+          accept=".dxf,.dwg,.pdf"
           onChange={handleChange}
           style={{ display: "none" }}
         />

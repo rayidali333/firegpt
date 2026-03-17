@@ -5,6 +5,7 @@ import { LegendData } from "../types";
 interface Props {
   onUpload: (file: File) => void;
   uploading: boolean;
+  uploadingFilename?: string;
   error: string | null;
   legend: LegendData | null;
   onLegendUpload: (file: File) => void;
@@ -15,6 +16,7 @@ interface Props {
 export default function UploadZone({
   onUpload,
   uploading,
+  uploadingFilename,
   error,
   legend,
   onLegendUpload,
@@ -28,6 +30,7 @@ export default function UploadZone({
   const [stage, setStage] = useState("");
   const [legendProgress, setLegendProgress] = useState(0);
   const [legendStage, setLegendStage] = useState("");
+  const isPdf = uploadingFilename?.toLowerCase().endsWith(".pdf");
 
   // Drawing upload progress
   useEffect(() => {
@@ -39,7 +42,18 @@ export default function UploadZone({
     setProgress(0);
     setStage("Reading file...");
 
-    const stages = legend
+    const stages = isPdf
+      ? [
+          { at: 8, label: "Uploading PDF drawing..." },
+          { at: 18, label: "Splitting PDF pages..." },
+          { at: 30, label: "Sending to AI vision model..." },
+          { at: 45, label: "Scanning floor plan for device symbols..." },
+          { at: 60, label: "Identifying fire alarm devices..." },
+          { at: 75, label: "Counting devices per type..." },
+          { at: 85, label: "Merging results across pages..." },
+          { at: 93, label: "Finalizing device counts..." },
+        ]
+      : legend
       ? [
           { at: 8, label: "Uploading drawing file..." },
           { at: 18, label: "Converting to DXF format..." },
@@ -76,7 +90,7 @@ export default function UploadZone({
     }, 200);
 
     return () => clearInterval(interval);
-  }, [uploading, legend]);
+  }, [uploading, legend, isPdf]);
 
   // Legend upload progress
   useEffect(() => {
@@ -117,7 +131,7 @@ export default function UploadZone({
   const handleDrawingFile = useCallback(
     (file: File) => {
       const ext = file.name.toLowerCase().split(".").pop();
-      if (ext !== "dxf" && ext !== "dwg") {
+      if (ext !== "dxf" && ext !== "dwg" && ext !== "pdf") {
         return;
       }
       onUpload(file);
@@ -144,8 +158,13 @@ export default function UploadZone({
       if (!file) return;
 
       const ext = file.name.toLowerCase().split(".").pop();
-      // Auto-detect: images/PDF = legend, DXF/DWG = drawing
-      if (["pdf", "png", "jpg", "jpeg", "gif", "webp"].includes(ext || "")) {
+      // Auto-detect: images = legend, DXF/DWG/PDF = drawing
+      // PDF is treated as a drawing if a legend is already uploaded, otherwise as a legend
+      if (ext === "pdf" && !legend) {
+        handleLegendFile(file);
+      } else if (ext === "pdf" && legend) {
+        handleDrawingFile(file);
+      } else if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext || "")) {
         handleLegendFile(file);
       } else if (ext === "dxf" || ext === "dwg") {
         handleDrawingFile(file);
@@ -187,7 +206,7 @@ export default function UploadZone({
           <div className="upload-spinner">
             <div className="spinner" />
             <p style={{ fontWeight: 500, marginBottom: 4 }}>
-              {legend ? "Analyzing with legend..." : "Analyzing drawing..."}
+              {isPdf ? "Analyzing PDF with AI vision..." : legend ? "Analyzing with legend..." : "Analyzing drawing..."}
             </p>
             <div className="preview-progress-bar" style={{ width: 240 }}>
               <div
@@ -218,7 +237,7 @@ export default function UploadZone({
             <Upload className="upload-icon" />
             <h2 className="upload-title">Upload a Construction Drawing</h2>
             <p className="upload-subtitle">
-              Drop your DXF or DWG file here, or click to browse.
+              Drop your DXF, DWG, or PDF file here, or click to browse.
               <br />
               FireGPT will detect and count all fire alarm symbols.
             </p>
@@ -265,6 +284,7 @@ export default function UploadZone({
               <div className="upload-formats">
                 <span className="format-badge">.DXF</span>
                 <span className="format-badge">.DWG</span>
+                <span className="format-badge">.PDF</span>
               </div>
             </div>
           </>
@@ -273,7 +293,7 @@ export default function UploadZone({
         <input
           ref={drawingInputRef}
           type="file"
-          accept=".dxf,.dwg"
+          accept=".dxf,.dwg,.pdf"
           onChange={handleDrawingChange}
           style={{ display: "none" }}
         />

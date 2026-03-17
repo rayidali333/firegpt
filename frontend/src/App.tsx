@@ -19,6 +19,7 @@ function App() {
   const [drawing, setDrawing] = useState<DrawingData | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadingFilename, setUploadingFilename] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis" | "legend">("symbols");
   const [preview, setPreview] = useState<DrawingPreview | null>(null);
@@ -90,6 +91,7 @@ function App() {
 
   const handleUpload = async (file: File) => {
     setUploading(true);
+    setUploadingFilename(file.name);
     setError(null);
     try {
       let data: DrawingData;
@@ -299,6 +301,7 @@ function App() {
               <UploadZone
                 onUpload={handleUpload}
                 uploading={uploading}
+                uploadingFilename={uploadingFilename}
                 error={error}
                 legend={legend}
                 onLegendUpload={handleLegendUpload}

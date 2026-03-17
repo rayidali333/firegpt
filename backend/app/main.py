@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color, get_category_color, get_symbol_palette_color
 from app.preview import generate_drawing_preview
-from app.chat import chat_with_drawing, chat_with_drawing_stream, classify_blocks_with_ai, parse_legend_with_vision
+from app.chat import chat_with_drawing, chat_with_drawing_stream, classify_blocks_with_ai, parse_legend_with_vision, parse_drawing_pdf_with_vision
 
 logger = logging.getLogger(__name__)
 
@@ -329,8 +329,8 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
         raise HTTPException(400, "No file provided")
 
     ext = Path(file.filename).suffix.lower()
-    if ext not in (".dxf", ".dwg"):
-        raise HTTPException(400, f"Unsupported file type: {ext}. Only .dxf and .dwg files are supported.")
+    if ext not in (".dxf", ".dwg", ".pdf"):
+        raise HTTPException(400, f"Unsupported file type: {ext}. Supported: .dxf, .dwg, .pdf")
 
     contents = await file.read()
     size_mb = len(contents) / (1024 * 1024)
@@ -356,6 +356,31 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
             )
     else:
         logger.info("No legend_id provided — using dictionary fast-path")
+
+    # PDF drawings: use AI vision instead of DXF parsing
+    if ext == ".pdf":
+        try:
+            parse_result = await parse_drawing_pdf_with_vision(
+                pdf_data=contents,
+                media_type="application/pdf",
+                filename=file.filename,
+                legend=legend,
+            )
+            # Override the drawing_id to match what we generated
+            parse_result.drawing_id = drawing_id
+        except Exception as e:
+            logger.error(f"PDF vision analysis failed: {e}")
+            raise HTTPException(500, f"Failed to analyze PDF drawing: {str(e)}")
+
+        # Store result and return (skip DXF-specific processing)
+        drawings_store[drawing_id] = parse_result
+        if legend_id:
+            drawing_legend_map[drawing_id] = legend_id
+        logger.info(
+            f"PDF drawing stored: id={drawing_id}, "
+            f"{parse_result.total_symbols} devices, {len(parse_result.symbols)} types"
+        )
+        return parse_result
 
     try:
         if ext == ".dxf":
