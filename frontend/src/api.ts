@@ -1,4 +1,4 @@
-import { DrawingData, DrawingPreview, ChatMessage, LegendData, LegendSymbol } from "./types";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData, LegendSymbol, ProjectData, ProjectSummary } from "./types";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
@@ -87,6 +87,15 @@ export async function uploadDrawing(file: File, legendId?: string): Promise<Draw
     data
   );
   return data;
+}
+
+export async function getDrawing(drawingId: string): Promise<DrawingData> {
+  const res = await fetch(`${API_BASE}/api/drawings/${drawingId}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Drawing not found" }));
+    throw new Error(err.detail || "Drawing not found");
+  }
+  return res.json();
 }
 
 export async function getDrawingPreview(
@@ -281,4 +290,149 @@ export async function deleteLegendSymbol(
     const err = await res.json().catch(() => ({ detail: "Delete failed" }));
     throw new Error(err.detail || "Delete failed");
   }
+}
+
+// ── Project API (Phase 4: Multi-Sheet & Batch Processing) ──
+
+export async function createProject(
+  name: string,
+  legendId?: string
+): Promise<ProjectData> {
+  const params = new URLSearchParams({ name });
+  if (legendId) params.set("legend_id", legendId);
+
+  const res = await fetch(`${API_BASE}/api/projects?${params}`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to create project" }));
+    throw new Error(err.detail || "Failed to create project");
+  }
+  return res.json();
+}
+
+export async function getProject(projectId: string): Promise<ProjectData> {
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Project not found" }));
+    throw new Error(err.detail || "Project not found");
+  }
+  return res.json();
+}
+
+export async function listProjects(): Promise<ProjectData[]> {
+  const res = await fetch(`${API_BASE}/api/projects`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function uploadDrawingToProject(
+  projectId: string,
+  file: File
+): Promise<DrawingData> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  console.log(`[FireGPT] Uploading drawing to project ${projectId}: ${file.name}`);
+
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/upload-drawing`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!res.ok) {
+    let detail = `Server error ${res.status}`;
+    try {
+      const errBody = await res.json();
+      detail = errBody.detail || detail;
+    } catch {
+      const textBody = await res.text().catch(() => "");
+      if (textBody) detail = `${detail}: ${textBody.slice(0, 200)}`;
+    }
+    throw new Error(detail);
+  }
+
+  return res.json();
+}
+
+export async function getProjectSummary(projectId: string): Promise<ProjectSummary> {
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/summary`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Summary failed" }));
+    throw new Error(err.detail || "Summary failed");
+  }
+  return res.json();
+}
+
+export async function chatWithProjectStream(
+  projectId: string,
+  message: string,
+  history: ChatMessage[] = [],
+  activeDrawingId?: string,
+  onChunk?: (text: string) => void,
+): Promise<string> {
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      project_id: projectId,
+      message,
+      history: history.map((m) => ({ role: m.role, content: m.content })),
+      active_drawing_id: activeDrawingId || null,
+    }),
+  });
+
+  if (!res.ok) {
+    // Fall back to non-streaming
+    const fallbackRes = await fetch(`${API_BASE}/api/projects/${projectId}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: projectId,
+        message,
+        history: history.map((m) => ({ role: m.role, content: m.content })),
+        active_drawing_id: activeDrawingId || null,
+      }),
+    });
+    if (!fallbackRes.ok) throw new Error("Chat failed");
+    const data = await fallbackRes.json();
+    return data.response;
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("No response body");
+
+  const decoder = new TextDecoder();
+  let fullText = "";
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const jsonStr = line.slice(6).trim();
+      if (!jsonStr) continue;
+
+      try {
+        const event = JSON.parse(jsonStr);
+        if (event.done) return fullText;
+        if (event.error) throw new Error(event.error);
+        if (event.text) {
+          fullText += event.text;
+          onChunk?.(event.text);
+        }
+      } catch (e) {
+        if (e instanceof SyntaxError) continue;
+        throw e;
+      }
+    }
+  }
+
+  return fullText;
 }

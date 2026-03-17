@@ -6,6 +6,7 @@ import os
 import re
 import traceback
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -27,7 +28,8 @@ logging.basicConfig(
 )
 from app.models import (
     AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendData, LegendSymbol,
-    ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
+    ParseResponse, PreviewResponse, ProjectChatRequest, ProjectData,
+    ProjectDrawingInfo, ProjectSummary, SymbolInfo, SymbolOverride,
 )
 
 load_dotenv()
@@ -59,6 +61,10 @@ preview_cache: dict[str, dict] = {}
 legend_store: dict[str, LegendData] = {}
 # Track which legend is associated with which drawing
 drawing_legend_map: dict[str, str] = {}  # drawing_id → legend_id
+# Project store — groups a legend + multiple drawings
+project_store: dict[str, ProjectData] = {}
+# Track which project a drawing belongs to
+drawing_project_map: dict[str, str] = {}  # drawing_id → project_id
 
 
 # ── Non-device block patterns for pre-classification filtering ──
@@ -1247,6 +1253,240 @@ def get_drawing_preview(drawing_id: str):
 
     preview_cache[drawing_id] = preview_data
     return PreviewResponse(**preview_data)
+
+
+# ── Project Endpoints (Phase 4: Multi-Sheet & Batch Processing) ──
+
+
+@app.post("/api/projects", response_model=ProjectData)
+async def create_project(name: str = "Untitled Project", legend_id: str | None = None):
+    """Create a new project. Optionally attach a confirmed legend."""
+    project_id = str(uuid.uuid4())
+
+    # Validate legend if provided
+    if legend_id and legend_id not in legend_store:
+        raise HTTPException(404, f"Legend {legend_id} not found")
+
+    project = ProjectData(
+        project_id=project_id,
+        name=name,
+        legend_id=legend_id,
+        drawing_ids=[],
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    project_store[project_id] = project
+    logger.info(f"Created project {project_id}: {name} (legend={legend_id})")
+    return project
+
+
+@app.get("/api/projects")
+def list_projects():
+    """List all projects with basic info."""
+    results = []
+    for p in project_store.values():
+        results.append({
+            "project_id": p.project_id,
+            "name": p.name,
+            "legend_id": p.legend_id,
+            "drawing_count": len(p.drawing_ids),
+            "created_at": p.created_at,
+        })
+    return results
+
+
+@app.get("/api/projects/{project_id}", response_model=ProjectData)
+def get_project(project_id: str):
+    """Get project details."""
+    if project_id not in project_store:
+        raise HTTPException(404, "Project not found")
+    return project_store[project_id]
+
+
+@app.post("/api/projects/{project_id}/upload-drawing", response_model=ParseResponse)
+async def project_upload_drawing(project_id: str, file: UploadFile):
+    """Upload a drawing to a project. Uses the project's legend for classification.
+
+    Delegates to the main upload endpoint, then links the drawing to the project.
+    """
+    if project_id not in project_store:
+        raise HTTPException(404, "Project not found")
+
+    project = project_store[project_id]
+
+    # Delegate to main upload endpoint (reuses full classification pipeline)
+    result = await upload_drawing(file, legend_id=project.legend_id)
+
+    # Link drawing to project
+    project.drawing_ids.append(result.drawing_id)
+    drawing_project_map[result.drawing_id] = project_id
+
+    logger.info(
+        f"Project {project_id}: added drawing {result.drawing_id} ({result.filename}), "
+        f"{result.total_symbols} symbols, {len(project.drawing_ids)} sheets total"
+    )
+
+    return result
+
+
+@app.get("/api/projects/{project_id}/summary", response_model=ProjectSummary)
+def get_project_summary(project_id: str):
+    """Get aggregated symbol counts across all drawings in the project."""
+    if project_id not in project_store:
+        raise HTTPException(404, "Project not found")
+
+    project = project_store[project_id]
+
+    # Aggregate symbols across all sheets
+    merged: dict[str, SymbolInfo] = {}  # label → merged SymbolInfo
+    per_sheet: dict[str, list[SymbolInfo]] = {}
+
+    for did in project.drawing_ids:
+        drawing = drawings_store.get(did)
+        if not drawing:
+            continue
+
+        per_sheet[did] = drawing.symbols
+
+        for sym in drawing.symbols:
+            key = sym.label.lower().strip()
+            if key in merged:
+                existing = merged[key]
+                merged[key] = SymbolInfo(
+                    block_name=existing.block_name,
+                    label=existing.label,
+                    count=existing.count + sym.count,
+                    locations=existing.locations + sym.locations,
+                    color=existing.color,
+                    confidence=existing.confidence,
+                    source=existing.source,
+                    block_variants=list(set(existing.block_variants + sym.block_variants + [sym.block_name])),
+                    shape_code=existing.shape_code,
+                    category=existing.category or sym.category,
+                    legend_code=existing.legend_code or sym.legend_code,
+                    legend_shape=existing.legend_shape or sym.legend_shape,
+                    svg_icon=existing.svg_icon or sym.svg_icon,
+                )
+            else:
+                merged[key] = sym.model_copy()
+
+    all_symbols = sorted(merged.values(), key=lambda s: s.count, reverse=True)
+    total = sum(s.count for s in all_symbols)
+
+    drawings_info = []
+    for did in project.drawing_ids:
+        d = drawings_store.get(did)
+        if d:
+            drawings_info.append(ProjectDrawingInfo(
+                drawing_id=did,
+                filename=d.filename,
+                file_type=d.file_type,
+                total_symbols=d.total_symbols,
+                symbol_types=len(d.symbols),
+            ))
+
+    return ProjectSummary(
+        project_id=project_id,
+        project_name=project.name,
+        total_drawings=len(project.drawing_ids),
+        total_symbols=total,
+        total_types=len(all_symbols),
+        symbols=all_symbols,
+        per_sheet=per_sheet,
+        drawings=drawings_info,
+    )
+
+
+@app.post("/api/projects/{project_id}/chat", response_model=ChatResponse)
+async def project_chat(project_id: str, request: ProjectChatRequest):
+    """Chat with project-wide context — all drawings' symbols injected."""
+    if project_id not in project_store:
+        raise HTTPException(404, "Project not found")
+
+    project = project_store[project_id]
+    if not project.drawing_ids:
+        raise HTTPException(400, "No drawings in this project yet. Upload drawings first.")
+
+    # Gather all drawings in the project
+    drawings = []
+    for did in project.drawing_ids:
+        d = drawings_store.get(did)
+        if d:
+            drawings.append(d)
+
+    legend = legend_store.get(project.legend_id) if project.legend_id else None
+
+    history = None
+    if request.history:
+        history = [{"role": h.role, "content": h.content} for h in request.history]
+
+    from app.chat import chat_with_project
+    response_text = await chat_with_project(
+        request.message, drawings, history, legend, request.active_drawing_id
+    )
+    return ChatResponse(response=response_text)
+
+
+@app.post("/api/projects/{project_id}/chat/stream")
+async def project_chat_stream(project_id: str, request: ProjectChatRequest):
+    """Streaming chat with project-wide context via SSE."""
+    if project_id not in project_store:
+        raise HTTPException(404, "Project not found")
+
+    project = project_store[project_id]
+    if not project.drawing_ids:
+        raise HTTPException(400, "No drawings in this project yet.")
+
+    drawings = []
+    for did in project.drawing_ids:
+        d = drawings_store.get(did)
+        if d:
+            drawings.append(d)
+
+    legend = legend_store.get(project.legend_id) if project.legend_id else None
+
+    history = None
+    if request.history:
+        history = [{"role": h.role, "content": h.content} for h in request.history]
+
+    from app.chat import chat_with_project_stream
+
+    async def event_generator():
+        try:
+            async for chunk in chat_with_project_stream(
+                request.message, drawings, history, legend, request.active_drawing_id
+            ):
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        except Exception as e:
+            logger.error(f"Project streaming chat error: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.patch("/api/projects/{project_id}")
+def update_project(project_id: str, name: str | None = None, legend_id: str | None = None):
+    """Update project name or legend."""
+    if project_id not in project_store:
+        raise HTTPException(404, "Project not found")
+
+    project = project_store[project_id]
+    if name is not None:
+        project.name = name
+    if legend_id is not None:
+        if legend_id and legend_id not in legend_store:
+            raise HTTPException(404, f"Legend {legend_id} not found")
+        project.legend_id = legend_id
+
+    return project
 
 
 @app.post("/api/chat", response_model=ChatResponse)

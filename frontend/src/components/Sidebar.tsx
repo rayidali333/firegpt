@@ -8,8 +8,9 @@ import {
   Flame,
   ClipboardList,
   BookOpen,
+  Layers,
 } from "lucide-react";
-import { DrawingData, LegendData } from "../types";
+import { DrawingData, LegendData, ProjectData } from "../types";
 
 interface Props {
   drawing: DrawingData | null;
@@ -20,6 +21,9 @@ interface Props {
   activeTab: "symbols" | "drawing" | "analysis" | "legend";
   onTabChange: (tab: "symbols" | "drawing" | "analysis" | "legend") => void;
   legend: LegendData | null;
+  project: ProjectData | null;
+  projectDrawings: Map<string, DrawingData>;
+  onSelectSheet: (drawingId: string) => void;
 }
 
 export default function Sidebar({
@@ -31,6 +35,9 @@ export default function Sidebar({
   activeTab,
   onTabChange,
   legend,
+  project,
+  projectDrawings,
+  onSelectSheet,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -97,9 +104,38 @@ export default function Sidebar({
       <div className="sidebar-section">
         <div className="sidebar-section-title">
           <span className="sidebar-section-arrow">&#9660;</span>
-          Drawings
+          {project ? (
+            <>
+              <Layers style={{ width: 12, height: 12, marginRight: 4 }} />
+              Sheets ({project.drawing_ids.length})
+            </>
+          ) : (
+            "Drawings"
+          )}
         </div>
-        {drawing ? (
+        {project ? (
+          // Project mode — show all sheets, highlight active one
+          project.drawing_ids.map((did) => {
+            const d = projectDrawings.get(did);
+            const isActive = drawing?.drawing_id === did;
+            return (
+              <div
+                key={did}
+                className={`sidebar-nav-item ${isActive ? "active" : ""}`}
+                onClick={() => onSelectSheet(did)}
+                style={{ cursor: "pointer" }}
+              >
+                <FileText />
+                <span className="sidebar-file-name">
+                  {d?.filename || did.slice(0, 8) + "..."}
+                </span>
+                {d && (
+                  <span className="sidebar-badge">{d.total_symbols}</span>
+                )}
+              </div>
+            );
+          })
+        ) : drawing ? (
           <div className="sidebar-nav-item active">
             <FileText />
             <span className="sidebar-file-name">{drawing.filename}</span>
@@ -149,19 +185,38 @@ export default function Sidebar({
       {drawing && (
         <div className="sidebar-bottom">
           <div className="sidebar-stats">
-            <div className="sidebar-stat">
-              <span className="stat-value">
-                {drawing.symbols.length}
-              </span>
-              <span className="stat-label">Types</span>
-            </div>
-            <div className="sidebar-stat">
-              <span className="stat-value">{drawing.total_symbols}</span>
-              <span className="stat-label">Devices</span>
-            </div>
+            {project ? (
+              <>
+                <div className="sidebar-stat">
+                  <span className="stat-value">{project.drawing_ids.length}</span>
+                  <span className="stat-label">Sheets</span>
+                </div>
+                <div className="sidebar-stat">
+                  <span className="stat-value">
+                    {Array.from(projectDrawings.values()).reduce(
+                      (sum, d) => sum + d.total_symbols, 0
+                    )}
+                  </span>
+                  <span className="stat-label">Total</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="sidebar-stat">
+                  <span className="stat-value">
+                    {drawing.symbols.length}
+                  </span>
+                  <span className="stat-label">Types</span>
+                </div>
+                <div className="sidebar-stat">
+                  <span className="stat-value">{drawing.total_symbols}</span>
+                  <span className="stat-label">Devices</span>
+                </div>
+              </>
+            )}
           </div>
           <button className="sidebar-action-btn" onClick={onReset}>
-            New Drawing
+            New {project ? "Project" : "Drawing"}
           </button>
         </div>
       )}

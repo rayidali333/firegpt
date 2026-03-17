@@ -74,6 +74,43 @@ class SymbolOverride(BaseModel):
     count: int
 
 
+class ProjectDrawingInfo(BaseModel):
+    """Metadata about a drawing within a project."""
+    drawing_id: str
+    filename: str
+    file_type: str
+    total_symbols: int
+    symbol_types: int  # Number of distinct symbol types
+
+
+class ProjectSummary(BaseModel):
+    """Aggregated symbol counts across all drawings in a project."""
+    project_id: str
+    project_name: str
+    total_drawings: int
+    total_symbols: int
+    total_types: int
+    symbols: list[SymbolInfo]  # Merged symbols across all sheets
+    per_sheet: dict[str, list[SymbolInfo]] = {}  # drawing_id → symbols for that sheet
+    drawings: list[ProjectDrawingInfo] = []
+
+
+class ProjectData(BaseModel):
+    """A project = 1 confirmed legend + N drawings."""
+    project_id: str
+    name: str
+    legend_id: str | None = None
+    drawing_ids: list[str] = []  # Ordered list of drawing IDs in this project
+    created_at: str = ""  # ISO timestamp
+
+
+class ProjectChatRequest(BaseModel):
+    project_id: str
+    message: str
+    history: list[ChatHistoryMessage] = []
+    active_drawing_id: str | None = None  # Optional: focus on a specific sheet
+
+
 class LegendSymbol(BaseModel):
     """A single symbol entry parsed from an uploaded legend sheet."""
     code: str  # Text code shown in symbol (e.g., "MFACP", "CR", "DS")

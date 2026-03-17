@@ -99,6 +99,14 @@ The UI uses a warm, vintage aesthetic:
 | `GET` | `/api/drawings` | List all uploaded drawings |
 | `POST` | `/api/chat` | Send message + drawing_id + history → Claude response |
 | `POST` | `/api/chat/stream` | Streaming chat via SSE — same payload, returns text/event-stream |
+| `POST` | `/api/projects` | Create a new project (optional legend_id) |
+| `GET` | `/api/projects` | List all projects |
+| `GET` | `/api/projects/{id}` | Get project details |
+| `PATCH` | `/api/projects/{id}` | Update project name/legend |
+| `POST` | `/api/projects/{id}/upload-drawing` | Upload drawing to project (batch) |
+| `GET` | `/api/projects/{id}/summary` | Aggregated symbol counts across all sheets |
+| `POST` | `/api/projects/{id}/chat` | Chat with project-wide context |
+| `POST` | `/api/projects/{id}/chat/stream` | Streaming chat with project-wide context |
 | `GET` | `/{path}` | SPA catch-all (serves React index.html) |
 
 ## Data Flow
@@ -159,6 +167,16 @@ git push origin main  # Render auto-deploys from main
 | `PORT` | No | Server port (default: 8000, Render sets automatically) |
 
 ## Change Log
+
+### v1.3.0 - Multi-Sheet & Batch Processing (Phase 4 + 5B)
+- **Project Model**: `ProjectData` model — groups 1 legend + N drawings as a project
+- **Batch Upload**: `POST /api/projects/{id}/upload-drawing` — upload multiple DXF/DWG files to a project, process all against the same legend
+- **Aggregated Summary**: `GET /api/projects/{id}/summary` — merged symbol counts across all sheets with per-sheet breakdown
+- **Sheet Navigation**: Sidebar shows all sheets in a project, click to switch active drawing without re-uploading
+- **Auto-Project Creation**: Uploading a second drawing auto-creates a project containing both drawings
+- **Project-Wide Chat**: `POST /api/projects/{id}/chat/stream` — Claude sees all sheets' symbol data for project-wide queries
+- **Active Sheet Context**: Chat prioritizes the currently-viewed sheet while maintaining project-wide awareness
+- **Project API**: Full CRUD — create, list, get, update projects with legend association
 
 ### v1.2.0 - Matching Accuracy & Streaming Chat
 - **Nearby Text Label Matching (Strategy 7)**: Matches device codes placed as TEXT entities near symbols on the floor plan. Enables single-character legend codes ("S", "H") that were previously filtered by the `len >= 2` requirement in block name segment matching.
@@ -240,16 +258,16 @@ Improve how extracted legend symbols get matched to DXF blocks. AI classificatio
 - **3D. Unmatched block diagnostics**: ✅ LEGEND COVERAGE section in Analysis tab shows matched/unmatched legend symbols, per-block strategy trace, AI classification trace.
 - **3E. Fuzzy code matching**: ✅ Strategy 8 adds separator normalization (`FM-AIM` = `FMAIM`), Levenshtein distance (edit distance ≤1 for short codes, ≤2 for longer). Applied to sub_group values, attribs, block name segments, and nearby labels.
 
-### Phase 4: Multi-Sheet & Batch Processing [ ]
-Support real-world projects with multiple drawing sheets. No project model or batch support exists yet — all storage is single-drawing, in-memory dicts.
+### Phase 4: Multi-Sheet & Batch Processing [✓]
+Support real-world projects with multiple drawing sheets.
 
-- **4A. Project model**: `ProjectData` in models.py containing legend + list of drawings. `project_store` dict in main.py. A project = 1 confirmed legend + N drawings.
-- **4B. Batch upload**: New `/api/projects/{id}/upload-drawing` endpoint. Upload multiple DXF/DWG files, process all against the same legend. Progress tracking per file.
-- **4C. Aggregated symbol table**: New `/api/projects/{id}/summary` endpoint. Project summary merging counts across all sheets with per-sheet breakdown.
-- **4D. Sheet navigation**: Extend sidebar to show sheets within a project, click to switch active drawing without re-uploading.
+- **4A. Project model**: ✅ `ProjectData` in models.py containing legend + list of drawings. `project_store` dict in main.py. A project = 1 confirmed legend + N drawings.
+- **4B. Batch upload**: ✅ `/api/projects/{id}/upload-drawing` endpoint. Upload multiple DXF/DWG files, process all against the same legend. Auto-project creation on second drawing upload.
+- **4C. Aggregated symbol table**: ✅ `/api/projects/{id}/summary` endpoint. Project summary merging counts across all sheets with per-sheet breakdown.
+- **4D. Sheet navigation**: ✅ Sidebar shows sheets within a project, click to switch active drawing without re-uploading.
 
-### Phase 5: Chat & Streaming [~50%]
+### Phase 5: Chat & Streaming [✓]
 Real-time chat experience with project-wide context.
 
 - **5A. Streaming chat responses**: ✅ FastAPI `StreamingResponse` + Anthropic `messages.stream()` with SSE via `/api/chat/stream`. Frontend: `chatWithDrawingStream()` reads SSE chunks, updates ChatPanel incrementally with blinking cursor. Falls back to non-streaming `/api/chat` on failure.
-- **5B. Enhanced chat context**: Once Phase 4 exists, inject aggregated symbol JSON across all sheets into system prompt for project-wide queries.
+- **5B. Enhanced chat context**: ✅ Project-wide chat via `/api/projects/{id}/chat/stream`. Aggregated symbol JSON across all sheets injected into system prompt. Active sheet context prioritized. Per-sheet breakdowns and project totals in responses.

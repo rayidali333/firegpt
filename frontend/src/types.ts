@@ -73,3 +73,30 @@ export interface LegendData {
   total_symbols: number;
   systems: string[];
 }
+
+export interface ProjectData {
+  project_id: string;
+  name: string;
+  legend_id: string | null;
+  drawing_ids: string[];
+  created_at: string;
+}
+
+export interface ProjectDrawingInfo {
+  drawing_id: string;
+  filename: string;
+  file_type: string;
+  total_symbols: number;
+  symbol_types: number;
+}
+
+export interface ProjectSummary {
+  project_id: string;
+  project_name: string;
+  total_drawings: number;
+  total_symbols: number;
+  total_types: number;
+  symbols: SymbolInfo[];
+  per_sheet: Record<string, SymbolInfo[]>;
+  drawings: ProjectDrawingInfo[];
+}

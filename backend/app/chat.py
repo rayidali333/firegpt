@@ -1830,3 +1830,147 @@ async def chat_with_drawing_stream(
     ) as stream:
         async for text in stream.text_stream:
             yield text
+
+
+def _build_project_system_prompt(
+    drawings: list[ParseResponse],
+    legend: LegendData | None = None,
+    active_drawing_id: str | None = None,
+) -> str:
+    """Build a system prompt with aggregated data from all project drawings."""
+
+    # Build legend section
+    legend_section = ""
+    if legend:
+        legend_entries = "\n".join(
+            f"  - {s.code}: {s.name} [{s.category}]"
+            for s in legend.symbols
+        )
+        legend_section = f"""
+PROJECT LEGEND (from "{legend.filename}"):
+{legend_entries}
+"""
+
+    # Build per-sheet data
+    sheets_data = []
+    total_project_symbols = 0
+    for d in drawings:
+        sheet_symbols = []
+        for s in d.symbols:
+            entry = {"label": s.label, "count": s.count}
+            if s.legend_code:
+                entry["code"] = s.legend_code
+            sheet_symbols.append(entry)
+        total_project_symbols += d.total_symbols
+        sheets_data.append({
+            "drawing_id": d.drawing_id,
+            "filename": d.filename,
+            "total_symbols": d.total_symbols,
+            "symbols": sheet_symbols,
+        })
+
+    sheets_json = json.dumps(sheets_data, indent=2)
+
+    # Build aggregated totals
+    merged: dict[str, int] = {}
+    for d in drawings:
+        for s in d.symbols:
+            key = s.label.lower().strip()
+            merged[key] = merged.get(key, 0) + s.count
+    agg_lines = "\n".join(
+        f"  - {label}: {count}"
+        for label, count in sorted(merged.items(), key=lambda x: -x[1])
+    )
+
+    active_note = ""
+    if active_drawing_id:
+        active_d = next((d for d in drawings if d.drawing_id == active_drawing_id), None)
+        if active_d:
+            active_note = f'\nThe user is currently viewing sheet "{active_d.filename}". Prioritize this sheet when answering unless the question is about the whole project.\n'
+
+    return f"""You are FireGPT, a professional AI assistant built for fire alarm contractors \
+and smart building engineers. You specialize in analyzing construction drawings, \
+fire alarm system design, and project estimation.
+
+You are helping a fire alarm contractor analyze a PROJECT with {len(drawings)} drawing sheets.
+{legend_section}{active_note}
+PROJECT SYMBOL DATA BY SHEET:
+{sheets_json}
+
+AGGREGATED TOTALS ACROSS ALL SHEETS:
+{agg_lines}
+
+TOTAL PROJECT SYMBOLS: {total_project_symbols} across {len(drawings)} sheets
+
+INSTRUCTIONS:
+- Answer questions about symbol counts, types, and locations accurately.
+- When asked about counts, provide BOTH per-sheet breakdowns AND project totals.
+- If asked about a specific sheet, use that sheet's data. Otherwise use aggregated totals.
+- Help with bid estimation using project-wide totals for material takeoffs.
+- Be concise and direct. Fire alarm contractors need quick, accurate answers.
+- Format counts and lists clearly using markdown tables when appropriate.
+- Use **bold** for important numbers and device names.
+
+COST ESTIMATION GUIDELINES:
+When asked about cost estimates, use typical US market rates (2024-2025 pricing):
+- Smoke Detector: $25-45 material + $75-120 labor per device
+- Heat Detector: $20-35 material + $75-120 labor per device
+- Pull Station: $30-50 material + $75-120 labor per device
+- Horn/Strobe: $40-80 material + $75-120 labor per device
+- Speaker/Strobe: $60-120 material + $100-150 labor per device
+- FACP (small): $2,000-5,000 material + $1,500-3,000 labor
+- Monitor/Control Module: $35-70 material + $75-120 labor each
+- Wiring: avg 75 ft/device at $1.50-3.00/ft
+Present LOW and HIGH ranges. Add 10-15% overhead + 10-15% contingency."""
+
+
+async def chat_with_project(
+    message: str,
+    drawings: list[ParseResponse],
+    history: list[dict] | None = None,
+    legend: LegendData | None = None,
+    active_drawing_id: str | None = None,
+) -> str:
+    """Chat with project-wide context — all drawings' symbols in system prompt."""
+    api_client = _get_client()
+
+    messages = []
+    if history:
+        for h in history:
+            messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": message})
+
+    response = await api_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=_build_project_system_prompt(drawings, legend, active_drawing_id),
+        messages=messages,
+    )
+
+    return response.content[0].text
+
+
+async def chat_with_project_stream(
+    message: str,
+    drawings: list[ParseResponse],
+    history: list[dict] | None = None,
+    legend: LegendData | None = None,
+    active_drawing_id: str | None = None,
+):
+    """Stream a project-wide chat response as text chunks."""
+    api_client = _get_client()
+
+    messages = []
+    if history:
+        for h in history:
+            messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": message})
+
+    async with api_client.messages.stream(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=_build_project_system_prompt(drawings, legend, active_drawing_id),
+        messages=messages,
+    ) as stream:
+        async for text in stream.text_stream:
+            yield text

@@ -1,6 +1,10 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
-import { uploadDrawing, uploadLegend, getDrawingPreview, chatWithDrawingStream, overrideSymbol, getExportUrl } from "./api";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData, ProjectData } from "./types";
+import {
+  uploadDrawing, uploadLegend, getDrawingPreview, chatWithDrawingStream,
+  overrideSymbol, getExportUrl, createProject, uploadDrawingToProject,
+  chatWithProjectStream, getDrawing,
+} from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
@@ -24,6 +28,10 @@ function App() {
   const [legend, setLegend] = useState<LegendData | null>(null);
   const [legendUploading, setLegendUploading] = useState(false);
   const [legendError, setLegendError] = useState<string | null>(null);
+
+  // Project / multi-sheet state
+  const [project, setProject] = useState<ProjectData | null>(null);
+  const [projectDrawings, setProjectDrawings] = useState<Map<string, DrawingData>>(new Map());
 
   // Load preview when drawing changes
   useEffect(() => {
@@ -84,7 +92,38 @@ function App() {
     setUploading(true);
     setError(null);
     try {
-      const data = await uploadDrawing(file, legend?.legend_id);
+      let data: DrawingData;
+
+      if (project) {
+        // Already in project mode — add drawing to existing project
+        data = await uploadDrawingToProject(project.project_id, file);
+        setProject((prev) =>
+          prev ? { ...prev, drawing_ids: [...prev.drawing_ids, data.drawing_id] } : prev
+        );
+        setProjectDrawings((prev) => new Map(prev).set(data.drawing_id, data));
+      } else if (drawing) {
+        // Second drawing uploaded — auto-create a project
+        const proj = await createProject(
+          "Untitled Project",
+          legend?.legend_id || undefined
+        );
+        // Add the existing first drawing to the project
+        proj.drawing_ids.push(drawing.drawing_id);
+        // Upload new drawing to the project
+        data = await uploadDrawingToProject(proj.project_id, file);
+        proj.drawing_ids.push(data.drawing_id);
+        setProject(proj);
+        setProjectDrawings(
+          new Map([
+            [drawing.drawing_id, drawing],
+            [data.drawing_id, data],
+          ])
+        );
+      } else {
+        // First drawing — single-drawing mode
+        data = await uploadDrawing(file, legend?.legend_id);
+      }
+
       setDrawing(data);
       setMessages([]);
       setActiveTab("symbols");
@@ -113,26 +152,39 @@ function App() {
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setChatSending(true);
 
+    const onChunk = (chunk: string) => {
+      setMessages((prev) => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last && last.role === "assistant") {
+          updated[updated.length - 1] = {
+            ...last,
+            content: last.content + chunk,
+          };
+        }
+        return updated;
+      });
+    };
+
     try {
-      // Stream the response — update the last message incrementally
-      await chatWithDrawingStream(
-        drawing.drawing_id,
-        message,
-        messages,
-        (chunk: string) => {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last && last.role === "assistant") {
-              updated[updated.length - 1] = {
-                ...last,
-                content: last.content + chunk,
-              };
-            }
-            return updated;
-          });
-        },
-      );
+      if (project) {
+        // Project mode — use project-wide chat with all sheets' context
+        await chatWithProjectStream(
+          project.project_id,
+          message,
+          messages,
+          drawing.drawing_id,
+          onChunk,
+        );
+      } else {
+        // Single-drawing mode
+        await chatWithDrawingStream(
+          drawing.drawing_id,
+          message,
+          messages,
+          onChunk,
+        );
+      }
     } catch (e: any) {
       setMessages((prev) => {
         const updated = [...prev];
@@ -159,7 +211,26 @@ function App() {
     setSelectedSymbol(null);
     setLegend(null);
     setLegendError(null);
+    setProject(null);
+    setProjectDrawings(new Map());
   };
+
+  const handleSelectSheet = useCallback(async (drawingId: string) => {
+    // Switch to a different sheet in the project
+    let d = projectDrawings.get(drawingId);
+    if (!d) {
+      try {
+        d = await getDrawing(drawingId);
+        setProjectDrawings((prev) => new Map(prev).set(drawingId, d!));
+      } catch {
+        return;
+      }
+    }
+    setDrawing(d);
+    setPreview(null);
+    setSelectedSymbol(null);
+    setActiveTab("symbols");
+  }, [projectDrawings]);
 
   const handleSelectSymbol = useCallback(
     (blockName: string | null) => {
@@ -219,6 +290,9 @@ function App() {
             activeTab={activeTab}
             onTabChange={setActiveTab}
             legend={legend}
+            project={project}
+            projectDrawings={projectDrawings}
+            onSelectSheet={handleSelectSheet}
           />
           <main className="main-content">
             {!drawing ? (
@@ -266,7 +340,9 @@ function App() {
                   )}
                   <div className="content-tabs-fill" />
                   <span className="content-tabs-filename">
-                    {drawing.filename}
+                    {project
+                      ? `Sheet ${(project.drawing_ids.indexOf(drawing.drawing_id) + 1)} of ${project.drawing_ids.length}: ${drawing.filename}`
+                      : drawing.filename}
                   </span>
                 </div>
 
