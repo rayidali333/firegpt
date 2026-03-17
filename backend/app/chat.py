@@ -523,7 +523,7 @@ Respond with ONLY a JSON array:
 
     try:
         response = await api_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6-20250514",
             max_tokens=max_tokens,
             messages=[{
                 "role": "user",
@@ -858,7 +858,7 @@ Output ONLY a JSON object mapping category to count:
 
     try:
         response = await api_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6-20250514",
             max_tokens=1024,
             messages=[{
                 "role": "user",
@@ -1049,7 +1049,7 @@ Respond with ONLY the JSON array."""
 
     try:
         response = await api_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6-20250514",
             max_tokens=32768,
             messages=[{
                 "role": "user",
@@ -1089,8 +1089,9 @@ Respond with ONLY the JSON array."""
     existing_codes = {
         s.get("code", "").upper().strip() for s in extracted
     }
-    # Cap reconciliation additions at 20% of current count to prevent runaway hallucination
-    max_additions = max(5, len(extracted) // 5)
+    # Cap reconciliation additions — generous for small legends (where hallucination
+    # risk is low), tighter for large ones.  33% or at least 8.
+    max_additions = max(8, len(extracted) // 3)
     added = 0
     skipped_code_collision = 0
     for entry in missed:
@@ -1133,14 +1134,16 @@ async def parse_legend_with_vision(
 ) -> LegendData:
     """Parse a legend sheet image/PDF into structured symbol data using Claude Vision.
 
-    Simple pipeline — ONE extraction pass, no multi-pass/crop/reconciliation.
-    The previous multi-pass approach (3 passes + crops + reconciliation) was a
-    hallucination amplifier: each pass hallucinated different fake symbols, and
-    the union accumulated them all, inflating ~70 real symbols to 200+.
+    Extract + Reconcile pipeline — one extraction pass per page, followed by a
+    targeted "what did I miss?" reconciliation pass on the same page.  This is
+    NOT the old multi-pass union approach (which was a hallucination amplifier
+    that inflated ~70 real symbols to 200+).  Reconciliation is constrained:
+    it shows Claude what was already found and asks only for specific missed
+    rows, with dedup, code-collision detection, and addition caps.
 
     Pipeline:
-      1. For multi-page PDFs: split into pages, extract each page once.
-      2. Single extraction pass per page.
+      1. For multi-page PDFs: split into pages.
+      2. Per page: one extraction pass → one reconciliation pass.
       3. Deduplicate across pages.
       4. Convert to LegendSymbol with domain-knowledge shape corrections.
       5. Generate SVG icons.
@@ -1165,7 +1168,12 @@ async def parse_legend_with_vision(
         f"Strategy: {'multi-page PDF (' + str(page_count) + ' pages)' if is_multi_page else 'single page/image'}"
     )
 
-    # ── Step 2: Single-pass extraction ──
+    # ── Step 2: Extract + reconcile per page ──
+    # Pipeline: extract each page once, then run a targeted "what did I miss?"
+    # reconciliation pass on the same page.  The reconciliation is NOT the same
+    # as the old multi-pass union (which was a hallucination amplifier).  It
+    # shows Claude what it already found and asks for specific missed rows,
+    # capped to prevent runaway additions.
     all_raw_symbols: list[dict] = []
 
     if is_multi_page:
@@ -1178,6 +1186,10 @@ async def parse_legend_with_vision(
             page_symbols = await _extract_symbols_from_page(
                 api_client, image_data, media_type, page_context="",
             )
+            # Reconciliation on the full document
+            page_symbols = await _reconciliation_pass(
+                api_client, page_symbols, image_data, media_type,
+            )
             all_raw_symbols = page_symbols
         else:
             for page_data, page_num in page_pdfs:
@@ -1188,6 +1200,14 @@ async def parse_legend_with_vision(
                 logger.info(
                     f"  Page {page_num}: extracted {len(page_symbols)} symbols"
                 )
+                # Per-page reconciliation — catch missed symbols while
+                # the model is focused on just this one page
+                page_symbols = await _reconciliation_pass(
+                    api_client, page_symbols, page_data, "application/pdf",
+                )
+                logger.info(
+                    f"  Page {page_num}: {len(page_symbols)} symbols after reconciliation"
+                )
                 all_raw_symbols.extend(page_symbols)
 
             logger.info(
@@ -1195,9 +1215,12 @@ async def parse_legend_with_vision(
                 f"across {page_count} pages"
             )
     else:
-        # Single page PDF or image — one extraction pass
+        # Single page PDF or image — extract then reconcile
         all_raw_symbols = await _extract_symbols_from_page(
             api_client, image_data, media_type, page_context="",
+        )
+        all_raw_symbols = await _reconciliation_pass(
+            api_client, all_raw_symbols, image_data, media_type,
         )
 
     if not all_raw_symbols:

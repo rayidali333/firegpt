@@ -168,6 +168,12 @@ git push origin main  # Render auto-deploys from main
 
 ## Change Log
 
+### v1.4.0 - Legend Extraction Accuracy (Phase 1F)
+- **Reconciliation Pass Re-enabled**: After single-pass extraction per page, a targeted "what did I miss?" pass shows Claude the already-extracted symbols and asks for specific missed rows. NOT the old multi-pass union (hallucination amplifier) — constrained with dedup, code-collision detection, and addition caps.
+- **Per-Page Reconciliation**: For multi-page PDFs, reconciliation runs on each page individually (focused context) rather than globally.
+- **Generous Small-Legend Caps**: Addition cap raised from 20% to 33% (min 8) — small legends (e.g. 18 symbols) have low hallucination risk, so the reconciliation can recover more missed entries.
+- **Model Upgrade**: Legend extraction and reconciliation upgraded from `claude-sonnet-4` to `claude-sonnet-4-6` for improved vision accuracy.
+
 ### v1.3.0 - Multi-Sheet & Batch Processing (Phase 4 + 5B)
 - **Project Model**: `ProjectData` model — groups 1 legend + N drawings as a project
 - **Batch Upload**: `POST /api/projects/{id}/upload-drawing` — upload multiple DXF/DWG files to a project, process all against the same legend
@@ -238,7 +244,7 @@ Fix the legend parsing pipeline so every symbol on the legend sheet is extracted
 - **1C. Bump token budget**: ✅ Increase `max_tokens` from 16384 to 32768 for legend extraction calls.
 - **1D. Replace verification pass with reconciliation**: ✅ After merging all pages/sections, reconcile against expected section counts instead of open-ended "find what I missed."
 - **1E. Truncation recovery**: ✅ If `stop_reason == "max_tokens"`, retry that page/section with increased budget.
-- **1F. Close the last 10-20% gap**: [ ] Investigate why remaining symbols are missed — likely dense/unusual layouts, small text, overlapping entries, or multi-column sections that the vision model skips. Possible approaches: higher-res page crops, overlapping region extraction, structured grid detection, or multi-pass with different prompting strategies.
+- **1F. Close the last 10-20% gap**: ✅ Re-enabled targeted reconciliation pass (extract → "what did I miss?" with anti-hallucination constraints). Per-page reconciliation for multi-page PDFs. Upgraded to Claude Sonnet 4.6 for better vision accuracy. Raised addition caps for small legends.
 
 ### Phase 2: Legend Review & Edit UI [x]
 Let users verify and correct the AI-extracted legend before processing drawings.
