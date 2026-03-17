@@ -61,6 +61,38 @@ legend_store: dict[str, LegendData] = {}
 drawing_legend_map: dict[str, str] = {}  # drawing_id → legend_id
 
 
+# ── Non-device block patterns for pre-classification filtering ──
+# Blocks matching these patterns are architectural/structural/furniture/plumbing
+# elements that should never be classified as fire alarm devices.
+_NON_DEVICE_BLOCK_PATTERNS = [
+    re.compile(r"(?i)^Grid\b"),                    # Structural grid markers (column grids)
+    re.compile(r"(?i)^IP-LND-"),                   # Project XREF references (arch/struct/ID)
+    re.compile(r"(?i)^AR-"),                        # Architectural blocks (doors, walls, columns)
+    re.compile(r"(?i)^ST-"),                        # Structural blocks
+    re.compile(r"(?i)^Railing\b"),                  # Railings
+    re.compile(r"(?i)^Chair\b"),                    # Furniture
+    re.compile(r"(?i)^Sofa\b"),                     # Furniture
+    re.compile(r"(?i)^Table\b"),                    # Furniture
+    re.compile(r"(?i)^Credenza\b"),                 # Furniture
+    re.compile(r"(?i)^Walls\b"),                    # Wall geometry blocks
+    re.compile(r"(?i)^Window\b"),                   # Windows
+    re.compile(r"(?i)^Door\b"),                     # Doors
+    re.compile(r"(?i)^Floor Drain\b"),              # Plumbing
+    re.compile(r"(?i)^Urinal\b"),                   # Plumbing
+    re.compile(r"(?i)^Sink\b"),                     # Plumbing
+    re.compile(r"(?i)^WCPan\b"),                    # Plumbing
+    re.compile(r"(?i)^Sanitary\b"),                 # Sanitary fixtures
+    re.compile(r"(?i)^COTTO\b"),                    # Bathroom accessories brand
+    re.compile(r"(?i)^Mediclinics\b"),              # Dispensers brand
+    re.compile(r"(?i)^Top Rail\b"),                 # Railing components
+    re.compile(r"(?i)^NBS_EscpRtSgns\b"),           # Evacuation route signs (not fire alarm devices)
+    re.compile(r"(?i)^Furniture\b"),                # Generic furniture
+    re.compile(r"(?i)^Lab Stool\b"),               # Furniture
+    re.compile(r"(?i)^Printer\b"),                 # Office equipment
+    re.compile(r"(?i)^Electrical Equipment\b"),     # Generic electrical
+]
+
+
 # ── Fuzzy matching utilities for Phase 3E ──
 
 def _normalize_code(code: str) -> str:
@@ -117,7 +149,9 @@ def _fuzzy_legend_lookup(
                 return sym, f"separator_normalized({value}→{val_norm}={code})"
 
     # 3. Levenshtein distance for close matches
-    if len(val_upper) >= 2:
+    # Require minimum 3 chars to avoid false positives with short generic prefixes
+    # like IT~IP, AC~BC, etc. that appear in Revit block naming conventions.
+    if len(val_upper) >= 3:
         max_dist = 1 if len(val_upper) <= 4 else 2
         best_match = None
         best_dist = max_dist + 1
@@ -362,11 +396,35 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                     "message": f"  • {', '.join(parts)}",
                 })
 
+    # === FILTER NON-DEVICE BLOCKS ===
+    # Remove blocks that are clearly not fire alarm devices before classification.
+    # These cause false positives when their block names contain segments that
+    # fuzzy-match legend codes (e.g., "Grid" blocks matching "LAN", XREF blocks
+    # matching "IP").
+    filtered_candidates = []
+    filtered_out_count = 0
+    for block in parse_result.ai_candidate_blocks:
+        # Check against non-device patterns (module-level _NON_DEVICE_BLOCK_PATTERNS)
+        is_non_device = any(p.search(block.block_name) for p in _NON_DEVICE_BLOCK_PATTERNS)
+        if is_non_device:
+            filtered_out_count += block.count
+            continue
+        filtered_candidates.append(block)
+
+    if filtered_out_count > 0:
+        parse_result.analysis.append({
+            "type": "detail",
+            "message": (
+                f"Filtered out {filtered_out_count} non-device entities "
+                f"(architectural, structural, furniture, plumbing blocks)"
+            ),
+        })
+
     # === DIRECT LEGEND CODE MATCHING ===
     # Before AI classification, try to match blocks directly against legend codes
     # using multiple strategies (attribute values, attdef defaults, block def text,
     # block name segments). Much more accurate than AI guessing from names alone.
-    all_candidates = parse_result.ai_candidate_blocks
+    all_candidates = filtered_candidates
     blocks_to_classify = []  # Blocks that still need AI classification
     direct_matched_count = 0
 
@@ -423,6 +481,22 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
             legend_match_words[key] = words
             legend_names_by_length.append(ls)
 
+        # Segment exclusion list for Strategies 5 and 8: common drawing title words
+        # and Revit naming prefixes that should never be matched as device codes.
+        _SEGMENT_EXCLUSIONS = {
+            # Drawing title words (from "FIRE ALARM _ VOICE EVACUATION SYSTEMS_ GROUND FLOOR PLAN OVERALL")
+            "FIRE", "ALARM", "VOICE", "EVACUATION", "SYSTEMS", "GROUND", "FLOOR",
+            "PLAN", "OVERALL", "LEVEL", "LAYOUT", "SHEET", "DRAWING", "VIEW",
+            "FIRST", "SECOND", "THIRD", "BASEMENT", "ROOF", "MEZZANINE",
+            # Revit structural/architectural prefixes
+            "IP", "IT", "AR", "ST", "ID", "EL", "ME",
+            # Common non-device words
+            "RVT", "DWG", "DXF", "CAD", "REV", "MODEL", "SPACE",
+            "GRID", "HEAD", "CIRCLED", "GRIDLINES",
+            # Architectural elements
+            "WALL", "DOOR", "WINDOW", "COLUMN", "BEAM", "SLAB",
+        }
+
         # Track per-label colors for direct matches
         direct_label_color_map: dict[str, str] = {}
         direct_color_index = 0
@@ -472,17 +546,20 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
 
             # Strategy 5: Parse block name segments and match against legend codes
             # Block names like "IT-DVC-FAM-Fire Modules-111" → segments: IT, DVC, FAM, Fire, Modules, 111
-            # Only match codes that are 2+ chars to avoid false positives with single-char codes
+            # Only match codes that are 2+ chars to avoid false positives with single-char codes.
+            # Exclude common drawing title words and Revit naming prefixes (see _SEGMENT_EXCLUSIONS above).
             if not matched_legend_sym:
                 segments = re.split(r'[-_\s.]+', block.block_name)
                 for segment in segments:
                     seg_upper = segment.upper().strip()
-                    if len(seg_upper) >= 2 and seg_upper in legend_code_lookup:
+                    if len(seg_upper) < 2 or seg_upper in _SEGMENT_EXCLUSIONS:
+                        continue
+                    if seg_upper in legend_code_lookup:
                         checked_values.append(f"name_segment={seg_upper} ✓")
                         matched_legend_sym = legend_code_lookup[seg_upper]
                         match_source = f"block_name_segment={segment}"
                         break
-                    elif len(seg_upper) >= 2:
+                    else:
                         checked_values.append(f"name_segment={seg_upper}")
 
             # Strategy 6: Match legend NAMES against block name description text
@@ -613,12 +690,12 @@ async def upload_drawing(file: UploadFile, legend_id: str | None = None):
                             checked_values.append(f"fuzzy_attrib({tag}) ✓")
                             break
 
-                # Try fuzzy on block name segments
+                # Try fuzzy on block name segments (reuse same exclusion list)
                 if not matched_legend_sym:
                     segments = re.split(r'[-_\s.]+', block.block_name)
                     for segment in segments:
                         seg_upper = segment.upper().strip()
-                        if len(seg_upper) < 2:
+                        if len(seg_upper) < 2 or seg_upper in _SEGMENT_EXCLUSIONS:
                             continue
                         fuzzy_sym, fuzzy_desc = _fuzzy_legend_lookup(
                             seg_upper, legend_code_lookup
