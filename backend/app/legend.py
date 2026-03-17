@@ -28,10 +28,10 @@ from app.models import AnalysisStep, LegendDevice, LegendParseResponse
 
 logger = logging.getLogger(__name__)
 
-# PDF rendering DPI — 150 balances clarity with memory usage.
+# PDF rendering DPI — 200 balances clarity with memory usage.
 # Render free tier has only 512MB RAM; 300 DPI creates ~50MB pixmaps per page
-# which OOM-kills the process. 150 DPI is still very readable for Claude Vision.
-PDF_RENDER_DPI = 150
+# which OOM-kills the process. 200 DPI is readable for Claude Vision.
+PDF_RENDER_DPI = 200
 
 # Maximum image dimension before resizing
 MAX_IMAGE_DIMENSION = 2048
@@ -163,15 +163,24 @@ async def parse_legend_file(
     _log(analysis, "info",
          f"Abbreviations found: {abbrev_count}/{len(devices)} devices have abbreviations")
 
-    # Log a sample of devices for debugging
-    sample_size = min(8, len(devices))
-    sample_entries = devices[:sample_size]
-    for d in sample_entries:
-        abbr = f" ({d.abbreviation})" if d.abbreviation else ""
-        desc_preview = d.symbol_description[:80] + "..." if len(d.symbol_description) > 80 else d.symbol_description
-        _log(analysis, "info", f"  → {d.name}{abbr}: {desc_preview}")
-    if len(devices) > sample_size:
-        _log(analysis, "info", f"  ... and {len(devices) - sample_size} more devices")
+    # Log ALL extracted devices to console for full visibility
+    logger.info("=" * 70)
+    logger.info("LEGEND EXTRACTION RESULTS — All detected devices:")
+    logger.info("=" * 70)
+    for i, d in enumerate(devices, 1):
+        abbr = f" [{d.abbreviation}]" if d.abbreviation else ""
+        logger.info(f"  {i:3d}. {d.name}{abbr}")
+        logger.info(f"       Category: {d.category}")
+        logger.info(f"       Symbol:   {d.symbol_description[:120]}")
+    logger.info("=" * 70)
+    logger.info(f"TOTAL: {len(devices)} device types across {len(cat_counts)} categories")
+    logger.info("=" * 70)
+
+    # Also add all devices to the analysis log so they show in the frontend
+    _log(analysis, "info", "── Full device list ──")
+    for i, d in enumerate(devices, 1):
+        abbr = f" [{d.abbreviation}]" if d.abbreviation else ""
+        _log(analysis, "info", f"  {i}. {d.name}{abbr} — {d.symbol_description[:100]}")
 
     _log(analysis, "success",
          f"Legend analysis complete: {len(devices)} device types "
