@@ -9,7 +9,7 @@ Icons are 24x24 viewBox, monochrome, and designed for use as inline
 symbols in both the Symbol Table and Drawing View.
 """
 
-import json
+import asyncio
 import logging
 import os
 import re
@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 ICON_MODEL = "claude-sonnet-4-20250514"
 ICON_MAX_TOKENS = 2048
 ICON_TEMPERATURE = 0.2
+
+# Max concurrent API calls to avoid rate limiting
+MAX_CONCURRENT = 5
 
 # In-memory cache: device name → SVG string
 icons_cache: dict[str, str] = {}
@@ -49,8 +52,8 @@ Symbol description: {symbol_description}
 Requirements:
 - viewBox="0 0 24 24"
 - Use only basic SVG elements: circle, rect, line, path, polygon, polyline, text, g
-- Monochrome black (#000) strokes, no fills (or white fill for background shapes)
-- stroke-width="1.5" for main elements
+- Use stroke="#000" stroke-width="1.5" on all shape elements explicitly
+- For filled areas, use fill="#000" explicitly on the element
 - Keep it simple and recognizable at small sizes (16-24px)
 - The icon should look like a technical/engineering symbol, not decorative art
 - For detectors: use circles with internal markings
@@ -70,7 +73,7 @@ def _validate_svg(svg: str) -> str | None:
 
     # Extract SVG if wrapped in markdown fences
     if "```" in svg:
-        match = re.search(r'<svg[\s\S]*?</svg>', svg)
+        match = re.search(r'<svg[\s\S]*</svg>', svg)
         if match:
             svg = match.group(0)
         else:
@@ -78,8 +81,7 @@ def _validate_svg(svg: str) -> str | None:
 
     # Must start with <svg and end with </svg>
     if not svg.startswith("<svg") or not svg.endswith("</svg>"):
-        # Try to extract from surrounding text
-        match = re.search(r'<svg[\s\S]*?</svg>', svg)
+        match = re.search(r'<svg[\s\S]*</svg>', svg)
         if match:
             svg = match.group(0)
         else:
@@ -87,7 +89,6 @@ def _validate_svg(svg: str) -> str | None:
 
     # Must have viewBox
     if "viewBox" not in svg:
-        # Add default viewBox
         svg = svg.replace("<svg", '<svg viewBox="0 0 24 24"', 1)
 
     # Remove any width/height attributes (we control sizing via CSS)
@@ -137,7 +138,7 @@ async def generate_svg_icon(device_name: str, symbol_description: str) -> str | 
     if svg is None:
         logger.warning(
             f"[icon_gen] Invalid SVG for {device_name} "
-            f"(response length: {len(raw_svg)})"
+            f"(response length: {len(raw_svg)}, preview: {raw_svg[:200]})"
         )
         return None
 
@@ -153,7 +154,9 @@ async def generate_svg_icon(device_name: str, symbol_description: str) -> str | 
 async def generate_icons_batch(
     devices: list[dict],
 ) -> dict[str, str]:
-    """Generate SVG icons for a batch of devices.
+    """Generate SVG icons for a batch of devices concurrently.
+
+    Uses asyncio.Semaphore to limit concurrent API calls.
 
     Args:
         devices: List of dicts with 'name' and 'symbol_description' keys
@@ -162,33 +165,55 @@ async def generate_icons_batch(
         Dict mapping device name → SVG string (only successful generations)
     """
     results: dict[str, str] = {}
-    total = len(devices)
-    generated = 0
-    cached = 0
-    failed = 0
+    to_generate: list[dict] = []
 
-    start_time = time.time()
-
-    for i, device in enumerate(devices):
+    # Resolve cache hits first
+    for device in devices:
         name = device["name"]
-        desc = device["symbol_description"]
-
         if name in icons_cache:
             results[name] = icons_cache[name]
-            cached += 1
-            continue
-
-        svg = await generate_svg_icon(name, desc)
-        if svg:
-            results[name] = svg
-            generated += 1
         else:
+            to_generate.append(device)
+
+    cached = len(results)
+    if not to_generate:
+        logger.info(
+            f"[icon_gen] All {cached} icons served from cache"
+        )
+        return results
+
+    start_time = time.time()
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+
+    async def _gen(device: dict) -> tuple[str, str | None]:
+        async with sem:
+            svg = await generate_svg_icon(
+                device["name"], device["symbol_description"]
+            )
+            return device["name"], svg
+
+    # Run all API calls concurrently (bounded by semaphore)
+    tasks = [_gen(d) for d in to_generate]
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    generated = 0
+    failed = 0
+    for outcome in outcomes:
+        if isinstance(outcome, Exception):
+            logger.error(f"[icon_gen] Task exception: {outcome}")
             failed += 1
+        else:
+            name, svg = outcome
+            if svg:
+                results[name] = svg
+                generated += 1
+            else:
+                failed += 1
 
     elapsed = time.time() - start_time
     logger.info(
         f"[icon_gen] Batch complete: {generated} generated, "
-        f"{cached} cached, {failed} failed out of {total} "
+        f"{cached} cached, {failed} failed out of {len(devices)} "
         f"({elapsed:.1f}s total)"
     )
 

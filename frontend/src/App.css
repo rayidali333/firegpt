@@ -664,8 +664,6 @@
 .symbol-svg-icon svg {
   width: 18px;
   height: 18px;
-  stroke: currentColor;
-  fill: none;
 }
 
 .symbol-info {
@@ -2000,8 +1998,6 @@
 .legend-svg-icon svg {
   width: 22px;
   height: 22px;
-  stroke: #333;
-  fill: none;
 }
 
 .legend-device-name {
