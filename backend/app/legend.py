@@ -33,8 +33,14 @@ logger = logging.getLogger(__name__)
 # We want 300 DPI for sharp symbols, but large pages at 300 DPI create
 # pixmaps that exceed 512MB RAM on Render free tier.
 # Strategy: calculate the pixmap size first, pick the highest DPI that fits.
-PDF_RENDER_DPI_MAX = 300
+PDF_RENDER_DPI_MAX = 400
 PDF_RENDER_DPI_MIN = 150
+
+# Tiling threshold — landscape pages whose pixel width at chosen DPI
+# exceeds this are split into overlapping left/right tiles so Claude
+# Vision sees each column at higher effective resolution.
+TILE_WIDTH_THRESHOLD = 2500  # pixels
+TILE_OVERLAP = 0.10          # 10% overlap at the seam
 
 # Maximum pixmap memory budget per page (bytes).
 # A pixel = 3 bytes (RGB, no alpha). Keep each pixmap under 80MB
@@ -65,8 +71,10 @@ MIME_TYPES = {
 # Claude model for legend analysis — Sonnet 4 has strong vision capabilities
 LEGEND_MODEL = "claude-sonnet-4-20250514"
 
-# Max tokens for legend response — legends can have 100+ devices
-LEGEND_MAX_TOKENS = 16384
+# Max tokens for legend response — dense legends can have 100+ devices,
+# each needing ~100-150 tokens for name, abbreviation, category, and
+# detailed symbol description.  32K gives comfortable headroom.
+LEGEND_MAX_TOKENS = 32768
 
 
 def _get_client() -> AsyncAnthropic:
@@ -279,9 +287,6 @@ def _prepare_pdf_images(
 
             # Calculate the highest DPI that keeps the pixmap under budget.
             # Pixmap bytes = width_px * height_px * 3 (RGB)
-            # width_px = page_w_in * dpi, height_px = page_h_in * dpi
-            # So: pixmap_bytes = page_w_in * dpi * page_h_in * dpi * 3
-            #                  = page_w_in * page_h_in * 3 * dpi^2
             # Solving for dpi: dpi = sqrt(MAX_PIXMAP_BYTES / (w * h * 3))
             max_dpi_for_budget = int(math.sqrt(
                 MAX_PIXMAP_BYTES / (page_w_in * page_h_in * 3)
@@ -291,42 +296,47 @@ def _prepare_pdf_images(
 
             est_px_w = int(page_w_in * chosen_dpi)
             est_px_h = int(page_h_in * chosen_dpi)
-            est_pixmap_mb = (est_px_w * est_px_h * 3) / (1024 * 1024)
+            is_landscape = rect.width > rect.height * 1.2
 
-            _log(analysis, "info",
-                 f"  Page {page_num + 1}: {page_w_in:.1f}x{page_h_in:.1f} in "
-                 f"→ {chosen_dpi} DPI "
-                 f"({est_px_w}x{est_px_h}px, ~{est_pixmap_mb:.0f}MB pixmap)")
+            # Decide whether to tile: landscape pages with wide pixel
+            # dimensions benefit from splitting so Claude Vision sees
+            # each column at higher effective resolution.
+            should_tile = is_landscape and est_px_w > TILE_WIDTH_THRESHOLD
 
-            mat = fitz.Matrix(chosen_dpi / 72, chosen_dpi / 72)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
+            if should_tile:
+                # Split into left and right halves with overlap
+                overlap_pts = rect.width * TILE_OVERLAP
+                mid_pt = rect.width / 2
 
-            # Convert to PNG bytes and free pixmap immediately
-            png_bytes = pix.tobytes("png")
-            pix = None
+                clips = [
+                    ("Left section", fitz.Rect(
+                        rect.x0, rect.y0,
+                        mid_pt + overlap_pts, rect.y1)),
+                    ("Right section", fitz.Rect(
+                        mid_pt - overlap_pts, rect.y0,
+                        rect.x1, rect.y1)),
+                ]
 
-            # If PNG exceeds API limit, re-render at lower DPI
-            if len(png_bytes) > MAX_IMAGE_BYTES:
-                lower_dpi = int(chosen_dpi * 0.75)
                 _log(analysis, "info",
-                     f"  Page {page_num + 1} PNG too large "
-                     f"({len(png_bytes) / 1024 / 1024:.1f}MB), "
-                     f"re-rendering at {lower_dpi} DPI")
-                png_bytes = None
-                mat = fitz.Matrix(lower_dpi / 72, lower_dpi / 72)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                png_bytes = pix.tobytes("png")
-                pix = None
+                     f"  Page {page_num + 1}: {page_w_in:.1f}×{page_h_in:.1f} in "
+                     f"(landscape) → tiling into 2 halves at {chosen_dpi} DPI")
 
-            b64 = base64.standard_b64encode(png_bytes).decode("ascii")
-            png_bytes = None  # Free raw bytes, keep only b64
-            images.append({
-                "base64": b64,
-                "media_type": "image/png",
-                "width": est_px_w,
-                "height": est_px_h,
-                "page": page_num + 1,
-            })
+                for label, clip_rect in clips:
+                    tile_images = _render_clip(
+                        page, clip_rect, chosen_dpi, page_num, label, analysis)
+                    if tile_images:
+                        images.extend(tile_images)
+            else:
+                _log(analysis, "info",
+                     f"  Page {page_num + 1}: {page_w_in:.1f}×{page_h_in:.1f} in "
+                     f"→ {chosen_dpi} DPI "
+                     f"({est_px_w}×{est_px_h}px)")
+
+                rendered = _render_clip(
+                    page, None, chosen_dpi, page_num, None, analysis)
+                if rendered:
+                    images.extend(rendered)
+
         except Exception as e:
             _log(analysis, "warning",
                  f"  Page {page_num + 1}: rendering failed — {e}")
@@ -334,6 +344,68 @@ def _prepare_pdf_images(
 
     pdf_doc.close()
     return images
+
+
+def _render_clip(
+    page,
+    clip_rect,
+    dpi: int,
+    page_num: int,
+    label: str | None,
+    analysis: list[AnalysisStep],
+) -> list[dict]:
+    """Render a page (or clipped region) to a PNG image dict.
+
+    Args:
+        page: fitz.Page object
+        clip_rect: fitz.Rect to clip, or None for full page
+        dpi: rendering DPI
+        page_num: 0-based page index (for logging)
+        label: optional tile label (e.g., "Left section")
+        analysis: analysis log
+    """
+    import fitz  # noqa: F811 — re-import needed for type access
+
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    kwargs = {"matrix": mat, "alpha": False}
+    if clip_rect is not None:
+        kwargs["clip"] = clip_rect
+
+    pix = page.get_pixmap(**kwargs)
+    width, height = pix.width, pix.height
+    png_bytes = pix.tobytes("png")
+    pix = None  # free pixmap immediately
+
+    # Re-render at lower DPI if PNG exceeds API image size limit
+    if len(png_bytes) > MAX_IMAGE_BYTES:
+        lower_dpi = int(dpi * 0.75)
+        tag = f" ({label})" if label else ""
+        _log(analysis, "info",
+             f"  Page {page_num + 1}{tag} PNG too large "
+             f"({len(png_bytes) / 1024 / 1024:.1f}MB), "
+             f"re-rendering at {lower_dpi} DPI")
+        png_bytes = None
+        mat = fitz.Matrix(lower_dpi / 72, lower_dpi / 72)
+        kwargs["matrix"] = mat
+        pix = page.get_pixmap(**kwargs)
+        width, height = pix.width, pix.height
+        png_bytes = pix.tobytes("png")
+        pix = None
+
+    b64 = base64.standard_b64encode(png_bytes).decode("ascii")
+    png_bytes = None
+
+    result = {
+        "base64": b64,
+        "media_type": "image/png",
+        "width": width,
+        "height": height,
+        "page": page_num + 1,
+    }
+    if label:
+        result["tile_label"] = label
+
+    return [result]
 
 
 def _prepare_single_image(
@@ -483,17 +555,19 @@ For EACH entry in the legend, provide:
    If no graphical symbol is shown (text-only entry), state: "No graphical symbol — text label only"
    If the symbol is too small or blurry to describe clearly, describe what you CAN see and note the uncertainty.
 
-CRITICAL INSTRUCTIONS:
-- Extract EVERY SINGLE entry in the legend. Do NOT skip any.
+CRITICAL INSTRUCTIONS — COMPLETENESS IS THE TOP PRIORITY:
+- Extract EVERY SINGLE entry in the legend. Do NOT skip any. Missing devices is the worst possible failure.
 - Each line or row in the legend is typically a separate device type — count them all.
 - Look for entries organized under section/category headers (bold text, underlined text, or visually separated groups).
 - Some entries may span multiple lines of text — combine them into one entry.
-- Include entries from ALL sections and systems (fire alarm, access control, CCTV, cabling, HVAC, BMS, etc.).
+- Include entries from ALL sections and systems (fire alarm, access control, CCTV, cabling, HVAC, BMS, PA/GA, LAN, SCADA, smart systems, audio visual, etc.).
 - Do NOT skip entries that seem similar — "Manual Call Station" and "Manual Call Station Weatherproof" are DIFFERENT entries.
 - If a single entry has multiple variant descriptions (e.g., with/without weatherproof), list each variant as a separate device.
 - Read all text carefully — construction abbreviations can be subtle.
-- If the legend spans multiple columns, read ALL columns (typically left-to-right, top-to-bottom).
-- Count your entries and verify the total matches what you see in the image.
+- If the legend spans multiple columns, read ALL columns from left to right, top to bottom. Dense legends often have 3-5 columns.
+- After your first pass, go back and scan the image again to catch any entries you missed.
+- Count your entries section by section and verify the total matches what you see.
+- If the images are tiled sections of the same page, combine all entries into ONE response. Do NOT duplicate entries that appear in the overlap region.
 
 Return ONLY a valid JSON object (no markdown code fences, no explanation before or after) with this exact structure:
 {
@@ -536,9 +610,16 @@ async def _analyze_with_claude(
             },
         })
         if len(images) > 1:
+            tile_label = img.get("tile_label")
+            if tile_label:
+                label_text = (f"(Page {img['page']} — {tile_label}. "
+                              "These tiles overlap slightly — do NOT "
+                              "duplicate entries that appear in both.)")
+            else:
+                label_text = f"(Page {img.get('page', i + 1)} of {len(images)})"
             content.append({
                 "type": "text",
-                "text": f"(Page {img.get('page', i + 1)} of {len(images)})",
+                "text": label_text,
             })
 
     content.append({
