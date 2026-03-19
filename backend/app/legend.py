@@ -18,6 +18,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -28,15 +29,22 @@ from app.models import AnalysisStep, LegendDevice, LegendParseResponse
 
 logger = logging.getLogger(__name__)
 
-# PDF rendering DPI — 150 is proven to work on Render free tier (512MB RAM).
-# 200+ DPI creates pixmaps that push past the memory limit and OOM-kill.
-PDF_RENDER_DPI = 150
+# PDF rendering DPI — adaptive based on page size.
+# We want 300 DPI for sharp symbols, but large pages at 300 DPI create
+# pixmaps that exceed 512MB RAM on Render free tier.
+# Strategy: calculate the pixmap size first, pick the highest DPI that fits.
+PDF_RENDER_DPI_MAX = 300
+PDF_RENDER_DPI_MIN = 150
+
+# Maximum pixmap memory budget per page (bytes).
+# A pixel = 3 bytes (RGB, no alpha). Keep each pixmap under 80MB
+# to leave headroom for Python + FastAPI + base64 + API request.
+MAX_PIXMAP_BYTES = 80 * 1024 * 1024
 
 # Maximum image dimension before resizing
 MAX_IMAGE_DIMENSION = 2048
 
-# Maximum total image payload size in bytes — be generous here since the
-# real memory constraint is the pixmap rendering, not the PNG/base64.
+# Maximum total image payload size in bytes.
 # Anthropic API allows up to 20MB per image.
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 
@@ -265,41 +273,58 @@ def _prepare_pdf_images(
     for page_num in range(max_pages):
         try:
             page = pdf_doc[page_num]
-            # Render at moderate DPI to stay within memory limits
-            mat = fitz.Matrix(PDF_RENDER_DPI / 72, PDF_RENDER_DPI / 72)
+            rect = page.rect  # page size in points (72 points = 1 inch)
+            page_w_in = rect.width / 72
+            page_h_in = rect.height / 72
+
+            # Calculate the highest DPI that keeps the pixmap under budget.
+            # Pixmap bytes = width_px * height_px * 3 (RGB)
+            # width_px = page_w_in * dpi, height_px = page_h_in * dpi
+            # So: pixmap_bytes = page_w_in * dpi * page_h_in * dpi * 3
+            #                  = page_w_in * page_h_in * 3 * dpi^2
+            # Solving for dpi: dpi = sqrt(MAX_PIXMAP_BYTES / (w * h * 3))
+            max_dpi_for_budget = int(math.sqrt(
+                MAX_PIXMAP_BYTES / (page_w_in * page_h_in * 3)
+            ))
+            chosen_dpi = max(PDF_RENDER_DPI_MIN,
+                             min(PDF_RENDER_DPI_MAX, max_dpi_for_budget))
+
+            est_px_w = int(page_w_in * chosen_dpi)
+            est_px_h = int(page_h_in * chosen_dpi)
+            est_pixmap_mb = (est_px_w * est_px_h * 3) / (1024 * 1024)
+
+            _log(analysis, "info",
+                 f"  Page {page_num + 1}: {page_w_in:.1f}x{page_h_in:.1f} in "
+                 f"→ {chosen_dpi} DPI "
+                 f"({est_px_w}x{est_px_h}px, ~{est_pixmap_mb:.0f}MB pixmap)")
+
+            mat = fitz.Matrix(chosen_dpi / 72, chosen_dpi / 72)
             pix = page.get_pixmap(matrix=mat, alpha=False)
 
-            width, height = pix.width, pix.height
-            _log(analysis, "info",
-                 f"  Page {page_num + 1}: {width}x{height}px "
-                 f"({PDF_RENDER_DPI} DPI)")
-
-            # Convert to PNG bytes
+            # Convert to PNG bytes and free pixmap immediately
             png_bytes = pix.tobytes("png")
-            # Free the pixmap immediately to reclaim memory
             pix = None
 
-            # Check size — if too large, re-render at lower DPI
+            # If PNG exceeds API limit, re-render at lower DPI
             if len(png_bytes) > MAX_IMAGE_BYTES:
-                lower_dpi = int(PDF_RENDER_DPI * 0.75)
+                lower_dpi = int(chosen_dpi * 0.75)
                 _log(analysis, "info",
-                     f"  Page {page_num + 1} image too large "
+                     f"  Page {page_num + 1} PNG too large "
                      f"({len(png_bytes) / 1024 / 1024:.1f}MB), "
                      f"re-rendering at {lower_dpi} DPI")
-                png_bytes = None  # Free before re-rendering
+                png_bytes = None
                 mat = fitz.Matrix(lower_dpi / 72, lower_dpi / 72)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 png_bytes = pix.tobytes("png")
-                width, height = pix.width, pix.height
-                pix = None  # Free immediately
+                pix = None
 
             b64 = base64.standard_b64encode(png_bytes).decode("ascii")
             png_bytes = None  # Free raw bytes, keep only b64
             images.append({
                 "base64": b64,
                 "media_type": "image/png",
-                "width": width,
-                "height": height,
+                "width": est_px_w,
+                "height": est_px_h,
                 "page": page_num + 1,
             })
         except Exception as e:
