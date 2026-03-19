@@ -1976,6 +1976,79 @@
   max-width: 400px;
 }
 
+/* Legend analysis log */
+.legend-analysis-log {
+  margin: 8px 0;
+  padding: 12px;
+  background: #FFF3E0;
+  border: 1px solid #FFB74D;
+  border-radius: 6px;
+}
+
+.legend-analysis-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  color: #E65100;
+  margin-bottom: 8px;
+}
+
+.legend-analysis-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.legend-analysis-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  line-height: 1.4;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.legend-analysis-entry svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.legend-analysis-info { color: #5D4E37; }
+.legend-analysis-success { color: #2E7D32; background: #E8F5E9; }
+.legend-analysis-warning { color: #E65100; background: #FFF3E0; }
+.legend-analysis-error { color: #C62828; background: #FFEBEE; }
+
+.legend-analysis-details {
+  margin-top: 12px;
+  border: 1px solid #D7CFC2;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.legend-analysis-details summary {
+  padding: 8px 12px;
+  background: #F5F0E8;
+  cursor: pointer;
+  font-size: 12px;
+  color: #5D4E37;
+  font-weight: 500;
+}
+
+.legend-analysis-details summary:hover {
+  background: #EDE6D8;
+}
+
+.legend-analysis-details .legend-analysis-entries {
+  padding: 8px 12px;
+  background: #FDFCF8;
+}
+
 .legend-notes {
   margin-top: 12px;
   padding: 10px 14px;

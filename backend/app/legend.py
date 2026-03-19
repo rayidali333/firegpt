@@ -28,17 +28,17 @@ from app.models import AnalysisStep, LegendDevice, LegendParseResponse
 
 logger = logging.getLogger(__name__)
 
-# PDF rendering DPI — 200 balances clarity with memory usage.
-# Render free tier has only 512MB RAM; 300 DPI creates ~50MB pixmaps per page
-# which OOM-kills the process. 200 DPI is readable for Claude Vision.
-PDF_RENDER_DPI = 200
+# PDF rendering DPI — 150 is proven to work on Render free tier (512MB RAM).
+# 200+ DPI creates pixmaps that push past the memory limit and OOM-kill.
+PDF_RENDER_DPI = 150
 
 # Maximum image dimension before resizing
 MAX_IMAGE_DIMENSION = 2048
 
-# Maximum total image payload size in bytes (keep under 5MB per image
-# to stay well within Render free tier 512MB memory limit)
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# Maximum total image payload size in bytes — be generous here since the
+# real memory constraint is the pixmap rendering, not the PNG/base64.
+# Anthropic API allows up to 20MB per image.
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
 
 # Supported file types
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -281,7 +281,7 @@ def _prepare_pdf_images(
 
             # Check size — if too large, re-render at lower DPI
             if len(png_bytes) > MAX_IMAGE_BYTES:
-                lower_dpi = int(PDF_RENDER_DPI * 0.5)
+                lower_dpi = int(PDF_RENDER_DPI * 0.75)
                 _log(analysis, "info",
                      f"  Page {page_num + 1} image too large "
                      f"({len(png_bytes) / 1024 / 1024:.1f}MB), "
