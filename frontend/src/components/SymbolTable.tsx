@@ -136,10 +136,18 @@ export default function SymbolTable({
                 }
               >
                 <div className="symbol-color-indicator">
-                  <span
-                    className="symbol-dot"
-                    style={{ backgroundColor: s.color }}
-                  />
+                  {s.svg_icon ? (
+                    <span
+                      className="symbol-svg-icon"
+                      style={{ color: s.color }}
+                      dangerouslySetInnerHTML={{ __html: s.svg_icon }}
+                    />
+                  ) : (
+                    <span
+                      className="symbol-dot"
+                      style={{ backgroundColor: s.color }}
+                    />
+                  )}
                 </div>
                 <div className="symbol-info">
                   {isEditing ? (

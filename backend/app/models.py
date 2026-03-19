@@ -15,6 +15,7 @@ class SymbolInfo(BaseModel):
     matched_legend: "LegendDevice | None" = None  # Full legend entry with description
     match_confidence: str | None = None  # "high" | "medium" | "low" | None
     original_label: str | None = None  # Pre-legend label (dictionary/AI guess) for audit
+    svg_icon: str | None = None  # Generated SVG icon markup (Phase 2)
 
 
 class AuditEntry(BaseModel):
@@ -81,6 +82,7 @@ class LegendDevice(BaseModel):
     abbreviation: str | None = None  # Short code (e.g., "MFACP")
     category: str  # System/section (e.g., "Fire Alarm System")
     symbol_description: str  # Detailed visual description for SVG generation
+    svg_icon: str | None = None  # Generated SVG icon markup (Phase 2)
 
 
 class LegendParseResponse(BaseModel):

@@ -114,6 +114,35 @@ export async function matchLegend(
   return res.json();
 }
 
+export interface GenerateIconsResult {
+  status: string;
+  generated: number;
+  total: number;
+  failed: number;
+  symbols: SymbolInfo[];
+}
+
+export async function generateIcons(
+  drawingId: string
+): Promise<GenerateIconsResult> {
+  const res = await fetch(
+    `${API_BASE}/api/drawings/${drawingId}/generate-icons`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ detail: "Icon generation failed" }));
+    throw new Error(err.detail || "Icon generation failed");
+  }
+
+  return res.json();
+}
+
 export async function uploadLegend(file: File): Promise<LegendData> {
   const formData = new FormData();
   formData.append("file", file);

@@ -12,6 +12,7 @@ export interface SymbolInfo {
   matched_legend?: LegendDevice | null;
   match_confidence?: "high" | "medium" | "low" | null;
   original_label?: string | null;  // Pre-legend label (dictionary/AI guess)
+  svg_icon?: string | null;  // Generated SVG icon markup (Phase 2)
 }
 
 export interface AuditEntry {
@@ -52,6 +53,7 @@ export interface LegendDevice {
   abbreviation: string | null;
   category: string;
   symbol_description: string;
+  svg_icon?: string | null;
 }
 
 export interface LegendData {

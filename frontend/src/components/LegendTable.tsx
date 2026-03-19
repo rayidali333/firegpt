@@ -4,9 +4,10 @@ import { LegendData } from "../types";
 
 interface Props {
   legend: LegendData;
+  icons?: Record<string, string>;  // device name → SVG markup
 }
 
-export default function LegendTable({ legend }: Props) {
+export default function LegendTable({ legend, icons }: Props) {
   // Group devices by category
   const grouped: Record<string, typeof legend.devices> = {};
   for (const device of legend.devices) {
@@ -70,6 +71,7 @@ export default function LegendTable({ legend }: Props) {
           <table className="legend-device-table">
             <thead>
               <tr>
+                <th>Icon</th>
                 <th>Device</th>
                 <th>Abbr</th>
                 <th>Symbol Description</th>
@@ -78,8 +80,17 @@ export default function LegendTable({ legend }: Props) {
             <tbody>
               {devices.map((device, i) => (
                 <tr key={i}>
+                  <td className="legend-device-icon">
+                    {(icons?.[device.name] || device.svg_icon) ? (
+                      <span
+                        className="legend-svg-icon"
+                        dangerouslySetInnerHTML={{ __html: (icons?.[device.name] || device.svg_icon)! }}
+                      />
+                    ) : (
+                      <Tag size={14} />
+                    )}
+                  </td>
                   <td className="legend-device-name">
-                    <Tag size={12} />
                     {device.name}
                   </td>
                   <td className="legend-device-abbr">

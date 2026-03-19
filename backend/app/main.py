@@ -15,6 +15,7 @@ from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai
 from app.legend import parse_legend_file, ALL_LEGEND_EXTENSIONS
 from app.matching import match_symbols_to_legend
+from app.icon_gen import generate_icons_batch, icons_cache
 from app.models import (
     AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendParseResponse,
     ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
@@ -462,6 +463,82 @@ async def match_drawing_to_legend(drawing_id: str, request: MatchLegendRequest):
         "symbols": drawing.symbols,
         "analysis": match_analysis,
     }
+
+
+# ── Icon Generation Endpoints ─────────────────────────────────────────
+
+
+@app.post("/api/drawings/{drawing_id}/generate-icons")
+async def generate_drawing_icons(drawing_id: str):
+    """Generate SVG icons for all legend-matched symbols in a drawing.
+
+    Requires that match-legend has been called first. For each symbol with
+    a matched_legend entry, generates an SVG icon from the symbol_description.
+    Icons are cached globally by device name.
+    """
+    if drawing_id not in drawings_store:
+        raise HTTPException(404, "Drawing not found")
+
+    drawing = drawings_store[drawing_id]
+
+    # Collect devices that need icons
+    devices_to_generate = []
+    seen_names: set[str] = set()
+    for sym in drawing.symbols:
+        if sym.matched_legend and sym.matched_legend.name not in seen_names:
+            devices_to_generate.append({
+                "name": sym.matched_legend.name,
+                "symbol_description": sym.matched_legend.symbol_description,
+            })
+            seen_names.add(sym.matched_legend.name)
+
+    if not devices_to_generate:
+        return {
+            "status": "ok",
+            "generated": 0,
+            "total": 0,
+            "message": "No legend-matched symbols to generate icons for",
+            "symbols": drawing.symbols,
+        }
+
+    try:
+        icons = await generate_icons_batch(devices_to_generate)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(
+            f"Icon generation failed: {e}", exc_info=True)
+        raise HTTPException(500, f"Icon generation failed: {str(e)}")
+
+    # Apply icons to symbols and their matched_legend entries
+    icon_count = 0
+    for sym in drawing.symbols:
+        if sym.matched_legend and sym.matched_legend.name in icons:
+            svg = icons[sym.matched_legend.name]
+            sym.svg_icon = svg
+            sym.matched_legend.svg_icon = svg
+            icon_count += 1
+
+    drawings_store[drawing_id] = drawing
+
+    return {
+        "status": "ok",
+        "generated": len(icons),
+        "total": len(devices_to_generate),
+        "failed": len(devices_to_generate) - len(icons),
+        "symbols": drawing.symbols,
+    }
+
+
+@app.get("/api/icons/{device_name}")
+def get_icon(device_name: str):
+    """Serve a cached SVG icon by device name."""
+    from fastapi.responses import Response
+    if device_name not in icons_cache:
+        raise HTTPException(404, "Icon not found")
+    return Response(
+        content=icons_cache[device_name],
+        media_type="image/svg+xml",
+    )
 
 
 # Serve React frontend — must be after all /api routes
