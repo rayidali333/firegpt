@@ -8,6 +8,9 @@ export interface SymbolInfo {
   source: "dictionary" | "ai" | "manual";
   block_variants: string[];
   original_count: number | null;
+  // Legend matching (Phase 1)
+  matched_legend?: LegendDevice | null;
+  match_confidence?: "high" | "medium" | "low" | null;
 }
 
 export interface AuditEntry {

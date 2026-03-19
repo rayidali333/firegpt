@@ -1,4 +1,4 @@
-import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData, SymbolInfo } from "./types";
 
 const API_BASE = process.env.REACT_APP_API_URL || "";
 
@@ -81,6 +81,37 @@ export async function overrideSymbol(
 
 export function getExportUrl(drawingId: string): string {
   return `${API_BASE}/api/drawings/${drawingId}/export`;
+}
+
+export interface MatchLegendResult {
+  status: string;
+  matched: number;
+  total_symbols: number;
+  unmatched: number;
+  symbols: SymbolInfo[];
+}
+
+export async function matchLegend(
+  drawingId: string,
+  legendId: string
+): Promise<MatchLegendResult> {
+  const res = await fetch(
+    `${API_BASE}/api/drawings/${drawingId}/match-legend`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ legend_id: legendId }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ detail: "Legend matching failed" }));
+    throw new Error(err.detail || "Legend matching failed");
+  }
+
+  return res.json();
 }
 
 export async function uploadLegend(file: File): Promise<LegendData> {

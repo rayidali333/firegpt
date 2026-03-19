@@ -14,6 +14,7 @@ from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
 from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai
 from app.legend import parse_legend_file, ALL_LEGEND_EXTENSIONS
+from app.matching import match_symbols_to_legend
 from app.models import (
     AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendParseResponse,
     ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
@@ -385,6 +386,76 @@ def get_legend(legend_id: str):
     if legend_id not in legends_store:
         raise HTTPException(404, "Legend not found")
     return legends_store[legend_id]
+
+
+# ── Matching Endpoints ────────────────────────────────────────────────
+
+
+from pydantic import BaseModel as PydanticBaseModel
+
+
+class MatchLegendRequest(PydanticBaseModel):
+    legend_id: str
+
+
+@app.post("/api/drawings/{drawing_id}/match-legend")
+async def match_drawing_to_legend(drawing_id: str, request: MatchLegendRequest):
+    """Match detected drawing symbols to legend entries using AI.
+
+    This enriches each SymbolInfo with its matched LegendDevice (including
+    the detailed symbol_description needed for SVG icon generation).
+    """
+    if drawing_id not in drawings_store:
+        raise HTTPException(404, "Drawing not found")
+    if request.legend_id not in legends_store:
+        raise HTTPException(404, "Legend not found")
+
+    drawing = drawings_store[drawing_id]
+    legend = legends_store[request.legend_id]
+
+    # Collect analysis steps for this matching operation
+    match_analysis: list[AnalysisStep] = []
+
+    try:
+        matches = await match_symbols_to_legend(
+            symbols=drawing.symbols,
+            legend_devices=legend.devices,
+            analysis=match_analysis,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(
+            f"Legend matching failed: {e}", exc_info=True)
+        # Still append whatever analysis we got before the error
+        drawing.analysis.extend(match_analysis)
+        drawings_store[drawing_id] = drawing
+        raise HTTPException(500, f"Matching failed: {str(e)}")
+
+    # Apply matches to symbols
+    matched_count = 0
+    for sym in drawing.symbols:
+        if sym.label in matches and matches[sym.label] is not None:
+            device = matches[sym.label]
+            sym.matched_legend = device
+            # Find confidence from the matching results
+            sym.match_confidence = "high"  # Default; actual confidence logged in analysis
+            matched_count += 1
+        else:
+            sym.matched_legend = None
+            sym.match_confidence = None
+
+    # Append matching analysis to drawing's analysis log
+    drawing.analysis.extend(match_analysis)
+    drawings_store[drawing_id] = drawing
+
+    return {
+        "status": "ok",
+        "matched": matched_count,
+        "total_symbols": len(drawing.symbols),
+        "unmatched": len(drawing.symbols) - matched_count,
+        "symbols": drawing.symbols,
+        "analysis": match_analysis,
+    }
 
 
 # Serve React frontend — must be after all /api routes

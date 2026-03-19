@@ -755,6 +755,44 @@
   border: 1px solid #AED6F1;
 }
 
+.col-match {
+  width: 40px;
+  text-align: center;
+}
+
+.symbol-match-indicator {
+  width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.match-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  cursor: default;
+}
+
+.match-badge.matched {
+  color: #1E8449;
+}
+
+.match-badge.unmatched {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.match-badge.no-legend {
+  color: var(--text-muted);
+  font-size: 10px;
+  opacity: 0.4;
+}
+
 .variant-count {
   font-size: 9px;
   color: var(--text-muted);

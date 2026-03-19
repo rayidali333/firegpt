@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { MapPin, Download, Check, X, Edit2 } from "lucide-react";
+import { MapPin, Download, Check, X, Edit2, Link, Unlink } from "lucide-react";
 import { SymbolInfo } from "../types";
 
 interface Props {
@@ -94,6 +94,7 @@ export default function SymbolTable({
       <div className="symbol-table-columns">
         <span className="col-symbol">Symbol</span>
         <span className="col-confidence">Source</span>
+        <span className="col-match">Legend</span>
         <span className="col-locations">Loc</span>
         <span className="col-count">Count</span>
         <span className="col-edit"></span>
@@ -150,6 +151,24 @@ export default function SymbolTable({
                   <span className={`confidence-badge ${badge.className}`} title={badge.title}>
                     {badge.label}
                   </span>
+                </div>
+                <div className="symbol-match-indicator">
+                  {s.matched_legend ? (
+                    <span
+                      className="match-badge matched"
+                      title={`Matched: ${s.matched_legend.name}${s.matched_legend.abbreviation ? ` (${s.matched_legend.abbreviation})` : ""}\nCategory: ${s.matched_legend.category}`}
+                    >
+                      <Link size={11} />
+                    </span>
+                  ) : s.match_confidence === undefined ? (
+                    <span className="match-badge no-legend" title="No legend uploaded">
+                      —
+                    </span>
+                  ) : (
+                    <span className="match-badge unmatched" title="No matching legend entry found">
+                      <Unlink size={11} />
+                    </span>
+                  )}
                 </div>
                 <div className="symbol-locations-count">
                   {s.locations.length > 0 && (

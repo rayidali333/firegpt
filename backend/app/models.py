@@ -11,6 +11,9 @@ class SymbolInfo(BaseModel):
     source: str = "dictionary"  # "dictionary" | "ai" | "manual"
     block_variants: list[str] = []  # Individual block names before consolidation
     original_count: int | None = None  # Pre-override count (null if never overridden)
+    # Legend matching (Phase 1) — populated after match-legend API call
+    matched_legend: "LegendDevice | None" = None  # Matched legend entry with description
+    match_confidence: str | None = None  # "high" | "medium" | "low" | None
 
 
 class AuditEntry(BaseModel):
@@ -87,3 +90,7 @@ class LegendParseResponse(BaseModel):
     total_device_types: int
     analysis: list[AnalysisStep] = []
     notes: str = ""
+
+
+# Resolve forward reference: SymbolInfo.matched_legend → LegendDevice
+SymbolInfo.model_rebuild()

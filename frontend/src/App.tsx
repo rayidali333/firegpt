@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
-import { uploadDrawing, uploadLegend, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
+import { uploadDrawing, uploadLegend, matchLegend, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
@@ -24,6 +24,8 @@ function App() {
   const [legend, setLegend] = useState<LegendData | null>(null);
   const [legendUploading, setLegendUploading] = useState(false);
   const [legendSkipped, setLegendSkipped] = useState(false);
+  const [matching, setMatching] = useState(false);
+  const [matchDone, setMatchDone] = useState(false);
 
   // Load preview when drawing changes
   useEffect(() => {
@@ -51,6 +53,35 @@ function App() {
       .finally(() => setPreviewLoading(false));
   }, [drawing]);
 
+  // Auto-match symbols to legend when both are available
+  useEffect(() => {
+    if (!drawing || !legend || matchDone || matching) return;
+
+    setMatching(true);
+    console.log("[FireGPT] Auto-matching symbols to legend...");
+
+    matchLegend(drawing.drawing_id, legend.legend_id)
+      .then((result) => {
+        console.log(
+          `[FireGPT] Matching complete: ${result.matched}/${result.total_symbols} matched`
+        );
+        // Update drawing symbols with match data
+        setDrawing((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            symbols: result.symbols,
+          };
+        });
+        setMatchDone(true);
+      })
+      .catch((e) => {
+        console.warn("[FireGPT] Legend matching failed:", e);
+        setMatchDone(true); // Don't retry on failure
+      })
+      .finally(() => setMatching(false));
+  }, [drawing, legend, matchDone, matching]);
+
   const handleUpload = async (file: File) => {
     setUploading(true);
     setError(null);
@@ -61,6 +92,7 @@ function App() {
       setActiveTab("symbols");
       setSelectedSymbol(null);
       setPreview(null);
+      setMatchDone(false);
     } catch (e: any) {
       setError(e.message || "Upload failed");
     } finally {
@@ -110,6 +142,7 @@ function App() {
     try {
       const data = await uploadLegend(file);
       setLegend(data);
+      setMatchDone(false); // Trigger re-matching with new legend
     } catch (e: any) {
       setError(e.message || "Legend upload failed");
     } finally {
@@ -130,6 +163,8 @@ function App() {
     setSelectedSymbol(null);
     setLegend(null);
     setLegendSkipped(false);
+    setMatchDone(false);
+    setMatching(false);
   };
 
   const handleSelectSymbol = useCallback(
