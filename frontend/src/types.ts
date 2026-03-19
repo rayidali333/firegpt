@@ -4,13 +4,14 @@ export interface SymbolInfo {
   count: number;
   locations: [number, number][];
   color: string;
-  confidence: "high" | "medium" | "manual";
-  source: "dictionary" | "ai" | "manual";
+  confidence: "high" | "medium" | "low" | "manual";
+  source: "dictionary" | "ai" | "legend" | "manual";
   block_variants: string[];
   original_count: number | null;
   // Legend matching (Phase 1)
   matched_legend?: LegendDevice | null;
   match_confidence?: "high" | "medium" | "low" | null;
+  original_label?: string | null;  // Pre-legend label (dictionary/AI guess)
 }
 
 export interface AuditEntry {

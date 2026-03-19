@@ -95,11 +95,21 @@ Return ONLY valid JSON (no markdown fences):
 }}"""
 
 
+class MatchResult:
+    """Result of matching a single symbol to a legend entry."""
+    __slots__ = ("device", "confidence", "reasoning")
+
+    def __init__(self, device: LegendDevice | None, confidence: str, reasoning: str = ""):
+        self.device = device
+        self.confidence = confidence  # "high" | "medium" | "low"
+        self.reasoning = reasoning
+
+
 async def match_symbols_to_legend(
     symbols: list[SymbolInfo],
     legend_devices: list[LegendDevice],
     analysis: list[AnalysisStep],
-) -> dict[str, LegendDevice | None]:
+) -> dict[str, MatchResult]:
     """Match detected symbols to legend entries using AI.
 
     Args:
@@ -108,7 +118,7 @@ async def match_symbols_to_legend(
         analysis: Analysis log for debugging
 
     Returns:
-        Dict mapping symbol label → matched LegendDevice (or None if unmatched)
+        Dict mapping symbol label → MatchResult (with device, confidence, reasoning)
     """
     _log(analysis, "info",
          "━━━ Legend Matching ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -196,7 +206,7 @@ async def match_symbols_to_legend(
         legend_by_name[d.name.lower()] = d
 
     # Process matches
-    result: dict[str, LegendDevice | None] = {}
+    result: dict[str, MatchResult] = {}
     matched_count = 0
     unmatched_count = 0
     confidence_counts = {"high": 0, "medium": 0, "low": 0}
@@ -215,7 +225,7 @@ async def match_symbols_to_legend(
 
         if legend_name and legend_name in legend_by_name:
             device = legend_by_name[legend_name]
-            result[symbol_label] = device
+            result[symbol_label] = MatchResult(device, confidence, reasoning)
             matched_count += 1
             confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
             _log(analysis, "success",
@@ -224,14 +234,14 @@ async def match_symbols_to_legend(
         elif legend_name and legend_name.lower() in legend_by_name:
             # Case-insensitive fallback
             device = legend_by_name[legend_name.lower()]
-            result[symbol_label] = device
+            result[symbol_label] = MatchResult(device, confidence, reasoning)
             matched_count += 1
             confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
             _log(analysis, "success",
                  f"  ✓ \"{symbol_label}\" → \"{device.name}\" "
                  f"[{confidence}, case-adjusted] — {reasoning}")
         else:
-            result[symbol_label] = None
+            result[symbol_label] = MatchResult(None, "low", reasoning)
             unmatched_count += 1
             reason_str = f" — {reasoning}" if reasoning else ""
             _log(analysis, "warning" if legend_name else "info",

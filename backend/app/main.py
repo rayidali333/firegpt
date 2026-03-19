@@ -431,18 +431,24 @@ async def match_drawing_to_legend(drawing_id: str, request: MatchLegendRequest):
         drawings_store[drawing_id] = drawing
         raise HTTPException(500, f"Matching failed: {str(e)}")
 
-    # Apply matches to symbols
+    # Apply matches to symbols — legend becomes the source of truth
     matched_count = 0
     for sym in drawing.symbols:
-        if sym.label in matches and matches[sym.label] is not None:
-            device = matches[sym.label]
+        if sym.label in matches and matches[sym.label].device is not None:
+            match_result = matches[sym.label]
+            device = match_result.device
             sym.matched_legend = device
-            # Find confidence from the matching results
-            sym.match_confidence = "high"  # Default; actual confidence logged in analysis
+            sym.match_confidence = match_result.confidence
+            # Promote legend to source of truth: replace label with legend name
+            sym.original_label = sym.label  # Preserve dictionary/AI label for audit
+            sym.label = device.name  # Legend name is now the label
+            sym.source = "legend"
+            sym.confidence = match_result.confidence
             matched_count += 1
         else:
             sym.matched_legend = None
             sym.match_confidence = None
+            # Keep dictionary/AI label as-is — no legend match
 
     # Append matching analysis to drawing's analysis log
     drawing.analysis.extend(match_analysis)
