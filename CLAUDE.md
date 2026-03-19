@@ -13,7 +13,7 @@ FireGPT is a full-stack web application built for fire alarm contractors. Users 
 ### Tech Stack
 - **Backend**: Python 3.11 + FastAPI + ezdxf (DXF parsing) + ODA File Converter (DWG→DXF)
 - **Frontend**: React 19 + TypeScript + Lucide Icons
-- **AI**: Claude Sonnet 4 via Anthropic API (async client) — used for both chat AND block classification
+- **AI**: Claude Opus 4.6 (legend extraction) + Claude Sonnet 4 (chat, block classification) via Anthropic API (async client)
 - **Deployment**: Multi-stage Docker build on Render
 - **No database**: In-memory dictionary storage (drawings_store)
 
@@ -154,7 +154,202 @@ git push origin main  # Render auto-deploys from main
 | `MAX_FILE_SIZE_MB` | No | Max upload size in MB (default: 50) |
 | `PORT` | No | Server port (default: 8000, Render sets automatically) |
 
+## SVG Symbol Icons — Implementation Plan
+
+### Goal
+Replace the colored circle markers (in both Symbol Table and Drawing View) with actual SVG icons that look like the real fire alarm symbols from the uploaded legend. The pipeline:
+
+```
+Legend PDF → AI extracts descriptions → AI matches to DXF symbols → AI generates SVG icons → Icons replace circles
+```
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        CURRENT STATE                                │
+│                                                                     │
+│  DXF Upload ──→ Symbol Detection ──→ Colored Circles (● ● ●)       │
+│  Legend Upload ──→ Device Extraction ──→ Table Display (separate)   │
+│                        ↕ NO LINK ↕                                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                        TARGET STATE                                 │
+│                                                                     │
+│  DXF Upload ──→ Symbol Detection ──┐                                │
+│                                    ├──→ AI Matching ──→ AI SVG Gen  │
+│  Legend Upload ──→ Device Extract ─┘         │              │       │
+│                                              │              │       │
+│                    matched_symbols ◄─────────┘              │       │
+│                    svg_icons ◄───────────────────────────────┘       │
+│                         │                                           │
+│                    ┌────┴────┐                                      │
+│                    ▼         ▼                                      │
+│              Symbol Table   Drawing View                            │
+│              (SVG icons)    (SVG icons at positions)                 │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 1: AI Matching — Link legend devices to detected DXF symbols
+
+**What**: When both a drawing and legend exist, use Claude to match each detected DXF symbol to its corresponding legend entry. This gives each detected symbol its detailed description and abbreviation from the legend.
+
+**Backend changes**:
+- `models.py`: Add `SymbolMatch` model (symbol block_name → legend device name, confidence, reasoning)
+- `models.py`: Add `matched_legend` field to `SymbolInfo` (optional `LegendDevice` reference)
+- `main.py`: New endpoint `POST /api/drawings/{id}/match-legend` — accepts `legend_id`, runs AI matching, stores results on drawing
+- `main.py`: New matching function in a dedicated `matching.py` module
+- `matching.py` (new file):
+  - `match_symbols_to_legend(symbols, legend_devices)` — sends both lists to Claude
+  - Claude sees: detected symbol labels/block_names + legend device names/abbreviations/categories
+  - Claude returns: JSON mapping of `{ symbol_label → legend_device_name }` with confidence + reasoning
+  - Stores matches on each `SymbolInfo` in `drawings_store`
+  - Detailed analysis logging: every match/non-match logged with reasoning
+
+**Frontend changes**:
+- `types.ts`: Add `LegendDevice` type, add `matched_legend?: LegendDevice` to `SymbolInfo`
+- `api.ts`: Add `matchLegend(drawingId, legendId)` function
+- `App.tsx`: Auto-trigger matching when both drawing and legend exist
+- `SymbolTable.tsx`: Show match indicator — green check if matched, gray dash if not
+- `SymbolTable.tsx`: Show matched legend name + abbreviation in a tooltip or sub-row
+
+**Analysis logging**:
+- Log each symbol → legend match with confidence score and reasoning
+- Log unmatched symbols (no legend entry found)
+- Log unmatched legend entries (in legend but not detected in drawing)
+- Log match summary: "Matched 42/45 symbols, 3 unmatched, 8 legend entries unused"
+
+**Testable**: User uploads drawing + legend → sees which symbols matched which legend entries in the Symbols tab and Analysis tab.
+
+---
+
+### Phase 2: SVG Icon Generation — Create icons from descriptions
+
+**What**: For each matched symbol, use Claude to generate compact SVG code from the legend's `symbol_description`. Cache the generated SVGs.
+
+**Backend changes**:
+- `icon_gen.py` (new file):
+  - `generate_svg_icon(device: LegendDevice) → str` — sends symbol_description to Claude, gets back SVG code
+  - Prompt: "Generate a clean, minimal SVG icon (viewBox 0 0 24 24) for this fire alarm symbol: {description}. Return ONLY the SVG markup, no explanation."
+  - Validate returned SVG (must contain `<svg` or valid SVG elements)
+  - `generate_icons_batch(devices: list[LegendDevice]) → dict[str, str]` — batch generation with progress logging
+- `models.py`: Add `svg_icon: str | None = None` to `SymbolInfo`
+- `main.py`: New endpoint `POST /api/drawings/{id}/generate-icons` — generates SVG for all matched symbols
+- `main.py`: New endpoint `GET /api/icons/{device_name}` — serve cached SVG icon
+- In-memory cache: `icons_cache: dict[str, str]` keyed by legend device name → SVG string
+
+**Frontend changes**:
+- `types.ts`: Add `svg_icon?: string` to `SymbolInfo`
+- `api.ts`: Add `generateIcons(drawingId)` function
+- `App.tsx`: Auto-trigger icon generation after matching completes
+- `SymbolTable.tsx`: Replace colored dot (●) with inline SVG icon when available
+- `LegendTable.tsx`: Show generated SVG icon next to each legend device
+
+**Analysis logging**:
+- Log each icon generation: device name, description length, SVG size, generation time
+- Log validation results: valid/invalid SVG, retry attempts
+- Log batch summary: "Generated 42 icons in 15.3s, 2 failed, 40 cached"
+
+**Testable**: User sees generated SVG icons in the Symbols table and Legend table instead of plain colored dots.
+
+---
+
+### Phase 3: Drawing View Integration — Replace circles with SVG icons
+
+**What**: Modify DrawingViewer to render the generated SVG icons at symbol positions instead of colored circles. Maintain all interactivity.
+
+**Frontend changes**:
+- `DrawingViewer.tsx`:
+  - Add `<defs>` section with `<symbol>` definitions for each unique icon
+  - Default mode: Replace `<circle>` markers with `<use href="#icon-{name}">` elements
+  - Scale icons to `markerRadius * 2` (width/height), centered on position
+  - Selected mode: Show icon with numbered overlay (keep the numbered text on top)
+  - Fallback: Use colored circles for symbols without generated icons
+  - Hover: Slight scale-up transform on icon group
+  - Click: Same `onSelectSymbol` behavior
+- `App.tsx`: Pass `svg_icons` map to DrawingViewer as prop
+- `App.css`: Styles for SVG icon markers (hover effects, transitions)
+
+**Interactivity preservation**:
+- Click icon → select symbol (same as clicking circle)
+- Click selected icon → deselect
+- Hover → scale up slightly + cursor pointer
+- Selected mode → numbered overlay on top of icon
+- Bidirectional: click table row → icons highlight on drawing
+
+**Analysis logging**:
+- Log which symbols use icons vs fallback circles
+- Log icon rendering stats: total icons, unique icon types, fallback count
+
+**Testable**: Drawing view shows actual fire alarm device icons at the correct positions instead of colored circles. All interactive features (click, hover, select, number) still work.
+
+---
+
+### Data Model Summary (after all phases)
+
+```python
+# Backend - models.py additions
+class SymbolMatch(BaseModel):
+    legend_device_name: str      # Matched legend entry name
+    confidence: str              # "high" | "medium" | "low"
+    reasoning: str               # Why this match was chosen
+
+class LegendDevice(BaseModel):   # Already exists
+    name: str
+    abbreviation: str | None
+    category: str
+    symbol_description: str
+    svg_icon: str | None = None  # NEW: generated SVG code
+
+class SymbolInfo(BaseModel):     # Existing, extended
+    # ... existing fields ...
+    matched_legend: LegendDevice | None = None  # NEW: matched legend entry
+    svg_icon: str | None = None                 # NEW: generated SVG icon code
+```
+
+```typescript
+// Frontend - types.ts additions
+interface LegendDevice {
+  name: string;
+  abbreviation: string | null;
+  category: string;
+  symbol_description: string;
+  svg_icon?: string;           // NEW
+}
+
+interface SymbolInfo {
+  // ... existing fields ...
+  matched_legend?: LegendDevice;  // NEW
+  svg_icon?: string;              // NEW
+}
+```
+
+### API Endpoints (after all phases)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/drawings/{id}/match-legend` | Match drawing symbols to legend entries (Phase 1) |
+| `POST` | `/api/drawings/{id}/generate-icons` | Generate SVG icons for matched symbols (Phase 2) |
+| `GET` | `/api/icons/{device_name}` | Get cached SVG icon by device name (Phase 2) |
+
+### Files Modified/Created per Phase
+
+| Phase | Backend | Frontend |
+|-------|---------|----------|
+| 1 | `matching.py` (new), `models.py`, `main.py` | `types.ts`, `api.ts`, `App.tsx`, `SymbolTable.tsx` |
+| 2 | `icon_gen.py` (new), `models.py`, `main.py` | `types.ts`, `api.ts`, `App.tsx`, `SymbolTable.tsx`, `LegendTable.tsx` |
+| 3 | — | `DrawingViewer.tsx`, `App.tsx`, `App.css` |
+
 ## Change Log
+
+### v2.0.0 - SVG Symbol Icons (In Progress)
+- **Legend-to-Drawing Matching**: AI matches detected DXF symbols to uploaded legend entries
+- **SVG Icon Generation**: AI generates SVG icons from legend symbol descriptions
+- **Icon Rendering**: SVG icons replace colored circles in Symbol Table and Drawing View
+- **Opus 4.6**: Legend extraction upgraded to Opus for richer symbol descriptions
+- **Adaptive DPI**: PDF rendering DPI auto-selected based on page size (150-400 DPI)
+- **Image Tiling**: Dense landscape legends split into overlapping tiles for better Vision accuracy
 
 ### v1.1.0 - Symbol Position Recovery & OCS Fix
 - **OCS→WCS Recovery**: Fixed missing markers for smoke detectors, speakers, and heat detectors in Revit-exported drawings

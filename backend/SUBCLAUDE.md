@@ -81,6 +81,38 @@ Key patterns: SD (Smoke Detector), HD (Heat Detector), PS (Pull Station), HS/H/S
 - **uploads/**: File system directory for uploaded drawings
 - No database configured
 
+### app/legend.py
+- Legend extraction from PDF/image files using Claude Opus 4.6 Vision
+- `parse_legend_file(filename, file_bytes)`: Main entry — validates file, prepares images, calls Claude, parses JSON
+- PDF→PNG via PyMuPDF (fitz) with adaptive DPI (150-400 based on page size)
+- Image tiling: landscape pages split into overlapping left/right halves for dense legends
+- Prompt: extracts name, abbreviation, category, detailed SVG-reproducible symbol_description
+- Temperature 0.2 for precise visual descriptions, max 65K output tokens
+- In-memory storage: `legends_store[legend_id]` → `LegendParseResponse`
+
+### app/matching.py (Phase 1 — planned)
+- AI-powered matching of detected DXF symbols to legend entries
+- `match_symbols_to_legend(symbols, legend_devices)`: sends both lists to Claude
+- Claude matches by name/abbreviation/category similarity
+- Returns mapping with confidence scores and reasoning
+- Detailed analysis logging for every match decision
+
+### app/icon_gen.py (Phase 2 — planned)
+- SVG icon generation from legend symbol descriptions
+- `generate_svg_icon(device)`: sends description to Claude → gets SVG code
+- `generate_icons_batch(devices)`: batch generation with progress logging
+- Icon validation: checks for valid SVG markup
+- In-memory cache: `icons_cache[device_name]` → SVG string
+
+## Storage
+- **drawings_store**: In-memory dict, NOT persistent across restarts
+- **legends_store**: In-memory dict for parsed legend data
+- **icons_cache**: In-memory dict for generated SVG icons (Phase 2)
+- **file_paths_store**: Maps drawing_id → DXF file path (for preview generation)
+- **preview_cache**: Cached SVG previews (in-memory)
+- **uploads/**: File system directory for uploaded drawings
+- No database configured
+
 ## Current State
 - All API endpoints functional
 - Parser handles DXF files reliably, DWG via ODA converter + recovery mode
@@ -89,4 +121,5 @@ Key patterns: SD (Smoke Detector), HD (Heat Detector), PS (Pull Station), HS/H/S
 - OCS→WCS recovery fixing mirrored coordinates from Revit exports
 - Chat integration working with Claude Sonnet 4 + multi-turn history
 - Cost estimation with detailed material + labor breakdowns
+- Legend extraction working with Claude Opus 4.6 + adaptive DPI + tiling
 - Static file serving configured for React build

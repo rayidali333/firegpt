@@ -113,12 +113,32 @@ React 19 + TypeScript single-page application with a retro Mac OS vintage design
 - `npm run build`: Production build to /build
 - Build output copied to backend/static for serving
 
+## SVG Icon Integration (Planned)
+
+### Phase 1: Matching indicators
+- SymbolTable: green checkmark if symbol matched to legend, gray dash if not
+- Tooltip/sub-row showing matched legend device name + abbreviation
+- Auto-trigger matching when both drawing and legend are loaded
+
+### Phase 2: Generated SVG icons in tables
+- SymbolTable: replace colored dot (●) with inline SVG icon for matched symbols
+- LegendTable: show generated SVG icon next to each device entry
+- Fallback to colored dot for unmatched symbols
+
+### Phase 3: Drawing View SVG icons
+- DrawingViewer: replace colored circle markers with SVG icons
+- Icons defined in `<defs>` with `<symbol>`, referenced via `<use>`
+- Scale icons to markerRadius, center on position
+- Preserve all interactivity (click, hover, select, numbered overlay)
+- Fallback to colored circles for unmatched symbols
+
 ## Current State
 - All components functional with retro vintage styling
 - Three-panel layout responsive (stacks on mobile)
-- Tabbed content: Symbols, Drawing (SVG preview), Analysis
+- Tabbed content: Symbols, Drawing (SVG preview), Analysis, Legend
 - Chat panel always visible with markdown rendering and typing indicator
 - Bidirectional highlighting between symbol table and drawing preview
 - Upload works via sidebar button or drag-drop in main area
 - Symbol table shows confidence, source, and color-coded categories
 - AI chat with suggestion prompts, auto-scroll, and multi-turn history
+- Legend upload and display with device extraction via Claude Opus 4.6
