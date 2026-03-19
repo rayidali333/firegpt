@@ -68,13 +68,18 @@ MIME_TYPES = {
     ".webp": "image/webp",
 }
 
-# Claude model for legend analysis — Sonnet 4 has strong vision capabilities
-LEGEND_MODEL = "claude-sonnet-4-20250514"
+# Claude model for legend analysis — Opus has superior vision accuracy
+# and produces more detailed, precise symbol descriptions than Sonnet.
+LEGEND_MODEL = "claude-opus-4-6"
 
-# Max tokens for legend response — dense legends can have 100+ devices,
-# each needing ~100-150 tokens for name, abbreviation, category, and
-# detailed symbol description.  32K gives comfortable headroom.
-LEGEND_MAX_TOKENS = 32768
+# Max tokens for legend response — Opus writes more detailed descriptions
+# per device (~200-250 tokens each), so 100+ devices need 25-35K tokens.
+# 65K gives comfortable headroom for even the densest legends.
+LEGEND_MAX_TOKENS = 65536
+
+# Low temperature for precise, deterministic visual descriptions.
+# We want exact shapes/fills/text, not creative variation.
+LEGEND_TEMPERATURE = 0.2
 
 
 def _get_client() -> AsyncAnthropic:
@@ -540,17 +545,23 @@ For EACH entry in the legend, provide:
 
 3. "category": The section/system header this entry belongs to (e.g., "Fire Alarm System", "Access Control System", "Structured Cabling System"). Use the exact section header text from the legend. If there are no section headers, use "General" as the category.
 
-4. "symbol_description": A precise, detailed visual description of the symbol/icon shown next to this entry. This description must be detailed enough for a graphic designer to recreate the symbol as an SVG icon. Include ALL of the following that apply:
+4. "symbol_description": A precise, SVG-reproducible visual description of the symbol/icon shown next to this entry. A graphic designer must be able to recreate the exact symbol from your description alone. Describe ALL of these aspects:
 
-   - Overall shape: circle, square, rectangle, triangle, diamond, hexagon, or describe the custom shape
-   - Dimensions/proportions: relative size, aspect ratio (e.g., "small square approximately 8mm", "rectangle wider than tall")
-   - Fill style: solid black, solid white/hollow, hatched, cross-hatched, half-filled (which half), stippled, gradient, or specific color if visible
-   - Border/outline: thick line, thin line, double-line border, dashed, dotted, or no border
-   - Text/letters inside: any text, letters, numbers, or codes rendered inside the symbol shape
-   - Internal elements: diagonal line, cross/X, dot, smaller shape inside, arrow, lightning bolt
-   - External elements: lines extending from the shape (and from which sides), arrows, connection points, leader lines
-   - Orientation: if the symbol has a specific rotation or direction
-   - Any distinguishing marks that differentiate this symbol from similar ones nearby
+   REQUIRED — describe each one explicitly:
+   - SHAPE: circle, square, rectangle, triangle, diamond, hexagon, octagon, or compound shape (e.g., "rectangle with triangular notch on right side")
+   - SIZE: relative proportions (e.g., "square ~8mm", "tall rectangle ~6mm wide × 12mm tall")
+   - FILL: solid black, white/hollow, hatched, cross-hatched, half-filled (specify which half: left/right/top/bottom), stippled, or a specific color
+   - BORDER: thick black outline, thin outline, double-line border, dashed, dotted, rounded corners, or no border
+   - TEXT INSIDE: exact letters, numbers, or codes rendered inside the shape (e.g., "contains uppercase 'SD' centered")
+   - INTERNAL FEATURES: diagonal line, cross/X, dot, concentric circle, smaller shape nested inside, arrow, lightning bolt, wave pattern
+   - EXTERNAL FEATURES: lines extending from specific sides, arrows, leader lines, connection ticks, antenna marks
+   - DISTINGUISHING MARKS: what makes this symbol visually different from similar nearby symbols
+
+   EXAMPLE of a GOOD description:
+   "Small square (~8mm) with solid black fill and thin black border. Contains the white uppercase letters 'FACP' centered inside. Two short horizontal lines extend from the left and right sides, suggesting connection points."
+
+   EXAMPLE of a BAD description (too vague — DO NOT do this):
+   "Square with text inside"
 
    If no graphical symbol is shown (text-only entry), state: "No graphical symbol — text label only"
    If the symbol is too small or blurry to describe clearly, describe what you CAN see and note the uncertainty.
@@ -636,6 +647,7 @@ async def _analyze_with_claude(
         response = await client.messages.create(
             model=LEGEND_MODEL,
             max_tokens=LEGEND_MAX_TOKENS,
+            temperature=LEGEND_TEMPERATURE,
             messages=[{"role": "user", "content": content}],
         )
     except Exception as e:
