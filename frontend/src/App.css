@@ -1038,6 +1038,35 @@
   filter: brightness(1.2);
 }
 
+/* SVG icon markers on drawing view */
+.viewer-icon-marker {
+  transition: transform 0.12s ease;
+}
+
+.viewer-icon-marker:hover {
+  filter: brightness(1.1) drop-shadow(0 0 2px rgba(0, 0, 0, 0.3));
+}
+
+/* SVG icons in viewer legend */
+.viewer-legend-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.viewer-legend-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.viewer-legend-item.selected .viewer-legend-icon {
+  color: var(--highlight-text);
+}
+
 .drawing-viewer-loading {
   display: flex;
   flex-direction: column;
