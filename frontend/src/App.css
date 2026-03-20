@@ -452,6 +452,14 @@
   background: var(--content-bg);
 }
 
+.upload-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 440px;
+  width: 100%;
+}
+
 .upload-zone {
   display: flex;
   flex-direction: column;
@@ -474,7 +482,7 @@
 
 .upload-zone.uploading {
   pointer-events: none;
-  opacity: 0.6;
+  cursor: default;
 }
 
 .upload-icon {
@@ -487,12 +495,14 @@
 .upload-title {
   font-size: 14px;
   font-weight: 700;
+  font-family: var(--font);
   color: var(--text);
   margin-bottom: 6px;
 }
 
 .upload-subtitle {
   font-size: var(--font-size);
+  font-family: var(--font);
   color: var(--text-secondary);
   margin-bottom: 16px;
   text-align: center;
@@ -1853,32 +1863,35 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 12px auto 0;
-  padding: 8px 16px;
-  background: transparent;
-  border: 1px solid var(--bevel-dark);
-  border-radius: 6px;
-  color: #8B7355;
-  font-size: 13px;
+  margin-top: 14px;
+  padding: 8px 20px;
+  background: var(--window-bg);
+  border: 1px solid;
+  border-color: var(--bevel-light) var(--bevel-dark) var(--bevel-dark) var(--bevel-light);
+  color: var(--text-secondary);
+  font-size: var(--font-size);
+  font-family: var(--font);
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .legend-skip-btn:hover {
-  background: var(--bg-raised);
+  background: var(--panel-bg);
 }
 
 .legend-success-banner {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 16px;
+  padding: 8px 14px;
   margin-bottom: 12px;
-  background: #E8F5E9;
-  border: 1px solid #A5D6A7;
-  border-radius: 8px;
-  color: #2E7D32;
-  font-size: 13px;
+  width: 100%;
+  background: #EDF5E0;
+  border: 1px solid;
+  border-color: #C5D6A1 #A8B889 #A8B889 #C5D6A1;
+  color: #4A6B2A;
+  font-size: var(--font-size);
+  font-family: var(--font);
 }
 
 .upload-step-indicator {
@@ -1887,8 +1900,9 @@
   gap: 8px;
   justify-content: center;
   margin-top: 16px;
-  font-size: 12px;
-  color: #8B7355;
+  font-size: var(--font-size-sm);
+  font-family: var(--font);
+  color: var(--text-muted);
 }
 
 .step-dot {

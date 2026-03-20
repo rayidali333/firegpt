@@ -5,6 +5,7 @@ import { LegendData } from "../types";
 interface Props {
   onUpload: (file: File) => void;
   uploading: boolean;
+  uploadStage?: string;
   error: string | null;
   legend: LegendData | null;
   legendUploading: boolean;
@@ -16,6 +17,7 @@ interface Props {
 export default function UploadZone({
   onUpload,
   uploading,
+  uploadStage,
   error,
   legend,
   legendUploading,
@@ -68,29 +70,37 @@ export default function UploadZone({
       setStage("Reading file...");
       const stages = [
         { at: 8, label: "Uploading drawing file..." },
-        { at: 18, label: "Converting to DXF format..." },
-        { at: 30, label: "Scanning block definitions..." },
-        { at: 42, label: "Detecting INSERT entities..." },
-        { at: 52, label: "Matching known symbol patterns..." },
-        { at: 62, label: "Classifying unknown blocks with AI..." },
-        { at: 72, label: "Resolving XREF prefixes..." },
-        { at: 80, label: "Consolidating symbol variants..." },
-        { at: 88, label: "Counting devices and building summary..." },
-        { at: 93, label: "Finalizing symbol table..." },
+        { at: 16, label: "Converting to DXF format..." },
+        { at: 24, label: "Scanning block definitions..." },
+        { at: 32, label: "Detecting INSERT entities..." },
+        { at: 40, label: "Matching known symbol patterns..." },
+        { at: 48, label: "Classifying unknown blocks with AI..." },
+        { at: 56, label: "Resolving XREF prefixes..." },
+        { at: 62, label: "Consolidating symbol variants..." },
+        { at: 68, label: "Counting devices..." },
+        { at: 74, label: "Matching symbols to legend entries..." },
+        { at: 82, label: "Generating device icons..." },
+        { at: 90, label: "Finalizing results..." },
       ];
 
       let p = 0;
       const interval = setInterval(() => {
         const remaining = 95 - p;
-        const increment = Math.max(0.25, remaining * 0.035);
+        const increment = Math.max(0.2, remaining * 0.025);
         p = Math.min(95, p + increment);
         setProgress(p);
-        const s = [...stages].reverse().find((s) => p >= s.at);
-        if (s) setStage(s.label);
+
+        // Use real stage from parent if available, otherwise simulated
+        if (uploadStage) {
+          setStage(uploadStage);
+        } else {
+          const s = [...stages].reverse().find((s) => p >= s.at);
+          if (s) setStage(s.label);
+        }
       }, 200);
       return () => clearInterval(interval);
     }
-  }, [uploading, legendUploading]);
+  }, [uploading, legendUploading, uploadStage]);
 
   const handleDrawingFile = useCallback(
     (file: File) => {
@@ -164,6 +174,8 @@ export default function UploadZone({
             <p className="preview-progress-hint">
               {legendUploading
                 ? "Claude Vision is reading every symbol in the legend"
+                : legend
+                ? "Analyzing drawing, matching to legend, and generating icons"
                 : "Large drawings may take up to a minute"}
             </p>
           </div>
@@ -177,53 +189,55 @@ export default function UploadZone({
   if (showDrawingUpload) {
     return (
       <div className="upload-container">
-        {/* Legend success indicator */}
-        {legend && (
-          <div className="legend-success-banner">
-            <CheckCircle size={16} />
-            <span>
-              Legend loaded: <strong>{legend.filename}</strong> —{" "}
-              {legend.total_device_types} device types found
-            </span>
-          </div>
-        )}
+        <div className="upload-inner">
+          {/* Legend success indicator */}
+          {legend && (
+            <div className="legend-success-banner">
+              <CheckCircle size={16} />
+              <span>
+                Legend loaded: <strong>{legend.filename}</strong> —{" "}
+                {legend.total_device_types} device types found
+              </span>
+            </div>
+          )}
 
-        <div
-          className={`upload-zone ${dragOver ? "drag-over" : ""}`}
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onClick={() => drawingInputRef.current?.click()}
-        >
-          <Upload className="upload-icon" />
-          <h2 className="upload-title">Upload a Construction Drawing</h2>
-          <p className="upload-subtitle">
-            Drop your DXF or DWG file here, or click to browse.
-            <br />
-            FireGPT will detect and count all fire alarm symbols.
-          </p>
-          <div className="upload-formats">
-            <span className="format-badge">.DXF</span>
-            <span className="format-badge">.DWG</span>
+          <div
+            className={`upload-zone ${dragOver ? "drag-over" : ""}`}
+            onDrop={handleDrop}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onClick={() => drawingInputRef.current?.click()}
+          >
+            <Upload className="upload-icon" />
+            <h2 className="upload-title">Upload a Construction Drawing</h2>
+            <p className="upload-subtitle">
+              Drop your DXF or DWG file here, or click to browse.
+              <br />
+              FireGPT will detect and count all fire alarm symbols.
+            </p>
+            <div className="upload-formats">
+              <span className="format-badge">.DXF</span>
+              <span className="format-badge">.DWG</span>
+            </div>
+            {error && <div className="upload-error">{error}</div>}
+            <input
+              ref={drawingInputRef}
+              type="file"
+              accept=".dxf,.dwg"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleDrawingFile(file);
+              }}
+              style={{ display: "none" }}
+            />
           </div>
-          {error && <div className="upload-error">{error}</div>}
-          <input
-            ref={drawingInputRef}
-            type="file"
-            accept=".dxf,.dwg"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleDrawingFile(file);
-            }}
-            style={{ display: "none" }}
-          />
-        </div>
 
-        <div className="upload-step-indicator">
-          <span className="step-dot completed" />
-          <span className="step-line" />
-          <span className="step-dot active" />
-          <span className="step-label">Step 2 of 2: Upload Drawing</span>
+          <div className="upload-step-indicator">
+            <span className="step-dot completed" />
+            <span className="step-line" />
+            <span className="step-dot active" />
+            <span className="step-label">Step 2 of 2: Upload Drawing</span>
+          </div>
         </div>
       </div>
     );
@@ -232,48 +246,50 @@ export default function UploadZone({
   // ── Step 1: Legend upload (optional) ──
   return (
     <div className="upload-container">
-      <div
-        className={`upload-zone legend-step ${dragOver ? "drag-over" : ""}`}
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onClick={() => legendInputRef.current?.click()}
-      >
-        <BookOpen className="upload-icon" />
-        <h2 className="upload-title">Upload a Legend (Optional)</h2>
-        <p className="upload-subtitle">
-          Upload the drawing legend/symbol key as a PDF or image.
-          <br />
-          AI will extract all device types and symbol descriptions.
-        </p>
-        <div className="upload-formats">
-          <span className="format-badge">.PDF</span>
-          <span className="format-badge">.PNG</span>
-          <span className="format-badge">.JPG</span>
+      <div className="upload-inner">
+        <div
+          className={`upload-zone legend-step ${dragOver ? "drag-over" : ""}`}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onClick={() => legendInputRef.current?.click()}
+        >
+          <BookOpen className="upload-icon" />
+          <h2 className="upload-title">Upload a Legend (Optional)</h2>
+          <p className="upload-subtitle">
+            Upload the drawing legend/symbol key as a PDF or image.
+            <br />
+            AI will extract all device types and symbol descriptions.
+          </p>
+          <div className="upload-formats">
+            <span className="format-badge">.PDF</span>
+            <span className="format-badge">.PNG</span>
+            <span className="format-badge">.JPG</span>
+          </div>
+          {error && <div className="upload-error">{error}</div>}
+          <input
+            ref={legendInputRef}
+            type="file"
+            accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleLegendFile(file);
+            }}
+            style={{ display: "none" }}
+          />
         </div>
-        {error && <div className="upload-error">{error}</div>}
-        <input
-          ref={legendInputRef}
-          type="file"
-          accept=".pdf,.png,.jpg,.jpeg,.gif,.webp"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) handleLegendFile(file);
-          }}
-          style={{ display: "none" }}
-        />
-      </div>
 
-      <button className="legend-skip-btn" onClick={onLegendSkip}>
-        <SkipForward size={14} />
-        Skip — upload drawing without legend
-      </button>
+        <button className="legend-skip-btn" onClick={onLegendSkip}>
+          <SkipForward size={14} />
+          Skip — upload drawing without legend
+        </button>
 
-      <div className="upload-step-indicator">
-        <span className="step-dot active" />
-        <span className="step-line" />
-        <span className="step-dot" />
-        <span className="step-label">Step 1 of 2: Legend (Optional)</span>
+        <div className="upload-step-indicator">
+          <span className="step-dot active" />
+          <span className="step-line" />
+          <span className="step-dot" />
+          <span className="step-label">Step 1 of 2: Legend (Optional)</span>
+        </div>
       </div>
     </div>
   );

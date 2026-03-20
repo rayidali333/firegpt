@@ -15,6 +15,7 @@ function App() {
   const [drawing, setDrawing] = useState<DrawingData | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadStage, setUploadStage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis" | "legend">("symbols");
   const [preview, setPreview] = useState<DrawingPreview | null>(null);
@@ -120,19 +121,50 @@ function App() {
   const handleUpload = async (file: File) => {
     setUploading(true);
     setError(null);
+    setUploadStage("Uploading and analyzing drawing...");
     try {
       const data = await uploadDrawing(file);
+
+      // If legend exists, do matching + icon generation before revealing results
+      if (legend) {
+        setUploadStage("Matching symbols to legend entries...");
+        try {
+          const matchResult = await matchLegend(data.drawing_id, legend.legend_id);
+          console.log(`[FireGPT] Matching complete: ${matchResult.matched}/${matchResult.total_symbols} matched`);
+          data.symbols = matchResult.symbols;
+          data.total_symbols = data.symbols.reduce((sum: number, s: any) => sum + s.count, 0);
+
+          const hasMatches = data.symbols.some((s: any) => s.source === "legend");
+          if (hasMatches) {
+            setUploadStage("Generating device icons...");
+            try {
+              const iconResult = await generateIcons(data.drawing_id);
+              console.log(`[FireGPT] Icon generation complete: ${iconResult.generated} generated, ${iconResult.failed} failed`);
+              data.symbols = iconResult.symbols;
+            } catch (e) {
+              console.warn("[FireGPT] Icon generation failed:", e);
+            }
+          }
+        } catch (e) {
+          console.warn("[FireGPT] Legend matching failed:", e);
+        }
+        setMatchDone(true);
+        setIconsDone(true);
+      } else {
+        setMatchDone(false);
+        setIconsDone(false);
+      }
+
       setDrawing(data);
       setMessages([]);
       setActiveTab("symbols");
       setSelectedSymbol(null);
       setPreview(null);
-      setMatchDone(false);
-      setIconsDone(false);
     } catch (e: any) {
       setError(e.message || "Upload failed");
     } finally {
       setUploading(false);
+      setUploadStage("");
     }
   };
 
@@ -247,7 +279,12 @@ function App() {
 
   const handleExport = useCallback(() => {
     if (!drawing) return;
-    window.open(getExportUrl(drawing.drawing_id), "_blank");
+    const link = document.createElement("a");
+    link.href = getExportUrl(drawing.drawing_id);
+    link.download = "";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }, [drawing]);
 
   return (
@@ -270,6 +307,7 @@ function App() {
               <UploadZone
                 onUpload={handleUpload}
                 uploading={uploading}
+                uploadStage={uploadStage}
                 error={error}
                 legend={legend}
                 legendUploading={legendUploading}
