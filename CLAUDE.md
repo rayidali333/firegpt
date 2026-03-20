@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-FireGPT is a full-stack web application built for fire alarm contractors. Users upload construction drawings (DXF/DWG format), the app automatically detects and counts all fire alarm symbols (smoke detectors, heat detectors, pull stations, horn/strobes, etc.), renders an interactive SVG preview with color-coded device markers, and provides an AI chat interface powered by Claude to ask questions about the extracted data.
+FireGPT is a full-stack web application built for fire alarm contractors. Users upload construction drawings (DXF/DWG format) with optional legend PDFs, the app automatically detects and counts all fire alarm symbols (smoke detectors, heat detectors, pull stations, horn/strobes, etc.), matches them to legend entries, generates SVG device icons, renders an interactive SVG preview with icon markers, and provides an AI chat interface powered by Claude to ask questions about the extracted data.
 
 **Tagline**: "Talk to your drawing files"
 
@@ -11,17 +11,18 @@ FireGPT is a full-stack web application built for fire alarm contractors. Users 
 ## Architecture
 
 ### Tech Stack
-- **Backend**: Python 3.11 + FastAPI + ezdxf (DXF parsing) + ODA File Converter (DWG→DXF)
+- **Backend**: Python 3.11 + FastAPI + ezdxf (DXF parsing) + LibreDWG (DWG→DXF) + PyMuPDF (PDF→image)
 - **Frontend**: React 19 + TypeScript + Lucide Icons
-- **AI**: Claude Opus 4.6 (legend extraction) + Claude Sonnet 4 (chat, block classification) via Anthropic API (async client)
+- **AI**: Claude Opus 4.6 (legend extraction) + Claude Sonnet 4 (chat, block classification, matching, icon generation) via Anthropic API (async client)
 - **Deployment**: Multi-stage Docker build on Render
-- **No database**: In-memory dictionary storage (drawings_store)
+- **No database**: In-memory dictionary storage (drawings_store, legends_store, icons_cache)
 
 ### Project Structure
 ```
 /
 ├── CLAUDE.md                # This file - main project documentation
-├── Dockerfile               # Multi-stage Docker (Node build + Python serve)
+├── README.md                # Public-facing project documentation
+├── Dockerfile               # Multi-stage Docker (Node build + LibreDWG build + Python serve)
 ├── docker-compose.yml       # Local development orchestration
 ├── build.sh                 # Render deployment build script
 ├── render.yaml              # Render platform configuration
@@ -29,26 +30,32 @@ FireGPT is a full-stack web application built for fire alarm contractors. Users 
 │   ├── SUBCLAUDE.md         # Backend-specific documentation
 │   ├── app/
 │   │   ├── main.py          # FastAPI routes, CORS, static serving, symbol consolidation
-│   │   ├── models.py        # Pydantic models (SymbolInfo, ParseResponse, PreviewResponse, etc.)
+│   │   ├── models.py        # Pydantic models (SymbolInfo, LegendDevice, ParseResponse, etc.)
 │   │   ├── parser.py        # DXF/DWG parsing engine (57 known symbols + AI classification)
 │   │   ├── preview.py       # SVG preview generation with symbol overlay markers
-│   │   └── chat.py          # Claude AI integration (chat + block classification)
+│   │   ├── chat.py          # Claude AI integration (chat + block classification)
+│   │   ├── legend.py        # Legend extraction from PDF/images via Claude Vision
+│   │   ├── matching.py      # AI-powered symbol-to-legend matching
+│   │   └── icon_gen.py      # AI-powered SVG icon generation from descriptions
 │   ├── requirements.txt     # Python dependencies
 │   └── uploads/             # Uploaded drawing files
 └── frontend/                # React TypeScript frontend
     ├── SUBCLAUDE.md          # Frontend-specific documentation
     ├── src/
-    │   ├── App.tsx           # Main app - 3-panel layout (sidebar | content | chat)
-    │   ├── App.css           # Complete retro Mac OS themed stylesheet
+    │   ├── App.tsx           # Main app - 3-panel layout, upload pipeline orchestration
+    │   ├── App.css           # Complete Mac OS 9 Platinum themed stylesheet
     │   ├── index.css         # Global base styles
-    │   ├── api.ts            # API client (uploadDrawing, chatWithDrawing, getPreview, etc.)
+    │   ├── api.ts            # API client (upload, chat, preview, match, icons, export)
     │   ├── types.ts          # TypeScript interfaces
     │   └── components/
     │       ├── Sidebar.tsx   # Left nav - logo, upload button, file list, view switching
     │       ├── Header.tsx    # Retro window title bar with traffic lights
-    │       ├── UploadZone.tsx # Drag-drop file upload (center panel)
-    │       ├── SymbolTable.tsx # Symbol detection results table with bidirectional highlighting
-    │       └── ChatPanel.tsx  # Right-side AI chat (Cursor-style) with markdown rendering
+    │       ├── UploadZone.tsx # Two-step upload: legend (optional) → drawing
+    │       ├── SymbolTable.tsx # Symbol results table with legend badges + SVG icons
+    │       ├── DrawingViewer.tsx # Interactive SVG floor plan with icon markers
+    │       ├── ChatPanel.tsx  # Right-side AI chat with markdown rendering
+    │       ├── LegendTable.tsx # Legend device listing with SVG icons
+    │       └── AnalysisLog.tsx # Analysis steps and position debug log
     └── package.json
 ```
 
@@ -56,31 +63,37 @@ FireGPT is a full-stack web application built for fire alarm contractors. Users 
 
 ### What's working
 - DXF/DWG file upload and parsing via ezdxf
-- DWG→DXF conversion via ODA File Converter
+- DWG→DXF conversion via LibreDWG (Docker) or ODA File Converter
 - Symbol detection: 57 known patterns (dictionary) + AI classification for ambiguous blocks
+- Legend upload: PDF/image legend extraction via Claude Opus 4.6 Vision with adaptive DPI + image tiling
+- AI legend matching: detected DXF symbols matched to legend entries with confidence scoring
+- SVG icon generation: AI generates device icons from legend symbol descriptions, cached in-memory
+- Drawing view: SVG icons replace colored circles at symbol positions (fallback circles for unmatched)
 - AI chat via Claude Sonnet 4 with full symbol context injection + multi-turn history
 - Interactive SVG drawing preview with zoom/pan
-- Color-coded symbol overlay markers on floor plan with bidirectional highlighting
+- Bidirectional highlighting between symbol table and drawing view
 - OCS→WCS coordinate recovery for INSERT entities with mirrored coordinates (Revit exports)
 - Schedule detection: automatically removes device legend/schedule entries from floor plan markers
 - XREF prefix handling: AutoCAD `$0$`, ODA `|`, BricsCAD backtick separators
 - MINSERT entity support for arrayed block insertions
 - Symbol consolidation: merges block variants of same device type into single rows
 - Manual count overrides with audit trail
-- CSV export of symbol data
+- CSV export of symbol data (via anchor download)
 - Cost estimation via AI with 2024-2025 US market pricing
-- Retro Mac OS vintage UI design with warm cream/beige palette
+- Mac OS 9 Platinum UI with green desktop, gray windows, classic beveled borders
 - Three-panel layout: sidebar navigation | main content (tabs) | AI chat
-- Tabbed content: Symbols table, Drawing view, Analysis log
+- Tabbed content: Symbols table, Drawing view, Analysis log, Legend table
+- Two-step upload flow: legend (optional) → drawing, with full pipeline loading
 - Docker deployment on Render
 - Static file serving (React build served by FastAPI)
 
 ### Design System
-The UI uses a warm, vintage aesthetic:
-- **Color palette**: Warm tan desktop, cream windows, beige sidebar, brown accents
+The UI uses a Mac OS 9 Platinum aesthetic:
+- **Color palette**: Green desktop (#3B9B4A), gray windows (#DDDDDD), white content area, blue accent (#336699)
 - **Window chrome**: Classic title bar with traffic light buttons (red/yellow/green)
-- **Typography**: System fonts (Lucida Grande, Geneva), Monaco monospace
-- **Layout**: Three-panel (sidebar 220px | flexible content | chat 340px)
+- **Typography**: Lucida Grande, Geneva, system fonts; Monaco monospace
+- **Borders**: Classic 3D beveled effects (light top-left, dark bottom-right)
+- **Layout**: Three-panel (sidebar 200px | flexible content | chat 340px)
 - **Responsive**: Stacks vertically on mobile (<900px)
 
 ## API Endpoints
@@ -95,38 +108,49 @@ The UI uses a warm, vintage aesthetic:
 | `GET` | `/api/drawings/{id}/export` | Export symbol data as CSV |
 | `GET` | `/api/drawings` | List all uploaded drawings |
 | `POST` | `/api/chat` | Send message + drawing_id + history → Claude response |
+| `POST` | `/api/legend/upload` | Upload legend PDF/image → AI extract devices → return LegendParseResponse |
+| `GET` | `/api/legend/{id}` | Retrieve cached legend data |
+| `POST` | `/api/drawings/{id}/match-legend` | Match drawing symbols to legend entries via AI |
+| `POST` | `/api/drawings/{id}/generate-icons` | Generate SVG icons for matched symbols |
+| `GET` | `/api/icons/{device_name}` | Serve cached SVG icon by device name |
 | `GET` | `/{path}` | SPA catch-all (serves React index.html) |
 
 ## Data Flow
 
 ```
-1. User uploads DXF/DWG file (drag-drop or browse)
-2. Backend saves file, converts DWG→DXF if needed (ODA File Converter)
-3. Parser scans INSERT/MINSERT entities, groups by block name
-4. Fast-path: auto-labels using 57 known fire alarm symbol patterns
-5. AI-path: sends ambiguous blocks to Claude with full drawing context for classification
-6. Consolidates block variants of same device type into single rows
-7. Returns ParseResponse with symbols, counts, analysis log, audit trail
-8. Frontend displays symbol table in center panel
-9. Drawing preview: renders DXF geometry as SVG, overlays color-coded markers
-10. Symbol positions recovered via OCS→WCS transforms, schedule filtering, X-negation
-11. User asks questions in right-side chat panel
-12. Backend injects full symbol JSON into Claude system prompt
-13. Claude responds with accurate counts, cost estimates, and analysis
-14. Chat continues with full drawing context and conversation history
+1. User optionally uploads legend PDF/image
+2. Claude Vision extracts device names, abbreviations, categories, symbol descriptions
+3. User uploads DXF/DWG drawing (drag-drop or browse)
+4. Backend saves file, converts DWG→DXF if needed (LibreDWG or ODA)
+5. Parser scans INSERT/MINSERT entities, groups by block name
+6. Fast-path: auto-labels using 57 known fire alarm symbol patterns
+7. AI-path: sends ambiguous blocks to Claude with full drawing context for classification
+8. Consolidates block variants of same device type into single rows
+9. If legend exists: AI matches detected symbols to legend entries
+10. If matched: AI generates SVG icons from legend symbol descriptions
+11. Frontend receives fully enriched data (symbols + matches + icons)
+12. Frontend displays symbol table with SVG icons and legend badges
+13. Drawing preview: renders DXF geometry as SVG, overlays SVG icon markers
+14. Symbol positions recovered via OCS→WCS transforms, schedule filtering, X-negation
+15. User asks questions in right-side chat panel
+16. Backend injects full symbol JSON into Claude system prompt
+17. Claude responds with accurate counts, cost estimates, and analysis
 ```
 
 ## Key Design Decisions
 
 1. **No database** - In-memory dict storage. Drawings are transient per session. Keeps deployment simple.
 2. **AI-first classification** - Dictionary matching for known patterns, Claude AI for everything else. Handles any naming convention.
-3. **Direct prompt injection** - All symbol data (<5KB JSON) goes into Claude's system prompt. No RAG needed at this scale.
-4. **DXF as source of truth** - Counts INSERT entities (block insertions), not pixel analysis. Industry-standard accuracy.
-5. **OCS→WCS recovery** - Handles Revit/AutoCAD exports where INSERT coordinates are stored in OCS with mirrored X axis.
-6. **Multi-stage Docker** - Single container: Node builds React, Python serves API + static files.
-7. **Retro UI** - Warm, distinctive aesthetic that stands out from typical dark-mode dev tools. Inviting for contractors.
-8. **Always-visible chat** - Chat panel is always shown (Cursor-style), disabled state when no drawing loaded.
-9. **Symbol consolidation** - Different block names mapping to same device type merged into single rows for contractor clarity.
+3. **Legend as source of truth** - When matched, legend device names replace dictionary/AI labels. Legend provides the canonical naming.
+4. **Direct prompt injection** - All symbol data (<5KB JSON) goes into Claude's system prompt. No RAG needed at this scale.
+5. **DXF as source of truth** - Counts INSERT entities (block insertions), not pixel analysis. Industry-standard accuracy.
+6. **OCS→WCS recovery** - Handles Revit/AutoCAD exports where INSERT coordinates are stored in OCS with mirrored X axis.
+7. **Pipeline loading** - Upload → match → icons all complete before showing results. No flash of incomplete data.
+8. **SVG icon pipeline** - Legend descriptions → Claude generates SVG icons → `<symbol>`/`<use>` for efficient rendering at scale.
+9. **Multi-stage Docker** - Single container: Node builds React, LibreDWG compiles, Python serves API + static files.
+10. **Mac OS 9 UI** - Classic Platinum aesthetic that stands out from typical dark-mode dev tools. Inviting for contractors.
+11. **Always-visible chat** - Chat panel is always shown (Cursor-style), disabled state when no drawing loaded.
+12. **Symbol consolidation** - Different block names mapping to same device type merged into single rows for contractor clarity.
 
 ## Development
 
@@ -149,207 +173,29 @@ git push origin main  # Render auto-deploys from main
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Claude API key for chat and AI classification |
+| `ANTHROPIC_API_KEY` | Yes | Claude API key for chat, classification, legend extraction, matching, and icon generation |
 | `UPLOAD_DIR` | No | Upload directory (default: ./uploads) |
 | `MAX_FILE_SIZE_MB` | No | Max upload size in MB (default: 50) |
 | `PORT` | No | Server port (default: 8000, Render sets automatically) |
 
-## SVG Symbol Icons — Implementation Plan
-
-### Goal
-Replace the colored circle markers (in both Symbol Table and Drawing View) with actual SVG icons that look like the real fire alarm symbols from the uploaded legend. The pipeline:
-
-```
-Legend PDF → AI extracts descriptions → AI matches to DXF symbols → AI generates SVG icons → Icons replace circles
-```
-
-### Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        CURRENT STATE                                │
-│                                                                     │
-│  DXF Upload ──→ Symbol Detection ──→ Colored Circles (● ● ●)       │
-│  Legend Upload ──→ Device Extraction ──→ Table Display (separate)   │
-│                        ↕ NO LINK ↕                                  │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                        TARGET STATE                                 │
-│                                                                     │
-│  DXF Upload ──→ Symbol Detection ──┐                                │
-│                                    ├──→ AI Matching ──→ AI SVG Gen  │
-│  Legend Upload ──→ Device Extract ─┘         │              │       │
-│                                              │              │       │
-│                    matched_symbols ◄─────────┘              │       │
-│                    svg_icons ◄───────────────────────────────┘       │
-│                         │                                           │
-│                    ┌────┴────┐                                      │
-│                    ▼         ▼                                      │
-│              Symbol Table   Drawing View                            │
-│              (SVG icons)    (SVG icons at positions)                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Phase 1: AI Matching — Link legend devices to detected DXF symbols
-
-**What**: When both a drawing and legend exist, use Claude to match each detected DXF symbol to its corresponding legend entry. This gives each detected symbol its detailed description and abbreviation from the legend.
-
-**Backend changes**:
-- `models.py`: Add `SymbolMatch` model (symbol block_name → legend device name, confidence, reasoning)
-- `models.py`: Add `matched_legend` field to `SymbolInfo` (optional `LegendDevice` reference)
-- `main.py`: New endpoint `POST /api/drawings/{id}/match-legend` — accepts `legend_id`, runs AI matching, stores results on drawing
-- `main.py`: New matching function in a dedicated `matching.py` module
-- `matching.py` (new file):
-  - `match_symbols_to_legend(symbols, legend_devices)` — sends both lists to Claude
-  - Claude sees: detected symbol labels/block_names + legend device names/abbreviations/categories
-  - Claude returns: JSON mapping of `{ symbol_label → legend_device_name }` with confidence + reasoning
-  - Stores matches on each `SymbolInfo` in `drawings_store`
-  - Detailed analysis logging: every match/non-match logged with reasoning
-
-**Frontend changes**:
-- `types.ts`: Add `LegendDevice` type, add `matched_legend?: LegendDevice` to `SymbolInfo`
-- `api.ts`: Add `matchLegend(drawingId, legendId)` function
-- `App.tsx`: Auto-trigger matching when both drawing and legend exist
-- `SymbolTable.tsx`: Show match indicator — green check if matched, gray dash if not
-- `SymbolTable.tsx`: Show matched legend name + abbreviation in a tooltip or sub-row
-
-**Analysis logging**:
-- Log each symbol → legend match with confidence score and reasoning
-- Log unmatched symbols (no legend entry found)
-- Log unmatched legend entries (in legend but not detected in drawing)
-- Log match summary: "Matched 42/45 symbols, 3 unmatched, 8 legend entries unused"
-
-**Testable**: User uploads drawing + legend → sees which symbols matched which legend entries in the Symbols tab and Analysis tab.
-
----
-
-### Phase 2: SVG Icon Generation — Create icons from descriptions
-
-**What**: For each matched symbol, use Claude to generate compact SVG code from the legend's `symbol_description`. Cache the generated SVGs.
-
-**Backend changes**:
-- `icon_gen.py` (new file):
-  - `generate_svg_icon(device: LegendDevice) → str` — sends symbol_description to Claude, gets back SVG code
-  - Prompt: "Generate a clean, minimal SVG icon (viewBox 0 0 24 24) for this fire alarm symbol: {description}. Return ONLY the SVG markup, no explanation."
-  - Validate returned SVG (must contain `<svg` or valid SVG elements)
-  - `generate_icons_batch(devices: list[LegendDevice]) → dict[str, str]` — batch generation with progress logging
-- `models.py`: Add `svg_icon: str | None = None` to `SymbolInfo`
-- `main.py`: New endpoint `POST /api/drawings/{id}/generate-icons` — generates SVG for all matched symbols
-- `main.py`: New endpoint `GET /api/icons/{device_name}` — serve cached SVG icon
-- In-memory cache: `icons_cache: dict[str, str]` keyed by legend device name → SVG string
-
-**Frontend changes**:
-- `types.ts`: Add `svg_icon?: string` to `SymbolInfo`
-- `api.ts`: Add `generateIcons(drawingId)` function
-- `App.tsx`: Auto-trigger icon generation after matching completes
-- `SymbolTable.tsx`: Replace colored dot (●) with inline SVG icon when available
-- `LegendTable.tsx`: Show generated SVG icon next to each legend device
-
-**Analysis logging**:
-- Log each icon generation: device name, description length, SVG size, generation time
-- Log validation results: valid/invalid SVG, retry attempts
-- Log batch summary: "Generated 42 icons in 15.3s, 2 failed, 40 cached"
-
-**Testable**: User sees generated SVG icons in the Symbols table and Legend table instead of plain colored dots.
-
----
-
-### Phase 3: Drawing View Integration — Replace circles with SVG icons
-
-**What**: Modify DrawingViewer to render the generated SVG icons at symbol positions instead of colored circles. Maintain all interactivity.
-
-**Frontend changes**:
-- `DrawingViewer.tsx`:
-  - Add `<defs>` section with `<symbol>` definitions for each unique icon
-  - Default mode: Replace `<circle>` markers with `<use href="#icon-{name}">` elements
-  - Scale icons to `markerRadius * 2` (width/height), centered on position
-  - Selected mode: Show icon with numbered overlay (keep the numbered text on top)
-  - Fallback: Use colored circles for symbols without generated icons
-  - Hover: Slight scale-up transform on icon group
-  - Click: Same `onSelectSymbol` behavior
-- `App.tsx`: Pass `svg_icons` map to DrawingViewer as prop
-- `App.css`: Styles for SVG icon markers (hover effects, transitions)
-
-**Interactivity preservation**:
-- Click icon → select symbol (same as clicking circle)
-- Click selected icon → deselect
-- Hover → scale up slightly + cursor pointer
-- Selected mode → numbered overlay on top of icon
-- Bidirectional: click table row → icons highlight on drawing
-
-**Analysis logging**:
-- Log which symbols use icons vs fallback circles
-- Log icon rendering stats: total icons, unique icon types, fallback count
-
-**Testable**: Drawing view shows actual fire alarm device icons at the correct positions instead of colored circles. All interactive features (click, hover, select, number) still work.
-
----
-
-### Data Model Summary (after all phases)
-
-```python
-# Backend - models.py additions
-class SymbolMatch(BaseModel):
-    legend_device_name: str      # Matched legend entry name
-    confidence: str              # "high" | "medium" | "low"
-    reasoning: str               # Why this match was chosen
-
-class LegendDevice(BaseModel):   # Already exists
-    name: str
-    abbreviation: str | None
-    category: str
-    symbol_description: str
-    svg_icon: str | None = None  # NEW: generated SVG code
-
-class SymbolInfo(BaseModel):     # Existing, extended
-    # ... existing fields ...
-    matched_legend: LegendDevice | None = None  # NEW: matched legend entry
-    svg_icon: str | None = None                 # NEW: generated SVG icon code
-```
-
-```typescript
-// Frontend - types.ts additions
-interface LegendDevice {
-  name: string;
-  abbreviation: string | null;
-  category: string;
-  symbol_description: string;
-  svg_icon?: string;           // NEW
-}
-
-interface SymbolInfo {
-  // ... existing fields ...
-  matched_legend?: LegendDevice;  // NEW
-  svg_icon?: string;              // NEW
-}
-```
-
-### API Endpoints (after all phases)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/drawings/{id}/match-legend` | Match drawing symbols to legend entries (Phase 1) |
-| `POST` | `/api/drawings/{id}/generate-icons` | Generate SVG icons for matched symbols (Phase 2) |
-| `GET` | `/api/icons/{device_name}` | Get cached SVG icon by device name (Phase 2) |
-
-### Files Modified/Created per Phase
-
-| Phase | Backend | Frontend |
-|-------|---------|----------|
-| 1 | `matching.py` (new), `models.py`, `main.py` | `types.ts`, `api.ts`, `App.tsx`, `SymbolTable.tsx` |
-| 2 | `icon_gen.py` (new), `models.py`, `main.py` | `types.ts`, `api.ts`, `App.tsx`, `SymbolTable.tsx`, `LegendTable.tsx` |
-| 3 | — | `DrawingViewer.tsx`, `App.tsx`, `App.css` |
-
 ## Change Log
 
-### v2.0.0 - SVG Symbol Icons (In Progress)
-- **Legend-to-Drawing Matching**: AI matches detected DXF symbols to uploaded legend entries
-- **SVG Icon Generation**: AI generates SVG icons from legend symbol descriptions
-- **Icon Rendering**: SVG icons replace colored circles in Symbol Table and Drawing View
-- **Opus 4.6**: Legend extraction upgraded to Opus for richer symbol descriptions
+### v2.0.0 - SVG Symbol Icons
+- **Legend Upload**: Two-step upload flow — optional legend PDF/image before drawing upload
+- **Legend Extraction**: Claude Opus 4.6 Vision extracts device names, abbreviations, categories, and detailed symbol descriptions
 - **Adaptive DPI**: PDF rendering DPI auto-selected based on page size (150-400 DPI)
 - **Image Tiling**: Dense landscape legends split into overlapping tiles for better Vision accuracy
+- **Legend-to-Drawing Matching**: AI matches detected DXF symbols to uploaded legend entries with confidence scoring
+- **Legend as Source of Truth**: Matched legend names replace dictionary/AI labels; original labels preserved for audit
+- **SVG Icon Generation**: AI generates compact SVG icons (24x24 viewBox) from legend symbol descriptions
+- **Icon Rendering (Drawing View)**: SVG icons replace colored circles at symbol positions via `<symbol>`/`<use>` pattern
+- **Icon Rendering (Symbol Table)**: Inline SVG icons in symbol table and legend table
+- **Selected Mode Icons**: Numbered badge overlay on icons when symbol selected in drawing view
+- **Icon Fallback**: Colored circles used for symbols without generated icons
+- **Pipeline Loading**: Upload → match → icons all complete before revealing results to user
+- **CSV Export Fix**: Uses anchor download instead of window.open (prevented popup blocking)
+- **Preview Fix**: Preview useEffect depends on drawingId only, preventing redundant re-fetches on symbol updates
+- **Upload UI**: Properly centered two-step upload with Mac OS 9 Platinum styling
 
 ### v1.1.0 - Symbol Position Recovery & OCS Fix
 - **OCS→WCS Recovery**: Fixed missing markers for smoke detectors, speakers, and heat detectors in Revit-exported drawings
@@ -384,7 +230,6 @@ interface SymbolInfo {
 - Added Sidebar component with logo, upload button, file list
 - Redesigned Header as classic window title bar with traffic lights
 - Added Cursor-style always-visible chat panel on right side
-- Warm cream/beige/brown color palette throughout
 - Classic inset/raised border effects
 - Added CLAUDE.md and SUBCLAUDE.md documentation files
 
