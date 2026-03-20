@@ -43,28 +43,45 @@ def _get_client() -> AsyncAnthropic:
 
 
 def _build_icon_prompt(device_name: str, symbol_description: str) -> str:
-    """Build a highly specific prompt for consistent SVG icon generation."""
-    return f"""Create a precise SVG icon based on this fire alarm symbol description.
+    """Build prompt for Claude to generate an SVG icon.
+
+    Uses explicit #000 for strokes/fills (Claude generates clearer icons
+    with concrete color values). Post-processing in _normalize_colors()
+    converts #000 → currentColor for CSS-driven per-category coloring.
+    """
+    return f"""Generate a clean, minimal SVG icon for this fire alarm device symbol.
 
 Device: {device_name}
-Description: {symbol_description}
+Symbol description: {symbol_description}
 
-MANDATORY RULES — follow every one exactly:
-1. Start with <svg viewBox="0 0 24 24"> — NO width, height, or xmlns attributes
-2. Use ONLY stroke="currentColor" for ALL strokes — NEVER #000, black, or any hex color
-3. Use ONLY fill="currentColor" for filled elements — NEVER #000, black, or any hex color
-4. For shape backgrounds/outlines use fill="white" or fill="none"
-5. stroke-width="1.5" on all stroked elements
-6. Center all content within the 24×24 viewBox — main shape should fill ~80% of the space
-7. Use 3-8 SVG elements maximum — prioritize clarity over detail
-8. Elements allowed: circle, rect, line, path, polygon, polyline, text, g
-9. No comments, no <?xml?>, no <!DOCTYPE>
-10. Must be recognizable at 18px — clean technical/engineering style
+Requirements:
+- viewBox="0 0 24 24"
+- Use only basic SVG elements: circle, rect, line, path, polygon, polyline, text, g
+- Use stroke="#000" stroke-width="1.5" explicitly on ALL shape elements
+- For filled areas, use fill="#000" explicitly on the element
+- For shape backgrounds/outlines, use fill="none" or fill="white"
+- Keep it simple and recognizable at small sizes (16-24px)
+- The icon should look like a technical/engineering symbol, not decorative art
+- Center all content — main shape should fill ~80% of the 24×24 viewBox
+- Use 3-8 SVG elements maximum
 
-For circular symbols: use <circle cx="12" cy="12" r="10"> as the outer boundary
-For rectangular symbols: use <rect x="2" y="3" width="20" height="18" rx="2"> as boundary
+Text/letter rules (if the symbol contains a letter or abbreviation):
+- Use <text> with font-size="11" font-weight="bold" font-family="Arial, sans-serif"
+- Center text: text-anchor="middle" dominant-baseline="central" x="12" y="12"
+- Make text PROMINENT — it should be the most visible element
+- Text fill="#000" (no stroke on text elements)
 
-Return ONLY the raw SVG code starting with <svg and ending with </svg>. No markdown fences, no explanation."""
+Device type guidance:
+- For detectors (smoke, heat, duct): use circles with internal markings or letters
+- For pull stations: use a rectangle with a T-handle shape
+- For horns/strobes/speakers: use speaker cone or flash/burst shapes
+- For control panels: use a rectangle with internal indicator elements
+- For modules/relays: use a small square or diamond with connection dots
+- For sprinklers: use a circle with spray lines below
+
+Do NOT include <?xml?> declaration, <!DOCTYPE>, comments, width, height, or xmlns attributes.
+
+Return ONLY the SVG markup starting with <svg and ending with </svg>. No explanation, no markdown fences."""
 
 
 def _normalize_colors(svg: str) -> str:
