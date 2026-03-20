@@ -29,14 +29,17 @@ function App() {
   const [generatingIcons, setGeneratingIcons] = useState(false);
   const [iconsDone, setIconsDone] = useState(false);
 
-  // Load preview when drawing changes
+  // Load preview when a new drawing is uploaded (keyed by drawing_id only).
+  // Symbol metadata updates (matching, icon generation) should NOT re-fetch
+  // the preview — it depends only on the DXF file, not symbol data.
+  const drawingId = drawing?.drawing_id ?? null;
   useEffect(() => {
-    if (!drawing) {
+    if (!drawingId) {
       setPreview(null);
       return;
     }
     setPreviewLoading(true);
-    getDrawingPreview(drawing.drawing_id)
+    getDrawingPreview(drawingId)
       .then((p) => {
         console.log("[FireGPT] Preview loaded. symbol_positions keys:", Object.keys(p.symbol_positions || {}));
         console.log("[FireGPT] Position counts:", Object.fromEntries(
@@ -53,7 +56,7 @@ function App() {
         setPreview(null);
       })
       .finally(() => setPreviewLoading(false));
-  }, [drawing]);
+  }, [drawingId]);
 
   // Auto-match symbols to legend when both are available
   useEffect(() => {

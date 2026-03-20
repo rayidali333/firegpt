@@ -26,7 +26,7 @@ from app.models import SymbolInfo
 
 logger = logging.getLogger(__name__)
 
-MAX_SVG_ELEMENTS = 40000
+MAX_SVG_ELEMENTS = 80000
 
 # AutoCAD Color Index (ACI) standard colors → hex
 ACI_COLORS = {
