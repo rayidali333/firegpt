@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
-import { uploadDrawing, uploadLegend, matchLegend, generateIcons, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
+import { uploadDrawing, uploadLegend, matchLegend, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
@@ -26,8 +26,6 @@ function App() {
   const [legendSkipped, setLegendSkipped] = useState(false);
   const [matching, setMatching] = useState(false);
   const [matchDone, setMatchDone] = useState(false);
-  const [generatingIcons, setGeneratingIcons] = useState(false);
-  const [iconsDone, setIconsDone] = useState(false);
 
   // Load preview when drawing changes
   useEffect(() => {
@@ -84,37 +82,6 @@ function App() {
       .finally(() => setMatching(false));
   }, [drawing, legend, matchDone, matching]);
 
-  // Auto-generate icons after matching completes
-  useEffect(() => {
-    if (!drawing || !matchDone || iconsDone || generatingIcons) return;
-    // Only generate if at least one symbol has a matched legend
-    const hasMatches = drawing.symbols.some((s) => s.source === "legend");
-    if (!hasMatches) {
-      setIconsDone(true);
-      return;
-    }
-
-    setGeneratingIcons(true);
-    console.log("[FireGPT] Generating SVG icons for matched symbols...");
-
-    generateIcons(drawing.drawing_id)
-      .then((result) => {
-        console.log(
-          `[FireGPT] Icon generation complete: ${result.generated} generated, ${result.failed} failed`
-        );
-        setDrawing((prev) => {
-          if (!prev) return prev;
-          return { ...prev, symbols: result.symbols };
-        });
-        setIconsDone(true);
-      })
-      .catch((e) => {
-        console.warn("[FireGPT] Icon generation failed:", e);
-        setIconsDone(true);
-      })
-      .finally(() => setGeneratingIcons(false));
-  }, [drawing, matchDone, iconsDone, generatingIcons]);
-
   const handleUpload = async (file: File) => {
     setUploading(true);
     setError(null);
@@ -126,7 +93,6 @@ function App() {
       setSelectedSymbol(null);
       setPreview(null);
       setMatchDone(false);
-      setIconsDone(false);
     } catch (e: any) {
       setError(e.message || "Upload failed");
     } finally {
@@ -337,12 +303,6 @@ function App() {
                   ) : activeTab === "legend" && legend ? (
                     <LegendTable
                       legend={legend}
-                      icons={drawing.symbols.reduce((acc, s) => {
-                        if (s.svg_icon && s.matched_legend) {
-                          acc[s.matched_legend.name] = s.svg_icon;
-                        }
-                        return acc;
-                      }, {} as Record<string, string>)}
                     />
                   ) : (
                     <AnalysisLog

@@ -83,6 +83,7 @@ class LegendDevice(BaseModel):
     category: str  # System/section (e.g., "Fire Alarm System")
     symbol_description: str  # Detailed visual description for SVG generation
     svg_icon: str | None = None  # Generated SVG icon markup (Phase 2)
+    color: str | None = None  # Category color for icon rendering
 
 
 class LegendParseResponse(BaseModel):

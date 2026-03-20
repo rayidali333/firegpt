@@ -54,6 +54,7 @@ export interface LegendDevice {
   category: string;
   symbol_description: string;
   svg_icon?: string | null;
+  color?: string | null;
 }
 
 export interface LegendData {
