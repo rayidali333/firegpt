@@ -15,7 +15,7 @@ from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai
 from app.legend import parse_legend_file, ALL_LEGEND_EXTENSIONS
 from app.matching import match_symbols_to_legend
-from app.icon_gen import generate_icons_batch, get_device_icon, icons_cache
+from app.icon_gen import generate_icons_batch, icons_cache
 from app.models import (
     AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendParseResponse,
     ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
@@ -379,11 +379,9 @@ async def upload_legend(file: UploadFile):
 
     result.legend_id = str(uuid.uuid4())
 
-    # Generate deterministic SVG icons for all legend devices (instant)
+    # Set category colors for legend devices (instant keyword matching)
     for device in result.devices:
-        device.svg_icon = get_device_icon(device.name, device.symbol_description)
         device.color = _get_symbol_color(device.name)
-        icons_cache[device.name] = device.svg_icon
 
     legends_store[result.legend_id] = result
     return result
@@ -452,9 +450,6 @@ async def match_drawing_to_legend(drawing_id: str, request: MatchLegendRequest):
             sym.label = device.name  # Legend name is now the label
             sym.source = "legend"
             sym.confidence = match_result.confidence
-            # Generate icon from template (instant, deterministic)
-            sym.svg_icon = get_device_icon(device.name, device.symbol_description)
-            icons_cache[device.name] = sym.svg_icon
             matched_count += 1
         else:
             sym.matched_legend = None

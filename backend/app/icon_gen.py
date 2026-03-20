@@ -1,336 +1,246 @@
 """
-SVG Icon Generation — deterministic templates for fire alarm device icons.
+SVG Icon Generation — AI-powered creation of fire alarm device icons.
 
-Instead of AI-generated SVGs (which are inconsistent), this module uses
-handcrafted SVG templates mapped to device types via keyword matching.
-All icons use currentColor for strokes/fills, so they inherit color from
-the CSS container — giving automatic per-category color coding.
+Each icon is generated from the legend's symbol_description, so icons
+accurately reflect the actual symbols used in each specific project.
+Post-processing normalizes all colors to currentColor for automatic
+CSS-driven per-category color coding.
 
-Icons are 24×24 viewBox, designed for 18-22px rendering.
+Icons are 24×24 viewBox, designed for 18-22px inline rendering.
 """
 
+import asyncio
 import logging
+import os
+import re
+import time
+
+from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
+
+ICON_MODEL = "claude-sonnet-4-20250514"
+ICON_MAX_TOKENS = 2048
+ICON_TEMPERATURE = 0.2
+
+# Max concurrent API calls to avoid rate limiting
+MAX_CONCURRENT = 5
 
 # In-memory cache: device name → SVG string
 icons_cache: dict[str, str] = {}
 
-
-# ── SVG Templates ─────────────────────────────────────────────────────
-# All use currentColor so color is controlled by CSS parent.
+client: AsyncAnthropic | None = None
 
 
-def _circle_icon(letter: str) -> str:
-    """Circle with centered letter(s) — for detectors."""
-    fs = 12 if len(letter) == 1 else (9 if len(letter) == 2 else 7)
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<circle cx="12" cy="12" r="10" stroke="currentColor" '
-        'stroke-width="1.5" fill="white"/>'
-        f'<text x="12" y="12" text-anchor="middle" dy="0.38em" '
-        f'font-size="{fs}" font-family="Arial,sans-serif" '
-        f'font-weight="bold" fill="currentColor">{letter}</text>'
-        '</svg>'
+def _get_client() -> AsyncAnthropic:
+    global client
+    if client is None:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY not set")
+        client = AsyncAnthropic(api_key=api_key)
+    return client
+
+
+def _build_icon_prompt(device_name: str, symbol_description: str) -> str:
+    """Build a highly specific prompt for consistent SVG icon generation."""
+    return f"""Create a precise SVG icon based on this fire alarm symbol description.
+
+Device: {device_name}
+Description: {symbol_description}
+
+MANDATORY RULES — follow every one exactly:
+1. Start with <svg viewBox="0 0 24 24"> — NO width, height, or xmlns attributes
+2. Use ONLY stroke="currentColor" for ALL strokes — NEVER #000, black, or any hex color
+3. Use ONLY fill="currentColor" for filled elements — NEVER #000, black, or any hex color
+4. For shape backgrounds/outlines use fill="white" or fill="none"
+5. stroke-width="1.5" on all stroked elements
+6. Center all content within the 24×24 viewBox — main shape should fill ~80% of the space
+7. Use 3-8 SVG elements maximum — prioritize clarity over detail
+8. Elements allowed: circle, rect, line, path, polygon, polyline, text, g
+9. No comments, no <?xml?>, no <!DOCTYPE>
+10. Must be recognizable at 18px — clean technical/engineering style
+
+For circular symbols: use <circle cx="12" cy="12" r="10"> as the outer boundary
+For rectangular symbols: use <rect x="2" y="3" width="20" height="18" rx="2"> as boundary
+
+Return ONLY the raw SVG code starting with <svg and ending with </svg>. No markdown fences, no explanation."""
+
+
+def _normalize_colors(svg: str) -> str:
+    """Replace all hardcoded colors with currentColor for CSS-driven coloring.
+
+    Preserves fill="none", fill="white", fill="transparent" and their stroke
+    equivalents. Everything else becomes currentColor so the parent element's
+    CSS `color` property controls the icon color.
+    """
+    # Replace stroke colors (except none/currentColor)
+    svg = re.sub(
+        r'stroke="(?!currentColor|none)[^"]*"',
+        'stroke="currentColor"',
+        svg,
     )
-
-
-def _rect_icon(letter: str) -> str:
-    """Rounded rectangle with centered letter(s) — for modules."""
-    fs = 10 if len(letter) <= 2 else 7
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<rect x="2" y="4" width="20" height="16" rx="2" '
-        'stroke="currentColor" stroke-width="1.5" fill="white"/>'
-        f'<text x="12" y="12" text-anchor="middle" dy="0.38em" '
-        f'font-size="{fs}" font-family="Arial,sans-serif" '
-        f'font-weight="bold" fill="currentColor">{letter}</text>'
-        '</svg>'
+    # Replace fill colors (except none/white/currentColor/transparent)
+    svg = re.sub(
+        r'fill="(?!currentColor|none|white|transparent|#fff|#FFF|#ffffff|#FFFFFF)[^"]*"',
+        'fill="currentColor"',
+        svg,
     )
+    return svg
 
 
-def _panel_icon(letter: str = "FP") -> str:
-    """Control panel — rectangle with header bar and letters."""
-    fs = 9 if len(letter) <= 2 else 7
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<rect x="2" y="3" width="20" height="18" rx="2" '
-        'stroke="currentColor" stroke-width="1.5" fill="white"/>'
-        '<line x1="2" y1="8" x2="22" y2="8" '
-        'stroke="currentColor" stroke-width="1" opacity="0.4"/>'
-        f'<text x="12" y="14" text-anchor="middle" dy="0.38em" '
-        f'font-size="{fs}" font-family="Arial,sans-serif" '
-        f'font-weight="bold" fill="currentColor">{letter}</text>'
-        '</svg>'
-    )
+def _validate_svg(svg: str) -> str | None:
+    """Validate, clean, and normalize SVG markup.
+
+    Returns cleaned SVG with currentColor normalization, or None if invalid.
+    """
+    svg = svg.strip()
+
+    # Extract SVG if wrapped in markdown fences
+    if "```" in svg:
+        match = re.search(r'<svg[\s\S]*</svg>', svg)
+        if match:
+            svg = match.group(0)
+        else:
+            return None
+
+    # Must contain <svg and </svg>
+    if not svg.startswith("<svg") or not svg.endswith("</svg>"):
+        match = re.search(r'<svg[\s\S]*</svg>', svg)
+        if match:
+            svg = match.group(0)
+        else:
+            return None
+
+    # Ensure viewBox
+    if "viewBox" not in svg:
+        svg = svg.replace("<svg", '<svg viewBox="0 0 24 24"', 1)
+
+    # Remove width/height (we control sizing via CSS)
+    svg = re.sub(r'\s+width="[^"]*"', '', svg)
+    svg = re.sub(r'\s+height="[^"]*"', '', svg)
+
+    # Remove xmlns (not needed for inline SVG)
+    svg = re.sub(r'\s+xmlns="[^"]*"', '', svg)
+
+    # Normalize all colors to currentColor
+    svg = _normalize_colors(svg)
+
+    return svg
 
 
-def _diamond_icon(letter: str = "") -> str:
-    """Diamond shape — for switches, valves."""
-    inner = ""
-    if letter:
-        fs = 9 if len(letter) <= 2 else 7
-        inner = (
-            f'<text x="12" y="12" text-anchor="middle" dy="0.38em" '
-            f'font-size="{fs}" font-family="Arial,sans-serif" '
-            f'font-weight="bold" fill="currentColor">{letter}</text>'
-        )
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<polygon points="12,2 22,12 12,22 2,12" '
-        'stroke="currentColor" stroke-width="1.5" fill="white" '
-        'stroke-linejoin="round"/>'
-        + inner +
-        '</svg>'
-    )
-
-
-def _speaker_icon() -> str:
-    """Speaker/loudspeaker icon."""
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<polygon points="3,9 3,15 7,15 13,19 13,5 7,9" '
-        'stroke="currentColor" stroke-width="1.5" fill="white" '
-        'stroke-linejoin="round"/>'
-        '<path d="M16,9 Q19.5,12 16,15" stroke="currentColor" '
-        'stroke-width="1.5" fill="none"/>'
-        '<path d="M18.5,7 Q23,12 18.5,17" stroke="currentColor" '
-        'stroke-width="1.5" fill="none"/>'
-        '</svg>'
-    )
-
-
-def _strobe_icon() -> str:
-    """Strobe/flash light icon — circle with lightning bolt."""
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<circle cx="12" cy="12" r="10" stroke="currentColor" '
-        'stroke-width="1.5" fill="white"/>'
-        '<path d="M14,4.5 L9.5,12 L13,12 L10,19.5" '
-        'stroke="currentColor" stroke-width="2" fill="none" '
-        'stroke-linecap="round" stroke-linejoin="round"/>'
-        '</svg>'
-    )
-
-
-def _horn_icon() -> str:
-    """Horn/audible notification."""
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<path d="M4,9 L4,15 L8,15 L15,19 L15,5 L8,9 Z" '
-        'stroke="currentColor" stroke-width="1.5" fill="white" '
-        'stroke-linejoin="round"/>'
-        '<line x1="18" y1="8" x2="21" y2="6" '
-        'stroke="currentColor" stroke-width="1.5"/>'
-        '<line x1="18" y1="12" x2="22" y2="12" '
-        'stroke="currentColor" stroke-width="1.5"/>'
-        '<line x1="18" y1="16" x2="21" y2="18" '
-        'stroke="currentColor" stroke-width="1.5"/>'
-        '</svg>'
-    )
-
-
-def _bell_icon() -> str:
-    """Bell/siren/alarm icon."""
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<path d="M12,3 C12,3 7,4 7,10 L7,14 L4,17 L20,17 '
-        'L17,14 L17,10 C17,4 12,3 12,3 Z" '
-        'stroke="currentColor" stroke-width="1.5" fill="white" '
-        'stroke-linejoin="round"/>'
-        '<line x1="12" y1="1" x2="12" y2="3" '
-        'stroke="currentColor" stroke-width="1.5"/>'
-        '<path d="M10,17 Q10,21 12,21 Q14,21 14,17" '
-        'stroke="currentColor" stroke-width="1.5" fill="none"/>'
-        '</svg>'
-    )
-
-
-def _pull_station_icon() -> str:
-    """Manual pull station / call station."""
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<rect x="4" y="2" width="16" height="20" rx="1.5" '
-        'stroke="currentColor" stroke-width="1.5" fill="white"/>'
-        '<line x1="12" y1="6" x2="12" y2="13" '
-        'stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>'
-        '<circle cx="12" cy="17" r="2.5" stroke="currentColor" '
-        'stroke-width="1.5" fill="none"/>'
-        '</svg>'
-    )
-
-
-def _telephone_icon() -> str:
-    """Telephone icon — handset outline."""
-    return (
-        '<svg viewBox="0 0 24 24">'
-        '<rect x="3" y="2" width="18" height="20" rx="2" '
-        'stroke="currentColor" stroke-width="1.5" fill="white"/>'
-        '<rect x="6" y="5" width="12" height="4" rx="1" '
-        'stroke="currentColor" stroke-width="1" fill="none"/>'
-        '<rect x="6" y="15" width="12" height="4" rx="1" '
-        'stroke="currentColor" stroke-width="1" fill="none"/>'
-        '<line x1="12" y1="9" x2="12" y2="15" '
-        'stroke="currentColor" stroke-width="1" opacity="0.4"/>'
-        '</svg>'
-    )
-
-
-# ── Device Name → Template Mapping ────────────────────────────────────
-
-
-def get_device_icon(device_name: str, symbol_description: str = "") -> str:
-    """Return a deterministic SVG icon for a fire alarm device.
-
-    Matches the device name against known fire alarm categories and
-    returns the appropriate SVG template. All icons use currentColor
-    for automatic color-coding via CSS.
+async def generate_svg_icon(device_name: str, symbol_description: str) -> str | None:
+    """Generate a single SVG icon from a device's symbol description.
 
     Args:
-        device_name: Device name from legend (e.g. "SMOKE DETECTOR")
-        symbol_description: Optional description (unused — kept for interface compat)
+        device_name: Device name from the legend
+        symbol_description: Visual description of the symbol from the legend
 
     Returns:
-        SVG markup string (always returns something — never None)
+        SVG markup string with currentColor, or None if generation failed
     """
-    n = device_name.lower()
+    # Check cache first
+    if device_name in icons_cache:
+        logger.info(f"[icon_gen] Cache hit: {device_name}")
+        return icons_cache[device_name]
 
-    # ── Combination detectors (check first) ───────────────────────
-    if "smoke" in n and "heat" in n:
-        return _circle_icon("SH")
+    prompt = _build_icon_prompt(device_name, symbol_description)
+    api_client = _get_client()
 
-    # ── Beam detectors ────────────────────────────────────────────
-    if "beam" in n:
-        if "transmit" in n:
-            return _circle_icon("BT")
-        if "receiv" in n:
-            return _circle_icon("BR")
-        return _circle_icon("BD")
+    start_time = time.time()
+    try:
+        response = await api_client.messages.create(
+            model=ICON_MODEL,
+            max_tokens=ICON_MAX_TOKENS,
+            temperature=ICON_TEMPERATURE,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        logger.error(f"[icon_gen] API call failed for {device_name}: {e}")
+        return None
 
-    # ── Duct detectors ────────────────────────────────────────────
-    if "duct" in n and "detect" in n:
-        return _rect_icon("DD")
+    elapsed = time.time() - start_time
+    raw_svg = response.content[0].text.strip()
 
-    # ── Specific detector types ───────────────────────────────────
-    if "smoke" in n and "detect" in n:
-        return _circle_icon("S")
-    if "heat" in n and "detect" in n:
-        return _circle_icon("H")
-    if "flame" in n:
-        return _circle_icon("FL")
-    if ("carbon" in n or "co " in n or "co2" in n):
-        return _circle_icon("CO")
-    if "gas" in n and "detect" in n:
-        return _circle_icon("G")
-    if "smoke" in n:
-        return _circle_icon("S")
+    svg = _validate_svg(raw_svg)
+    if svg is None:
+        logger.warning(
+            f"[icon_gen] Invalid SVG for {device_name} "
+            f"(len={len(raw_svg)}, preview={raw_svg[:200]})"
+        )
+        return None
 
-    # ── Notification appliances ───────────────────────────────────
-    if "speaker" in n or "loudspeaker" in n:
-        return _speaker_icon()
-    if "strobe" in n and ("horn" in n or "speaker" in n):
-        return _horn_icon()
-    if "strobe" in n:
-        return _strobe_icon()
-    if "horn" in n:
-        return _horn_icon()
-    if "siren" in n:
-        return _bell_icon()
-    if "bell" in n:
-        return _bell_icon()
-    if "sounder" in n or "chime" in n:
-        return _bell_icon()
-
-    # ── Manual devices ────────────────────────────────────────────
-    if "pull" in n and "station" in n:
-        return _pull_station_icon()
-    if "call" in n and "station" in n:
-        return _pull_station_icon()
-    if "manual" in n and ("station" in n or "call" in n or "point" in n):
-        return _pull_station_icon()
-    if "telephone" in n or "phone" in n:
-        return _telephone_icon()
-
-    # ── Panels (specific before general) ──────────────────────────
-    if "sub" in n and "panel" in n:
-        return _panel_icon("SP")
-    if "annunciator" in n:
-        return _panel_icon("AN")
-    if "control panel" in n or "facp" in n:
-        return _panel_icon("FP")
-    if "transponder" in n:
-        return _rect_icon("TP")
-    if "power supply" in n:
-        return _rect_icon("PS")
-    if "battery" in n:
-        return _rect_icon("BT")
-
-    # ── Modules ───────────────────────────────────────────────────
-    if ("control" in n or "signal" in n) and "module" in n:
-        return _rect_icon("CM")
-    if "monitor" in n and "module" in n:
-        return _rect_icon("MM")
-    if "input" in n and "module" in n:
-        return _rect_icon("IM")
-    if "relay" in n and "module" in n:
-        return _rect_icon("RM")
-    if "isolat" in n and "module" in n:
-        return _rect_icon("IS")
-    if "module" in n:
-        return _rect_icon("M")
-
-    # ── Switches & valves ─────────────────────────────────────────
-    if "flow" in n and ("switch" in n or "monitor" in n):
-        return _diamond_icon("FS")
-    if "tamper" in n:
-        return _diamond_icon("TS")
-    if "valve" in n:
-        return _diamond_icon("V")
-    if "switch" in n:
-        return _diamond_icon("SW")
-
-    # ── Remaining catch-alls ──────────────────────────────────────
-    if "rack" in n:
-        return _rect_icon("RK")
-    if "junction" in n:
-        return _rect_icon("JB")
-    if "conduit" in n:
-        return _rect_icon("C")
-    if "detector" in n or "sensor" in n:
-        return _circle_icon("D")
-    if "panel" in n:
-        return _panel_icon("P")
-
-    # ── Default: first letter in a circle ─────────────────────────
-    first = device_name.strip()[0].upper() if device_name.strip() else "?"
-    return _circle_icon(first)
-
-
-# ── Batch generation (keeps same interface) ───────────────────────────
+    # Cache it
+    icons_cache[device_name] = svg
+    logger.info(
+        f"[icon_gen] Generated icon for {device_name} "
+        f"({len(svg)}B, {elapsed:.1f}s)"
+    )
+    return svg
 
 
 async def generate_icons_batch(
     devices: list[dict],
 ) -> dict[str, str]:
-    """Generate SVG icons for a batch of devices.
+    """Generate SVG icons for a batch of devices concurrently.
 
-    Now deterministic (no API calls), so this is instant.
+    Uses asyncio.Semaphore to limit concurrent API calls to MAX_CONCURRENT.
 
     Args:
         devices: List of dicts with 'name' and 'symbol_description' keys
 
     Returns:
-        Dict mapping device name → SVG string (always succeeds for all)
+        Dict mapping device name → SVG string (only successful generations)
     """
     results: dict[str, str] = {}
+    to_generate: list[dict] = []
+
+    # Resolve cache hits first
     for device in devices:
         name = device["name"]
-        desc = device.get("symbol_description", "")
-        svg = get_device_icon(name, desc)
-        results[name] = svg
-        icons_cache[name] = svg
+        if name in icons_cache:
+            results[name] = icons_cache[name]
+        else:
+            to_generate.append(device)
 
+    cached = len(results)
+    if not to_generate:
+        logger.info(f"[icon_gen] All {cached} icons served from cache")
+        return results
+
+    start_time = time.time()
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+
+    async def _gen(device: dict) -> tuple[str, str | None]:
+        async with sem:
+            svg = await generate_svg_icon(
+                device["name"], device["symbol_description"]
+            )
+            return device["name"], svg
+
+    # Run all API calls concurrently (bounded by semaphore)
+    tasks = [_gen(d) for d in to_generate]
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    generated = 0
+    failed = 0
+    for outcome in outcomes:
+        if isinstance(outcome, Exception):
+            logger.error(f"[icon_gen] Task exception: {outcome}")
+            failed += 1
+        else:
+            name, svg = outcome
+            if svg:
+                results[name] = svg
+                generated += 1
+            else:
+                failed += 1
+
+    elapsed = time.time() - start_time
     logger.info(
-        f"[icon_gen] Generated {len(results)} icons (deterministic templates)"
+        f"[icon_gen] Batch complete: {generated} generated, "
+        f"{cached} cached, {failed} failed out of {len(devices)} "
+        f"({elapsed:.1f}s total)"
     )
+
     return results
