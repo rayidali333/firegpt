@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { DrawingData, DrawingPreview, ChatMessage } from "./types";
-import { uploadDrawing, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
+import { DrawingData, DrawingPreview, ChatMessage, LegendData } from "./types";
+import { uploadDrawing, uploadLegend, matchLegend, generateIcons, getDrawingPreview, chatWithDrawing, overrideSymbol, getExportUrl } from "./api";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import UploadZone from "./components/UploadZone";
@@ -8,27 +8,39 @@ import SymbolTable from "./components/SymbolTable";
 import DrawingViewer from "./components/DrawingViewer";
 import AnalysisLog from "./components/AnalysisLog";
 import ChatPanel from "./components/ChatPanel";
+import LegendTable from "./components/LegendTable";
 import "./App.css";
 
 function App() {
   const [drawing, setDrawing] = useState<DrawingData | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadStage, setUploadStage] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis">("symbols");
+  const [activeTab, setActiveTab] = useState<"symbols" | "drawing" | "analysis" | "legend">("symbols");
   const [preview, setPreview] = useState<DrawingPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [chatSending, setChatSending] = useState(false);
+  const [legend, setLegend] = useState<LegendData | null>(null);
+  const [legendUploading, setLegendUploading] = useState(false);
+  const [legendSkipped, setLegendSkipped] = useState(false);
+  const [matching, setMatching] = useState(false);
+  const [matchDone, setMatchDone] = useState(false);
+  const [generatingIcons, setGeneratingIcons] = useState(false);
+  const [iconsDone, setIconsDone] = useState(false);
 
-  // Load preview when drawing changes
+  // Load preview when a new drawing is uploaded (keyed by drawing_id only).
+  // Symbol metadata updates (matching, icon generation) should NOT re-fetch
+  // the preview — it depends only on the DXF file, not symbol data.
+  const drawingId = drawing?.drawing_id ?? null;
   useEffect(() => {
-    if (!drawing) {
+    if (!drawingId) {
       setPreview(null);
       return;
     }
     setPreviewLoading(true);
-    getDrawingPreview(drawing.drawing_id)
+    getDrawingPreview(drawingId)
       .then((p) => {
         console.log("[FireGPT] Preview loaded. symbol_positions keys:", Object.keys(p.symbol_positions || {}));
         console.log("[FireGPT] Position counts:", Object.fromEntries(
@@ -45,13 +57,104 @@ function App() {
         setPreview(null);
       })
       .finally(() => setPreviewLoading(false));
-  }, [drawing]);
+  }, [drawingId]);
+
+  // Auto-match symbols to legend when both are available
+  useEffect(() => {
+    if (!drawing || !legend || matchDone || matching) return;
+
+    setMatching(true);
+    console.log("[FireGPT] Auto-matching symbols to legend...");
+
+    matchLegend(drawing.drawing_id, legend.legend_id)
+      .then((result) => {
+        console.log(
+          `[FireGPT] Matching complete: ${result.matched}/${result.total_symbols} matched`
+        );
+        // Update drawing symbols with match data
+        setDrawing((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            symbols: result.symbols,
+          };
+        });
+        setMatchDone(true);
+      })
+      .catch((e) => {
+        console.warn("[FireGPT] Legend matching failed:", e);
+        setMatchDone(true); // Don't retry on failure
+      })
+      .finally(() => setMatching(false));
+  }, [drawing, legend, matchDone, matching]);
+
+  // Auto-generate icons after matching completes
+  useEffect(() => {
+    if (!drawing || !matchDone || iconsDone || generatingIcons) return;
+    const hasMatches = drawing.symbols.some((s) => s.source === "legend");
+    if (!hasMatches) {
+      setIconsDone(true);
+      return;
+    }
+
+    setGeneratingIcons(true);
+    console.log("[FireGPT] Generating SVG icons from symbol descriptions...");
+
+    generateIcons(drawing.drawing_id)
+      .then((result) => {
+        console.log(
+          `[FireGPT] Icon generation complete: ${result.generated} generated, ${result.failed} failed`
+        );
+        setDrawing((prev) => {
+          if (!prev) return prev;
+          return { ...prev, symbols: result.symbols };
+        });
+        setIconsDone(true);
+      })
+      .catch((e) => {
+        console.warn("[FireGPT] Icon generation failed:", e);
+        setIconsDone(true);
+      })
+      .finally(() => setGeneratingIcons(false));
+  }, [drawing, matchDone, iconsDone, generatingIcons]);
 
   const handleUpload = async (file: File) => {
     setUploading(true);
     setError(null);
+    setUploadStage("Uploading and analyzing drawing...");
     try {
       const data = await uploadDrawing(file);
+
+      // If legend exists, do matching + icon generation before revealing results
+      if (legend) {
+        setUploadStage("Matching symbols to legend entries...");
+        try {
+          const matchResult = await matchLegend(data.drawing_id, legend.legend_id);
+          console.log(`[FireGPT] Matching complete: ${matchResult.matched}/${matchResult.total_symbols} matched`);
+          data.symbols = matchResult.symbols;
+          data.total_symbols = data.symbols.reduce((sum: number, s: any) => sum + s.count, 0);
+
+          const hasMatches = data.symbols.some((s: any) => s.source === "legend");
+          if (hasMatches) {
+            setUploadStage("Generating device icons...");
+            try {
+              const iconResult = await generateIcons(data.drawing_id);
+              console.log(`[FireGPT] Icon generation complete: ${iconResult.generated} generated, ${iconResult.failed} failed`);
+              data.symbols = iconResult.symbols;
+            } catch (e) {
+              console.warn("[FireGPT] Icon generation failed:", e);
+            }
+          }
+        } catch (e) {
+          console.warn("[FireGPT] Legend matching failed:", e);
+        }
+        setMatchDone(true);
+        setIconsDone(true);
+      } else {
+        setMatchDone(false);
+        setIconsDone(false);
+      }
+
       setDrawing(data);
       setMessages([]);
       setActiveTab("symbols");
@@ -61,6 +164,7 @@ function App() {
       setError(e.message || "Upload failed");
     } finally {
       setUploading(false);
+      setUploadStage("");
     }
   };
 
@@ -100,6 +204,25 @@ function App() {
     }
   };
 
+  const handleLegendUpload = async (file: File) => {
+    setLegendUploading(true);
+    setError(null);
+    try {
+      const data = await uploadLegend(file);
+      setLegend(data);
+      setMatchDone(false); // Trigger re-matching with new legend
+      setIconsDone(false);
+    } catch (e: any) {
+      setError(e.message || "Legend upload failed");
+    } finally {
+      setLegendUploading(false);
+    }
+  };
+
+  const handleLegendSkip = () => {
+    setLegendSkipped(true);
+  };
+
   const handleReset = () => {
     setDrawing(null);
     setMessages([]);
@@ -107,6 +230,12 @@ function App() {
     setActiveTab("symbols");
     setPreview(null);
     setSelectedSymbol(null);
+    setLegend(null);
+    setLegendSkipped(false);
+    setMatchDone(false);
+    setMatching(false);
+    setIconsDone(false);
+    setGeneratingIcons(false);
   };
 
   const handleSelectSymbol = useCallback(
@@ -150,7 +279,12 @@ function App() {
 
   const handleExport = useCallback(() => {
     if (!drawing) return;
-    window.open(getExportUrl(drawing.drawing_id), "_blank");
+    const link = document.createElement("a");
+    link.href = getExportUrl(drawing.drawing_id);
+    link.download = "";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }, [drawing]);
 
   return (
@@ -160,6 +294,7 @@ function App() {
         <div className="window-content">
           <Sidebar
             drawing={drawing}
+            legend={legend}
             onUpload={handleUpload}
             uploading={uploading}
             onReset={handleReset}
@@ -172,7 +307,13 @@ function App() {
               <UploadZone
                 onUpload={handleUpload}
                 uploading={uploading}
+                uploadStage={uploadStage}
                 error={error}
+                legend={legend}
+                legendUploading={legendUploading}
+                legendSkipped={legendSkipped}
+                onLegendUpload={handleLegendUpload}
+                onLegendSkip={handleLegendSkip}
               />
             ) : (
               <div className="content-with-tabs">
@@ -198,6 +339,15 @@ function App() {
                     Analysis
                     <span className="tab-badge">{drawing.analysis?.length || 0}</span>
                   </button>
+                  {legend && (
+                    <button
+                      className={`content-tab ${activeTab === "legend" ? "active" : ""}`}
+                      onClick={() => setActiveTab("legend")}
+                    >
+                      Legend
+                      <span className="tab-badge">{legend.total_device_types}</span>
+                    </button>
+                  )}
                   <div className="content-tabs-fill" />
                   <span className="content-tabs-filename">
                     {drawing.filename}
@@ -223,6 +373,16 @@ function App() {
                       symbols={drawing.symbols}
                       selectedSymbol={selectedSymbol}
                       onSelectSymbol={handleSelectSymbol}
+                    />
+                  ) : activeTab === "legend" && legend ? (
+                    <LegendTable
+                      legend={legend}
+                      icons={drawing.symbols.reduce((acc, s) => {
+                        if (s.svg_icon && s.matched_legend) {
+                          acc[s.matched_legend.name] = s.svg_icon;
+                        }
+                        return acc;
+                      }, {} as Record<string, string>)}
                     />
                   ) : (
                     <AnalysisLog

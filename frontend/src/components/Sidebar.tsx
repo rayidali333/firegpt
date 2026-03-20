@@ -7,21 +7,24 @@ import {
   Eye,
   Flame,
   ClipboardList,
+  BookOpen,
 } from "lucide-react";
-import { DrawingData } from "../types";
+import { DrawingData, LegendData } from "../types";
 
 interface Props {
   drawing: DrawingData | null;
+  legend: LegendData | null;
   onUpload: (file: File) => void;
   uploading: boolean;
   onReset: () => void;
   messageCount: number;
-  activeTab: "symbols" | "drawing" | "analysis";
-  onTabChange: (tab: "symbols" | "drawing" | "analysis") => void;
+  activeTab: "symbols" | "drawing" | "analysis" | "legend";
+  onTabChange: (tab: "symbols" | "drawing" | "analysis" | "legend") => void;
 }
 
 export default function Sidebar({
   drawing,
+  legend,
   onUpload,
   uploading,
   onReset,
@@ -122,6 +125,16 @@ export default function Sidebar({
             <span>Chat</span>
             <span className="sidebar-badge">{messageCount}</span>
           </div>
+          {legend && (
+            <div
+              className={`sidebar-nav-item ${activeTab === "legend" ? "active" : ""}`}
+              onClick={() => onTabChange("legend")}
+            >
+              <BookOpen />
+              <span>Legend</span>
+              <span className="sidebar-badge">{legend.total_device_types}</span>
+            </div>
+          )}
         </div>
       )}
 

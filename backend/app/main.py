@@ -13,9 +13,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
 from app.preview import generate_drawing_preview
 from app.chat import chat_with_drawing, classify_blocks_with_ai
+from app.legend import parse_legend_file, ALL_LEGEND_EXTENSIONS
+from app.matching import match_symbols_to_legend
+from app.icon_gen import generate_icons_batch, icons_cache
 from app.models import (
-    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, ParseResponse,
-    PreviewResponse, SymbolInfo, SymbolOverride,
+    AnalysisStep, AuditEntry, ChatRequest, ChatResponse, LegendParseResponse,
+    ParseResponse, PreviewResponse, SymbolInfo, SymbolOverride,
 )
 
 load_dotenv()
@@ -43,6 +46,8 @@ drawings_store: dict[str, ParseResponse] = {}
 file_paths_store: dict[str, str] = {}
 # Cache generated previews
 preview_cache: dict[str, dict] = {}
+# Store parsed legends
+legends_store: dict[str, LegendParseResponse] = {}
 
 
 @app.get("/api/health")
@@ -332,6 +337,213 @@ def list_drawings():
             for d in drawings_store.values()
         ]
     }
+
+
+# ── Legend Endpoints ──────────────────────────────────────────────────
+
+
+@app.post("/api/legend/upload", response_model=LegendParseResponse)
+async def upload_legend(file: UploadFile):
+    """Upload a legend file (PDF or image) for AI-powered device extraction."""
+    # Early check: API key must be set for legend parsing
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(
+            500,
+            "ANTHROPIC_API_KEY is not configured. "
+            "Set it in the Render dashboard (or .env for local dev)."
+        )
+
+    if not file.filename:
+        raise HTTPException(400, "No file provided")
+
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALL_LEGEND_EXTENSIONS:
+        raise HTTPException(
+            400,
+            f"Unsupported file type: {ext}. Supported: {', '.join(sorted(ALL_LEGEND_EXTENSIONS))}",
+        )
+
+    contents = await file.read()
+    size_mb = len(contents) / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise HTTPException(400, f"File too large ({size_mb:.1f}MB). Max is {MAX_FILE_SIZE_MB}MB.")
+
+    try:
+        result = await parse_legend_file(contents, file.filename)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Legend parsing failed: {e}", exc_info=True)
+        raise HTTPException(500, f"Failed to parse legend: {str(e)}")
+    finally:
+        del contents  # Free uploaded file bytes
+
+    result.legend_id = str(uuid.uuid4())
+
+    # Set category colors for legend devices (instant keyword matching)
+    for device in result.devices:
+        device.color = _get_symbol_color(device.name)
+
+    legends_store[result.legend_id] = result
+    return result
+
+
+@app.get("/api/legend/{legend_id}", response_model=LegendParseResponse)
+def get_legend(legend_id: str):
+    if legend_id not in legends_store:
+        raise HTTPException(404, "Legend not found")
+    return legends_store[legend_id]
+
+
+# ── Matching Endpoints ────────────────────────────────────────────────
+
+
+from pydantic import BaseModel as PydanticBaseModel
+
+
+class MatchLegendRequest(PydanticBaseModel):
+    legend_id: str
+
+
+@app.post("/api/drawings/{drawing_id}/match-legend")
+async def match_drawing_to_legend(drawing_id: str, request: MatchLegendRequest):
+    """Match detected drawing symbols to legend entries using AI.
+
+    This enriches each SymbolInfo with its matched LegendDevice (including
+    the detailed symbol_description needed for SVG icon generation).
+    """
+    if drawing_id not in drawings_store:
+        raise HTTPException(404, "Drawing not found")
+    if request.legend_id not in legends_store:
+        raise HTTPException(404, "Legend not found")
+
+    drawing = drawings_store[drawing_id]
+    legend = legends_store[request.legend_id]
+
+    # Collect analysis steps for this matching operation
+    match_analysis: list[AnalysisStep] = []
+
+    try:
+        matches = await match_symbols_to_legend(
+            symbols=drawing.symbols,
+            legend_devices=legend.devices,
+            analysis=match_analysis,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(
+            f"Legend matching failed: {e}", exc_info=True)
+        # Still append whatever analysis we got before the error
+        drawing.analysis.extend(match_analysis)
+        drawings_store[drawing_id] = drawing
+        raise HTTPException(500, f"Matching failed: {str(e)}")
+
+    # Apply matches to symbols — legend becomes the source of truth
+    matched_count = 0
+    for sym in drawing.symbols:
+        if sym.label in matches and matches[sym.label].device is not None:
+            match_result = matches[sym.label]
+            device = match_result.device
+            sym.matched_legend = device
+            sym.match_confidence = match_result.confidence
+            # Promote legend to source of truth: replace label with legend name
+            sym.original_label = sym.label  # Preserve dictionary/AI label for audit
+            sym.label = device.name  # Legend name is now the label
+            sym.source = "legend"
+            sym.confidence = match_result.confidence
+            matched_count += 1
+        else:
+            sym.matched_legend = None
+            sym.match_confidence = None
+            # Keep dictionary/AI label as-is — no legend match
+
+    # Append matching analysis to drawing's analysis log
+    drawing.analysis.extend(match_analysis)
+    drawings_store[drawing_id] = drawing
+
+    return {
+        "status": "ok",
+        "matched": matched_count,
+        "total_symbols": len(drawing.symbols),
+        "unmatched": len(drawing.symbols) - matched_count,
+        "symbols": drawing.symbols,
+        "analysis": match_analysis,
+    }
+
+
+# ── Icon Generation Endpoints ─────────────────────────────────────────
+
+
+@app.post("/api/drawings/{drawing_id}/generate-icons")
+async def generate_drawing_icons(drawing_id: str):
+    """Generate SVG icons for all legend-matched symbols in a drawing.
+
+    Requires that match-legend has been called first. For each symbol with
+    a matched_legend entry, generates an SVG icon from the symbol_description.
+    Icons are cached globally by device name.
+    """
+    if drawing_id not in drawings_store:
+        raise HTTPException(404, "Drawing not found")
+
+    drawing = drawings_store[drawing_id]
+
+    # Collect devices that need icons
+    devices_to_generate = []
+    seen_names: set[str] = set()
+    for sym in drawing.symbols:
+        if sym.matched_legend and sym.matched_legend.name not in seen_names:
+            devices_to_generate.append({
+                "name": sym.matched_legend.name,
+                "symbol_description": sym.matched_legend.symbol_description,
+            })
+            seen_names.add(sym.matched_legend.name)
+
+    if not devices_to_generate:
+        return {
+            "status": "ok",
+            "generated": 0,
+            "total": 0,
+            "message": "No legend-matched symbols to generate icons for",
+            "symbols": drawing.symbols,
+        }
+
+    try:
+        icons = await generate_icons_batch(devices_to_generate)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(
+            f"Icon generation failed: {e}", exc_info=True)
+        raise HTTPException(500, f"Icon generation failed: {str(e)}")
+
+    # Apply icons to symbols and their matched_legend entries
+    icon_count = 0
+    for sym in drawing.symbols:
+        if sym.matched_legend and sym.matched_legend.name in icons:
+            svg = icons[sym.matched_legend.name]
+            sym.svg_icon = svg
+            sym.matched_legend.svg_icon = svg
+            icon_count += 1
+
+    drawings_store[drawing_id] = drawing
+
+    return {
+        "status": "ok",
+        "generated": len(icons),
+        "total": len(devices_to_generate),
+        "failed": len(devices_to_generate) - len(icons),
+        "symbols": drawing.symbols,
+    }
+
+
+@app.get("/api/icons/{device_name}")
+def get_icon(device_name: str):
+    """Serve a cached SVG icon by device name."""
+    from fastapi.responses import Response
+    if device_name not in icons_cache:
+        raise HTTPException(404, "Icon not found")
+    return Response(
+        content=icons_cache[device_name],
+        media_type="image/svg+xml",
+    )
 
 
 # Serve React frontend — must be after all /api routes

@@ -26,10 +26,26 @@ function shortBlockName(name: string): string {
 }
 
 const CONFIDENCE_BADGE: Record<string, { label: string; className: string; title: string }> = {
+  // Legacy sources (before legend matching)
   high: { label: "Dict", className: "badge-high", title: "Matched via dictionary — high confidence" },
   medium: { label: "AI", className: "badge-medium", title: "Classified by AI — verify if critical" },
   manual: { label: "Manual", className: "badge-manual", title: "Manually overridden by user" },
 };
+
+function getSourceBadge(s: SymbolInfo): { label: string; className: string; title: string } {
+  if (s.source === "legend") {
+    const legendName = s.matched_legend?.name || "legend entry";
+    const origLabel = s.original_label ? ` (was: "${s.original_label}")` : "";
+    return {
+      label: "Legend",
+      className: "badge-legend",
+      title: `Matched to legend: "${legendName}"${origLabel} — confidence: ${s.match_confidence || "high"}`,
+    };
+  }
+  if (s.source === "manual") return CONFIDENCE_BADGE.manual;
+  if (s.confidence === "medium" || s.source === "ai") return CONFIDENCE_BADGE.medium;
+  return CONFIDENCE_BADGE.high;
+}
 
 export default function SymbolTable({
   symbols,
@@ -110,7 +126,7 @@ export default function SymbolTable({
           symbols.map((s) => {
             const isSelected = selectedSymbol === s.block_name;
             const isEditing = editingBlock === s.block_name;
-            const badge = CONFIDENCE_BADGE[s.confidence] || CONFIDENCE_BADGE.high;
+            const badge = getSourceBadge(s);
             return (
               <div
                 key={s.block_name}
@@ -120,10 +136,18 @@ export default function SymbolTable({
                 }
               >
                 <div className="symbol-color-indicator">
-                  <span
-                    className="symbol-dot"
-                    style={{ backgroundColor: s.color }}
-                  />
+                  {s.svg_icon ? (
+                    <span
+                      className="symbol-svg-icon"
+                      style={{ color: s.color }}
+                      dangerouslySetInnerHTML={{ __html: s.svg_icon }}
+                    />
+                  ) : (
+                    <span
+                      className="symbol-dot"
+                      style={{ backgroundColor: s.color }}
+                    />
+                  )}
                 </div>
                 <div className="symbol-info">
                   {isEditing ? (
@@ -135,7 +159,14 @@ export default function SymbolTable({
                       autoFocus
                     />
                   ) : (
-                    <span className="symbol-label">{s.label}</span>
+                    <>
+                      <span className="symbol-label">{s.label}</span>
+                      {s.original_label && s.original_label !== s.label && (
+                        <span className="symbol-original-label" title={`Dictionary/AI label: ${s.original_label}`}>
+                          was: {s.original_label}
+                        </span>
+                      )}
+                    </>
                   )}
                   <span className="symbol-block-name" title={s.block_name}>
                     {shortBlockName(s.block_name)}

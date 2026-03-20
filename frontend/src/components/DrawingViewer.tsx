@@ -10,6 +10,22 @@ interface Props {
   onSelectSymbol: (blockName: string | null) => void;
 }
 
+/**
+ * Extract inner content and viewBox from an SVG string for use in <symbol>.
+ * Input:  '<svg viewBox="0 0 24 24"><circle .../></svg>'
+ * Output: { viewBox: "0 0 24 24", inner: "<circle .../>" }
+ */
+function parseSvgIcon(svgStr: string): { viewBox: string; inner: string } | null {
+  if (!svgStr) return null;
+  // Extract viewBox
+  const vbMatch = svgStr.match(/viewBox="([^"]*)"/);
+  const viewBox = vbMatch ? vbMatch[1] : "0 0 24 24";
+  // Extract inner content between <svg ...> and </svg>
+  const innerMatch = svgStr.match(/<svg[^>]*>([\s\S]*)<\/svg>/i);
+  if (!innerMatch) return null;
+  return { viewBox, inner: innerMatch[1].trim() };
+}
+
 export default function DrawingViewer({
   preview,
   loading,
@@ -82,6 +98,9 @@ export default function DrawingViewer({
   const strokeWidth = markerRadius * 0.35;
   const selectedStroke = selectedRadius * 0.25;
   const fontSize = selectedRadius * 1.2;
+  // Icon sizes derived from marker radii
+  const iconSize = markerRadius * 3;
+  const selectedIconSize = selectedRadius * 2.2;
 
   // Build symbols with SVG-space positions from preview data
   const symbolsWithPositions = useMemo(() => {
@@ -93,6 +112,22 @@ export default function DrawingViewer({
       }))
       .filter((s) => s.svgPositions.length > 0);
   }, [symbols, preview]);
+
+  // Build icon symbol definitions: label → parsed SVG data
+  const iconDefs = useMemo(() => {
+    const defs: Record<string, { id: string; viewBox: string; inner: string }> = {};
+    for (const sym of symbols) {
+      if (!sym.svg_icon) continue;
+      const parsed = parseSvgIcon(sym.svg_icon);
+      if (!parsed) continue;
+      // Use label as key (unique per consolidated symbol row)
+      const id = `icon-${sym.block_name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+      if (!defs[sym.block_name]) {
+        defs[sym.block_name] = { id, ...parsed };
+      }
+    }
+    return defs;
+  }, [symbols]);
 
   // Simulated progress for loading state
   const [loadProgress, setLoadProgress] = useState(0);
@@ -170,6 +205,211 @@ export default function DrawingViewer({
   // Legend items: symbols that have SVG positions
   const legendItems = symbolsWithPositions.slice(0, 12);
 
+  // Helper: render an icon or fallback circle at position
+  const renderDefaultMarker = (
+    symbol: (typeof symbolsWithPositions)[0],
+    cx: number,
+    cy: number,
+    i: number,
+  ) => {
+    const def = iconDefs[symbol.block_name];
+    const isHovered = hoveredMarker === symbol.block_name;
+
+    if (def) {
+      // SVG icon marker
+      const size = isHovered ? iconSize * 1.3 : iconSize;
+      return (
+        <g
+          key={`${symbol.block_name}-${i}`}
+          className="viewer-marker viewer-icon-marker"
+          onMouseEnter={() => setHoveredMarker(symbol.block_name)}
+          onMouseLeave={() => setHoveredMarker(null)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectSymbol(symbol.block_name);
+          }}
+          style={{ color: symbol.color }}
+        >
+          {/* Background disc for visibility */}
+          <circle
+            cx={cx}
+            cy={cy}
+            r={size * 0.6}
+            fill="white"
+            stroke={symbol.color}
+            strokeWidth={size * 0.08}
+            opacity={0.92}
+          />
+          {/* Icon via <use> */}
+          <use
+            href={`#${def.id}`}
+            x={cx - size / 2}
+            y={cy - size / 2}
+            width={size}
+            height={size}
+          />
+          <title>
+            {symbol.label} ({symbol.count})
+          </title>
+        </g>
+      );
+    }
+
+    // Fallback: colored circle (no icon available)
+    const r = isHovered ? markerRadius * 1.5 : markerRadius;
+    return (
+      <g key={`${symbol.block_name}-${i}`}>
+        <circle
+          cx={cx}
+          cy={cy}
+          r={r + strokeWidth}
+          fill="rgba(0,0,0,0.4)"
+        />
+        <circle
+          cx={cx}
+          cy={cy}
+          r={r}
+          fill={symbol.color}
+          stroke="white"
+          strokeWidth={strokeWidth}
+          className="viewer-marker"
+          onMouseEnter={() => setHoveredMarker(symbol.block_name)}
+          onMouseLeave={() => setHoveredMarker(null)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectSymbol(symbol.block_name);
+          }}
+        >
+          <title>
+            {symbol.label} ({symbol.count})
+          </title>
+        </circle>
+      </g>
+    );
+  };
+
+  // Helper: render a selected-mode icon or fallback numbered circle
+  const renderSelectedMarker = (
+    symbol: (typeof symbolsWithPositions)[0],
+    cx: number,
+    cy: number,
+    i: number,
+  ) => {
+    const def = iconDefs[symbol.block_name];
+
+    if (def) {
+      // SVG icon with numbered overlay
+      const size = selectedIconSize;
+      return (
+        <g
+          key={`${symbol.block_name}-${i}`}
+          className="viewer-marker viewer-icon-marker"
+          onMouseEnter={() => setHoveredMarker(`${symbol.block_name}-${i}`)}
+          onMouseLeave={() => setHoveredMarker(null)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectSymbol(null);
+          }}
+          style={{ cursor: "pointer", color: symbol.color }}
+          filter="url(#marker-shadow)"
+        >
+          {/* White background disc */}
+          <circle
+            cx={cx}
+            cy={cy}
+            r={size * 0.6}
+            fill="white"
+            stroke={symbol.color}
+            strokeWidth={size * 0.1}
+          />
+          {/* Icon */}
+          <use
+            href={`#${def.id}`}
+            x={cx - size / 2}
+            y={cy - size / 2}
+            width={size}
+            height={size}
+          />
+          {/* Number badge */}
+          <circle
+            cx={cx + size * 0.4}
+            cy={cy - size * 0.4}
+            r={fontSize * 0.65}
+            fill={symbol.color}
+            stroke="white"
+            strokeWidth={fontSize * 0.1}
+          />
+          <text
+            x={cx + size * 0.4}
+            y={cy - size * 0.4}
+            textAnchor="middle"
+            dominantBaseline="central"
+            fill="white"
+            fontSize={fontSize * 0.8}
+            fontWeight="bold"
+            fontFamily="Arial, sans-serif"
+            style={{ pointerEvents: "none" }}
+          >
+            {i + 1}
+          </text>
+          <title>
+            {symbol.label} #{i + 1}
+          </title>
+        </g>
+      );
+    }
+
+    // Fallback: numbered colored circle
+    return (
+      <g
+        key={`${symbol.block_name}-${i}`}
+        className="viewer-marker"
+        onMouseEnter={() => setHoveredMarker(`${symbol.block_name}-${i}`)}
+        onMouseLeave={() => setHoveredMarker(null)}
+        onClick={(e) => {
+          e.stopPropagation();
+          onSelectSymbol(null);
+        }}
+        style={{ cursor: "pointer" }}
+        filter="url(#marker-shadow)"
+      >
+        <circle
+          cx={cx}
+          cy={cy}
+          r={selectedRadius + selectedStroke}
+          fill="rgba(0,0,0,0.5)"
+        />
+        <circle
+          cx={cx}
+          cy={cy}
+          r={selectedRadius}
+          fill={symbol.color}
+          stroke="white"
+          strokeWidth={selectedStroke}
+        />
+        <text
+          x={cx}
+          y={cy}
+          textAnchor="middle"
+          dominantBaseline="central"
+          fill="white"
+          fontSize={fontSize}
+          fontWeight="bold"
+          fontFamily="Arial, sans-serif"
+          stroke="rgba(0,0,0,0.4)"
+          strokeWidth={fontSize * 0.08}
+          paintOrder="stroke"
+          style={{ pointerEvents: "none" }}
+        >
+          {i + 1}
+        </text>
+        <title>
+          {symbol.label} #{i + 1}
+        </title>
+      </g>
+    );
+  };
+
   return (
     <div className="drawing-viewer">
       {/* Toolbar */}
@@ -234,101 +474,31 @@ export default function DrawingViewer({
                 <filter id="marker-shadow" x="-50%" y="-50%" width="200%" height="200%">
                   <feDropShadow dx="0" dy="0" stdDeviation={maxDim * 0.002} floodColor="rgba(0,0,0,0.6)" />
                 </filter>
+                {/* SVG icon symbol definitions */}
+                {Object.values(iconDefs).map((def) => (
+                  <symbol
+                    key={def.id}
+                    id={def.id}
+                    viewBox={def.viewBox}
+                    dangerouslySetInnerHTML={{ __html: def.inner }}
+                  />
+                ))}
               </defs>
               {selectedSymbol ? (
-                // Selected mode: show only the selected symbol with numbered circles
+                // Selected mode: show only the selected symbol with icons or numbered circles
                 symbolsWithPositions
                   .filter((s) => s.block_name === selectedSymbol)
                   .map((symbol) =>
-                    symbol.svgPositions.map(([cx, cy], i) => (
-                      <g
-                        key={`${symbol.block_name}-${i}`}
-                        className="viewer-marker"
-                        onMouseEnter={() => setHoveredMarker(`${symbol.block_name}-${i}`)}
-                        onMouseLeave={() => setHoveredMarker(null)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelectSymbol(null);
-                        }}
-                        style={{ cursor: "pointer" }}
-                        filter="url(#marker-shadow)"
-                      >
-                        {/* Dark outline ring for contrast */}
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={selectedRadius + selectedStroke}
-                          fill="rgba(0,0,0,0.5)"
-                        />
-                        {/* Main colored circle */}
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={selectedRadius}
-                          fill={symbol.color}
-                          stroke="white"
-                          strokeWidth={selectedStroke}
-                        />
-                        <text
-                          x={cx}
-                          y={cy}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fill="white"
-                          fontSize={fontSize}
-                          fontWeight="bold"
-                          fontFamily="Arial, sans-serif"
-                          stroke="rgba(0,0,0,0.4)"
-                          strokeWidth={fontSize * 0.08}
-                          paintOrder="stroke"
-                          style={{ pointerEvents: "none" }}
-                        >
-                          {i + 1}
-                        </text>
-                        <title>
-                          {symbol.label} #{i + 1}
-                        </title>
-                      </g>
-                    ))
+                    symbol.svgPositions.map(([cx, cy], i) =>
+                      renderSelectedMarker(symbol, cx, cy, i)
+                    )
                   )
               ) : (
-                // Default mode: show all symbols as small dots
+                // Default mode: show all symbols as icons or small dots
                 symbolsWithPositions.map((symbol) =>
-                  symbol.svgPositions.map(([cx, cy], i) => {
-                    const isHovered = hoveredMarker === symbol.block_name;
-                    const r = isHovered ? markerRadius * 1.5 : markerRadius;
-                    return (
-                      <g key={`${symbol.block_name}-${i}`}>
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={r + strokeWidth}
-                          fill="rgba(0,0,0,0.4)"
-                        />
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={r}
-                          fill={symbol.color}
-                          stroke="white"
-                          strokeWidth={strokeWidth}
-                          className="viewer-marker"
-                          onMouseEnter={() =>
-                            setHoveredMarker(symbol.block_name)
-                          }
-                          onMouseLeave={() => setHoveredMarker(null)}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onSelectSymbol(symbol.block_name);
-                          }}
-                        >
-                          <title>
-                            {symbol.label} ({symbol.count})
-                          </title>
-                        </circle>
-                      </g>
-                    );
-                  })
+                  symbol.svgPositions.map(([cx, cy], i) =>
+                    renderDefaultMarker(symbol, cx, cy, i)
+                  )
                 )
               )}
             </svg>
@@ -358,26 +528,37 @@ export default function DrawingViewer({
       {/* Legend */}
       {showMarkers && legendItems.length > 0 && (
         <div className="viewer-legend">
-          {legendItems.map((s) => (
-            <div
-              key={s.block_name}
-              className={`viewer-legend-item ${
-                selectedSymbol === s.block_name ? "selected" : ""
-              }`}
-              onClick={() =>
-                onSelectSymbol(
-                  selectedSymbol === s.block_name ? null : s.block_name
-                )
-              }
-            >
-              <span
-                className="viewer-legend-dot"
-                style={{ backgroundColor: s.color }}
-              />
-              <span className="viewer-legend-label">{s.label}</span>
-              <span className="viewer-legend-count">{s.count}</span>
-            </div>
-          ))}
+          {legendItems.map((s) => {
+            const def = iconDefs[s.block_name];
+            return (
+              <div
+                key={s.block_name}
+                className={`viewer-legend-item ${
+                  selectedSymbol === s.block_name ? "selected" : ""
+                }`}
+                onClick={() =>
+                  onSelectSymbol(
+                    selectedSymbol === s.block_name ? null : s.block_name
+                  )
+                }
+              >
+                {def ? (
+                  <span
+                    className="viewer-legend-icon"
+                    style={{ color: s.color }}
+                    dangerouslySetInnerHTML={{ __html: s.svg_icon || "" }}
+                  />
+                ) : (
+                  <span
+                    className="viewer-legend-dot"
+                    style={{ backgroundColor: s.color }}
+                  />
+                )}
+                <span className="viewer-legend-label">{s.label}</span>
+                <span className="viewer-legend-count">{s.count}</span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

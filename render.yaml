@@ -11,3 +11,4 @@ services:
         value: 3.11.11
       - key: NODE_VERSION
         value: 22.14.0
+      - fromGroup: firegpt-secrets

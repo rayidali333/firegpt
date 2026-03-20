@@ -3,14 +3,19 @@ from pydantic import BaseModel
 
 class SymbolInfo(BaseModel):
     block_name: str
-    label: str  # User-friendly name (e.g., "Smoke Detector")
+    label: str  # User-friendly name — legend name when matched, else dictionary/AI label
     count: int
     locations: list[tuple[float, float]]  # ALL (x, y) insertion points
     color: str = "#95A5A6"  # Category color for visualization
-    confidence: str = "high"  # "high" (dictionary) | "medium" (AI) | "manual" (user override)
-    source: str = "dictionary"  # "dictionary" | "ai" | "manual"
+    confidence: str = "high"  # "high" | "medium" | "low" | "manual"
+    source: str = "dictionary"  # "dictionary" | "ai" | "legend" | "manual"
     block_variants: list[str] = []  # Individual block names before consolidation
     original_count: int | None = None  # Pre-override count (null if never overridden)
+    # Legend matching (Phase 1) — populated after match-legend API call
+    matched_legend: "LegendDevice | None" = None  # Full legend entry with description
+    match_confidence: str | None = None  # "high" | "medium" | "low" | None
+    original_label: str | None = None  # Pre-legend label (dictionary/AI guess) for audit
+    svg_icon: str | None = None  # Generated SVG icon markup (Phase 2)
 
 
 class AuditEntry(BaseModel):
@@ -67,3 +72,29 @@ class PreviewResponse(BaseModel):
 class SymbolOverride(BaseModel):
     label: str
     count: int
+
+
+# ── Legend Models ──────────────────────────────────────────────────
+
+
+class LegendDevice(BaseModel):
+    name: str  # Full device name (e.g., "Main Fire Alarm Control Panel")
+    abbreviation: str | None = None  # Short code (e.g., "MFACP")
+    category: str  # System/section (e.g., "Fire Alarm System")
+    symbol_description: str  # Detailed visual description for SVG generation
+    svg_icon: str | None = None  # Generated SVG icon markup (Phase 2)
+    color: str | None = None  # Category color for icon rendering
+
+
+class LegendParseResponse(BaseModel):
+    legend_id: str
+    filename: str
+    devices: list[LegendDevice]
+    categories_found: list[str]
+    total_device_types: int
+    analysis: list[AnalysisStep] = []
+    notes: str = ""
+
+
+# Resolve forward reference: SymbolInfo.matched_legend → LegendDevice
+SymbolInfo.model_rebuild()
