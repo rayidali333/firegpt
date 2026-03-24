@@ -3,26 +3,25 @@ from pydantic import BaseModel
 
 class SymbolInfo(BaseModel):
     block_name: str
-    label: str  # User-friendly name — legend name when matched, else dictionary/AI label
+    label: str  # User-friendly name — legend name when matched, else raw block name
     count: int
     locations: list[tuple[float, float]]  # ALL (x, y) insertion points
-    color: str = "#95A5A6"  # Category color for visualization
-    confidence: str = "high"  # "high" | "medium" | "low" | "manual"
-    source: str = "dictionary"  # "dictionary" | "ai" | "legend" | "manual"
+    color: str = "#999999"  # Category color for visualization
+    confidence: str = "pending"  # "high" | "medium" | "low" | "pending" | "manual"
+    source: str = "raw"  # "raw" | "legend" | "manual"
     block_variants: list[str] = []  # Individual block names before consolidation
     original_count: int | None = None  # Pre-override count (null if never overridden)
-    # Legend matching (Phase 1) — populated after match-legend API call
     matched_legend: "LegendDevice | None" = None  # Full legend entry with description
     match_confidence: str | None = None  # "high" | "medium" | "low" | None
-    original_label: str | None = None  # Pre-legend label (dictionary/AI guess) for audit
-    svg_icon: str | None = None  # Generated SVG icon markup (Phase 2)
+    original_label: str | None = None  # Pre-legend raw block name for audit
+    svg_icon: str | None = None  # Generated SVG icon markup
 
 
 class AuditEntry(BaseModel):
     block_name: str
     label: str
     count: int
-    method: str  # "exact_match" | "substring_match" | "intl_match" | "ai"
+    method: str  # matching method used
     confidence: str
     matched_term: str | None = None  # The dictionary key that triggered the match
     layers: list[str] = []

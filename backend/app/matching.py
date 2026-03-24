@@ -55,36 +55,38 @@ def _build_matching_prompt(
     symbols: list[dict],
     legend_devices: list[dict],
 ) -> str:
-    """Build the prompt for Claude to match symbols to legend entries."""
+    """Build the prompt for Claude to match raw DXF block names to legend entries."""
 
-    return f"""You are an expert at matching fire alarm and MEP (Mechanical, Electrical, Plumbing) device names.
+    return f"""You are an expert at matching CAD block names from construction drawings to their corresponding legend/symbol key entries.
 
 I have two lists:
 
-1. DETECTED SYMBOLS from a DXF construction drawing — these have labels assigned by dictionary matching or AI classification:
+1. RAW BLOCK NAMES from a DXF construction drawing — these are the internal CAD block names (not human-readable labels). They may use abbreviations, project-specific codes, or cryptic naming conventions:
 {json.dumps(symbols, indent=2)}
 
-2. LEGEND ENTRIES extracted from the project's symbol legend document — these are the official device names:
+2. LEGEND ENTRIES extracted from the project's symbol legend document — these are the official device names with abbreviations and categories:
 {json.dumps(legend_devices, indent=2)}
 
-Your task: For each DETECTED SYMBOL, find the best matching LEGEND ENTRY based on:
-- Name similarity (e.g., "Smoke Detector" in DXF ↔ "Smoke Detector" in legend)
-- Abbreviation match (e.g., DXF block name contains "SD" ↔ legend abbreviation "SD")
-- Category alignment (e.g., both are fire alarm devices)
-- Semantic equivalence (e.g., "Horn/Strobe" ↔ "Wall Mounted Strobe Light 110CD")
+Your task: For each RAW BLOCK, find the best matching LEGEND ENTRY based on:
+- Abbreviation match (e.g., block name contains "SD" or "SMKDET" ↔ legend abbreviation "SD" for "Smoke Detector")
+- Keyword overlap (e.g., block name "FA_HORN_STROBE_WALL" contains "HORN" and "STROBE" ↔ legend entry "Horn/Strobe")
+- Common CAD naming patterns (e.g., prefixes like "FA_", "MEP_", suffixes like "_2D", "_SYM" should be ignored)
+- Category alignment (e.g., fire alarm, electrical, plumbing — match within the same system)
+- Count as a hint — high-count blocks are more likely to be commonly-placed devices
 
 RULES:
-- Each detected symbol should match AT MOST one legend entry.
-- A legend entry CAN match multiple detected symbols (e.g., different block variants of the same device).
-- If no good match exists, use null. Do NOT force bad matches.
-- Confidence levels: "high" (names nearly identical or abbreviation exact match), "medium" (semantic match but different wording), "low" (partial/uncertain match).
-- Provide brief reasoning for each match to aid debugging.
+- Each block should match AT MOST one legend entry.
+- A legend entry CAN match multiple blocks (e.g., "SD-1" and "SMKDET_TYPE2" both → "Smoke Detector").
+- If no good match exists, use null. Do NOT force bad matches — unmatched blocks are fine.
+- Many blocks will be structural/architectural elements (walls, doors, furniture, titleblocks) that have NO legend match — leave these as null.
+- Confidence levels: "high" (abbreviation exact match or very clear keyword match), "medium" (partial keyword or semantic match), "low" (uncertain/weak match).
+- Provide brief reasoning for each match.
 
 Return ONLY valid JSON (no markdown fences):
 {{
   "matches": [
     {{
-      "symbol_label": "Smoke Detector",
+      "block_name": "FA_SD_CEILING",
       "legend_device_name": "Smoke Detector" or null,
       "confidence": "high" | "medium" | "low",
       "reasoning": "Brief explanation of why this match was chosen"
@@ -110,15 +112,15 @@ async def match_symbols_to_legend(
     legend_devices: list[LegendDevice],
     analysis: list[AnalysisStep],
 ) -> dict[str, MatchResult]:
-    """Match detected symbols to legend entries using AI.
+    """Match raw DXF block names to legend entries using AI.
 
     Args:
-        symbols: Detected symbols from DXF parsing
+        symbols: Raw symbols from DXF parsing (block_name as label)
         legend_devices: Extracted devices from legend
         analysis: Analysis log for debugging
 
     Returns:
-        Dict mapping symbol label → MatchResult (with device, confidence, reasoning)
+        Dict mapping block_name → MatchResult (with device, confidence, reasoning)
     """
     _log(analysis, "info",
          "━━━ Legend Matching ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -139,13 +141,9 @@ async def match_symbols_to_legend(
     symbol_summaries = []
     for s in symbols:
         summary = {
-            "label": s.label,
             "block_name": s.block_name,
             "count": s.count,
-            "source": s.source,
         }
-        if s.block_variants:
-            summary["block_variants"] = s.block_variants
         symbol_summaries.append(summary)
 
     legend_summaries = []
@@ -156,7 +154,8 @@ async def match_symbols_to_legend(
         legend_summaries.append(summary)
 
     _log(analysis, "info",
-         f"Symbol labels: {', '.join(s.label for s in symbols)}")
+         f"Block names: {', '.join(s.block_name for s in symbols[:20])}"
+         + (f" (+{len(symbols) - 20} more)" if len(symbols) > 20 else ""))
     _log(analysis, "info",
          f"Legend devices: {', '.join(d.name for d in legend_devices[:20])}"
          + (f" (+{len(legend_devices) - 20} more)" if len(legend_devices) > 20 else ""))
@@ -215,37 +214,37 @@ async def match_symbols_to_legend(
         if not isinstance(match, dict):
             continue
 
-        symbol_label = match.get("symbol_label", "")
+        block_name = match.get("block_name", "")
         legend_name = match.get("legend_device_name")
         confidence = match.get("confidence", "low")
         reasoning = match.get("reasoning", "")
 
-        if not symbol_label:
+        if not block_name:
             continue
 
         if legend_name and legend_name in legend_by_name:
             device = legend_by_name[legend_name]
-            result[symbol_label] = MatchResult(device, confidence, reasoning)
+            result[block_name] = MatchResult(device, confidence, reasoning)
             matched_count += 1
             confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
             _log(analysis, "success",
-                 f"  ✓ \"{symbol_label}\" → \"{legend_name}\" "
+                 f"  ✓ \"{block_name}\" → \"{legend_name}\" "
                  f"[{confidence}] — {reasoning}")
         elif legend_name and legend_name.lower() in legend_by_name:
             # Case-insensitive fallback
             device = legend_by_name[legend_name.lower()]
-            result[symbol_label] = MatchResult(device, confidence, reasoning)
+            result[block_name] = MatchResult(device, confidence, reasoning)
             matched_count += 1
             confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
             _log(analysis, "success",
-                 f"  ✓ \"{symbol_label}\" → \"{device.name}\" "
+                 f"  ✓ \"{block_name}\" → \"{device.name}\" "
                  f"[{confidence}, case-adjusted] — {reasoning}")
         else:
-            result[symbol_label] = MatchResult(None, "low", reasoning)
+            result[block_name] = MatchResult(None, "low", reasoning)
             unmatched_count += 1
             reason_str = f" — {reasoning}" if reasoning else ""
-            _log(analysis, "warning" if legend_name else "info",
-                 f"  ✗ \"{symbol_label}\" → no match"
+            _log(analysis, "info",
+                 f"  ✗ \"{block_name}\" → no match"
                  f"{reason_str}")
 
     # Log unmatched legend entries

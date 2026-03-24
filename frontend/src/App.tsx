@@ -24,7 +24,6 @@ function App() {
   const [chatSending, setChatSending] = useState(false);
   const [legend, setLegend] = useState<LegendData | null>(null);
   const [legendUploading, setLegendUploading] = useState(false);
-  const [legendSkipped, setLegendSkipped] = useState(false);
   const [matching, setMatching] = useState(false);
   const [matchDone, setMatchDone] = useState(false);
   const [generatingIcons, setGeneratingIcons] = useState(false);
@@ -125,35 +124,30 @@ function App() {
     try {
       const data = await uploadDrawing(file);
 
-      // If legend exists, do matching + icon generation before revealing results
-      if (legend) {
-        setUploadStage("Matching symbols to legend entries...");
-        try {
-          const matchResult = await matchLegend(data.drawing_id, legend.legend_id);
-          console.log(`[FireGPT] Matching complete: ${matchResult.matched}/${matchResult.total_symbols} matched`);
-          data.symbols = matchResult.symbols;
-          data.total_symbols = data.symbols.reduce((sum: number, s: any) => sum + s.count, 0);
+      // Legend is always present — do matching + icon generation before revealing results
+      setUploadStage("Matching symbols to legend entries...");
+      try {
+        const matchResult = await matchLegend(data.drawing_id, legend!.legend_id);
+        console.log(`[FireGPT] Matching complete: ${matchResult.matched}/${matchResult.total_symbols} matched`);
+        data.symbols = matchResult.symbols;
+        data.total_symbols = data.symbols.reduce((sum: number, s: any) => sum + s.count, 0);
 
-          const hasMatches = data.symbols.some((s: any) => s.source === "legend");
-          if (hasMatches) {
-            setUploadStage("Generating device icons...");
-            try {
-              const iconResult = await generateIcons(data.drawing_id);
-              console.log(`[FireGPT] Icon generation complete: ${iconResult.generated} generated, ${iconResult.failed} failed`);
-              data.symbols = iconResult.symbols;
-            } catch (e) {
-              console.warn("[FireGPT] Icon generation failed:", e);
-            }
+        const hasMatches = data.symbols.some((s: any) => s.source === "legend");
+        if (hasMatches) {
+          setUploadStage("Generating device icons...");
+          try {
+            const iconResult = await generateIcons(data.drawing_id);
+            console.log(`[FireGPT] Icon generation complete: ${iconResult.generated} generated, ${iconResult.failed} failed`);
+            data.symbols = iconResult.symbols;
+          } catch (e) {
+            console.warn("[FireGPT] Icon generation failed:", e);
           }
-        } catch (e) {
-          console.warn("[FireGPT] Legend matching failed:", e);
         }
-        setMatchDone(true);
-        setIconsDone(true);
-      } else {
-        setMatchDone(false);
-        setIconsDone(false);
+      } catch (e) {
+        console.warn("[FireGPT] Legend matching failed:", e);
       }
+      setMatchDone(true);
+      setIconsDone(true);
 
       setDrawing(data);
       setMessages([]);
@@ -219,10 +213,6 @@ function App() {
     }
   };
 
-  const handleLegendSkip = () => {
-    setLegendSkipped(true);
-  };
-
   const handleReset = () => {
     setDrawing(null);
     setMessages([]);
@@ -231,7 +221,6 @@ function App() {
     setPreview(null);
     setSelectedSymbol(null);
     setLegend(null);
-    setLegendSkipped(false);
     setMatchDone(false);
     setMatching(false);
     setIconsDone(false);
@@ -311,9 +300,7 @@ function App() {
                 error={error}
                 legend={legend}
                 legendUploading={legendUploading}
-                legendSkipped={legendSkipped}
                 onLegendUpload={handleLegendUpload}
-                onLegendSkip={handleLegendSkip}
               />
             ) : (
               <div className="content-with-tabs">

@@ -10,9 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
+from app.parser import parse_dxf_file, parse_dwg_file
 from app.preview import generate_drawing_preview
-from app.chat import chat_with_drawing, classify_blocks_with_ai
+from app.chat import chat_with_drawing
 from app.legend import parse_legend_file, ALL_LEGEND_EXTENSIONS
 from app.matching import match_symbols_to_legend
 from app.icon_gen import generate_icons_batch, icons_cache
@@ -50,6 +50,16 @@ preview_cache: dict[str, dict] = {}
 legends_store: dict[str, LegendParseResponse] = {}
 
 
+def _category_color(category: str) -> str:
+    """Deterministic color from a category string via hash.
+
+    Maps any category to a visually distinct hue. Same category always
+    gets the same color, regardless of what discipline the drawing is.
+    """
+    h = hash(category) % 360
+    return f"hsl({h}, 55%, 45%)"
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -85,108 +95,30 @@ async def upload_drawing(file: UploadFile):
     except Exception as e:
         raise HTTPException(500, f"Failed to parse drawing: {str(e)}")
 
-    # AI-first classification: send all ambiguous blocks to Claude with full
-    # drawing context (layers, legend text, all block names, already-identified symbols).
-    if parse_result.ai_candidate_blocks:
-        try:
-            # Build context of what fast-path already identified
-            fast_path_labels = {
-                s.block_name: s.label for s in parse_result.fast_path_symbols
-            }
-
-            ai_labels = await classify_blocks_with_ai(
-                ai_candidate_blocks=parse_result.ai_candidate_blocks,
-                filename=file.filename,
-                all_block_names=parse_result.all_block_names,
-                all_layer_names=parse_result.all_layer_names,
-                fire_layers=parse_result.fire_layers,
-                legend_texts=parse_result.legend_texts,
-                fast_path_labels=fast_path_labels,
-            )
-
-            if ai_labels:
-                parse_result.analysis.append({
-                    "type": "success",
-                    "message": f"AI classified {len(ai_labels)} fire alarm devices: "
-                    + ", ".join(f'"{k}" → {v}' for k, v in list(ai_labels.items())[:8]),
-                })
-
-                for block in parse_result.ai_candidate_blocks:
-                    if block.block_name in ai_labels:
-                        label = ai_labels[block.block_name]
-                        parse_result.symbols.append(
-                            SymbolInfo(
-                                block_name=block.block_name,
-                                label=label,
-                                count=block.count,
-                                locations=block.locations,
-                                color=_get_symbol_color(label),
-                                confidence="medium",
-                                source="ai",
-                            )
-                        )
-                        parse_result.audit.append(AuditEntry(
-                            block_name=block.block_name,
-                            label=label,
-                            count=block.count,
-                            method="ai",
-                            confidence="medium",
-                            layers=block.layers,
-                        ))
-            else:
-                n = len(parse_result.ai_candidate_blocks)
-                parse_result.analysis.append({
-                    "type": "info",
-                    "message": f"AI analyzed {n} blocks — none identified as fire alarm devices",
-                })
-        except Exception:
-            parse_result.analysis.append({
-                "type": "warning",
-                "message": "AI classification unavailable (no API key or service error)",
-            })
-
-    # Consolidate symbols by label — merge different block names that map to
-    # the same device type (e.g., 4 different "Control Module" block variants
-    # become one "Control Module" row with combined counts and locations).
-    # Contractors need to see "Control Module: 35" not 4 separate rows.
-    label_groups: dict[str, list[SymbolInfo]] = {}
-    for sym in parse_result.symbols:
-        label_groups.setdefault(sym.label, []).append(sym)
-
-    consolidated_symbols = []
-    for label, group in label_groups.items():
-        if len(group) == 1:
-            consolidated_symbols.append(group[0])
-        else:
-            total_count = sum(s.count for s in group)
-            all_locations = []
-            for s in group:
-                all_locations.extend(s.locations)
-            sorted_group = sorted(group, key=lambda s: -s.count)
-            block_names = [s.block_name for s in sorted_group]
-            if len(block_names) <= 3:
-                combined_name = " + ".join(block_names)
-            else:
-                combined_name = f"{block_names[0]} (+{len(block_names)-1} variants)"
-            # Use highest confidence level in group
-            confidence_rank = {"high": 3, "medium": 2, "low": 1}
-            best_confidence = max(group, key=lambda s: confidence_rank.get(s.confidence, 0)).confidence
-            # If any source is dictionary, mark as dictionary; otherwise ai
-            sources = {s.source for s in group}
-            best_source = "dictionary" if "dictionary" in sources else ("ai" if "ai" in sources else "manual")
-            consolidated_symbols.append(SymbolInfo(
-                block_name=combined_name,
-                label=label,
-                count=total_count,
-                locations=all_locations,
-                color=group[0].color,
-                confidence=best_confidence,
-                source=best_source,
-                block_variants=block_names,
-            ))
+    # Legend-first architecture: return ALL blocks as raw symbols.
+    # No labeling, no classification, no consolidation.
+    # The legend matching step will identify and consolidate symbols later.
+    all_raw_symbols = []
+    for block in parse_result.raw_blocks:
+        all_raw_symbols.append(SymbolInfo(
+            block_name=block.block_name,
+            label=block.block_name,  # Raw block name — matching will replace
+            count=block.count,
+            locations=block.locations,
+            color="#999999",  # Neutral gray — matching assigns real colors
+            confidence="pending",
+            source="raw",
+        ))
 
     # Sort by count descending
-    consolidated_symbols.sort(key=lambda s: -s.count)
+    all_raw_symbols.sort(key=lambda s: -s.count)
+
+    parse_result.analysis.append({
+        "type": "info",
+        "message": f"Found {len(all_raw_symbols)} unique blocks "
+        f"({sum(s.count for s in all_raw_symbols)} total insertions) — "
+        f"ready for legend matching",
+    })
 
     # Convert analysis dicts to AnalysisStep models
     analysis_steps = [
@@ -203,8 +135,8 @@ async def upload_drawing(file: UploadFile):
         drawing_id=drawing_id,
         filename=file.filename,
         file_type=ext.lstrip("."),
-        symbols=consolidated_symbols,
-        total_symbols=sum(s.count for s in consolidated_symbols),
+        symbols=all_raw_symbols,
+        total_symbols=sum(s.count for s in all_raw_symbols),
         analysis=analysis_steps,
         audit=audit_entries,
         xref_warnings=parse_result.xref_warnings,
@@ -379,9 +311,9 @@ async def upload_legend(file: UploadFile):
 
     result.legend_id = str(uuid.uuid4())
 
-    # Set category colors for legend devices (instant keyword matching)
+    # Set category colors for legend devices (deterministic from category)
     for device in result.devices:
-        device.color = _get_symbol_color(device.name)
+        device.color = _category_color(device.category)
 
     legends_store[result.legend_id] = result
     return result
@@ -437,35 +369,89 @@ async def match_drawing_to_legend(drawing_id: str, request: MatchLegendRequest):
         drawings_store[drawing_id] = drawing
         raise HTTPException(500, f"Matching failed: {str(e)}")
 
-    # Apply matches to symbols — legend becomes the source of truth
+    # Apply matches to symbols — legend becomes the source of truth.
+    # Matches are keyed by block_name (raw block names from DXF).
     matched_count = 0
+    matched_symbols = []
+    unmatched_symbols = []
+
     for sym in drawing.symbols:
-        if sym.label in matches and matches[sym.label].device is not None:
-            match_result = matches[sym.label]
+        key = sym.block_name
+        if key in matches and matches[key].device is not None:
+            match_result = matches[key]
             device = match_result.device
             sym.matched_legend = device
             sym.match_confidence = match_result.confidence
-            # Promote legend to source of truth: replace label with legend name
-            sym.original_label = sym.label  # Preserve dictionary/AI label for audit
+            sym.original_label = sym.label  # Preserve raw block name for audit
             sym.label = device.name  # Legend name is now the label
             sym.source = "legend"
             sym.confidence = match_result.confidence
+            sym.color = _category_color(device.category)
             matched_count += 1
+            matched_symbols.append(sym)
         else:
             sym.matched_legend = None
             sym.match_confidence = None
-            # Keep dictionary/AI label as-is — no legend match
+            unmatched_symbols.append(sym)
 
-    # Append matching analysis to drawing's analysis log
+    # Post-match consolidation: merge blocks matched to the same legend device.
+    # e.g., blocks "SD-1", "SD_TYPE2", "SMOKE_DET" all matched to "Smoke Detector"
+    # → merge into one "Smoke Detector" row with combined counts and locations.
+    label_groups: dict[str, list[SymbolInfo]] = {}
+    for sym in matched_symbols:
+        label_groups.setdefault(sym.label, []).append(sym)
+
+    consolidated = []
+    for label, group in label_groups.items():
+        if len(group) == 1:
+            consolidated.append(group[0])
+        else:
+            total_count = sum(s.count for s in group)
+            all_locations = []
+            for s in group:
+                all_locations.extend(s.locations)
+            sorted_group = sorted(group, key=lambda s: -s.count)
+            block_names = [s.block_name for s in sorted_group]
+            if len(block_names) <= 3:
+                combined_name = " + ".join(block_names)
+            else:
+                combined_name = f"{block_names[0]} (+{len(block_names)-1} variants)"
+            best_confidence = max(
+                group,
+                key=lambda s: {"high": 3, "medium": 2, "low": 1}.get(s.confidence, 0)
+            ).confidence
+            consolidated.append(SymbolInfo(
+                block_name=combined_name,
+                label=label,
+                count=total_count,
+                locations=all_locations,
+                color=group[0].color,
+                confidence=best_confidence,
+                source="legend",
+                block_variants=block_names,
+                matched_legend=group[0].matched_legend,
+                match_confidence=group[0].match_confidence,
+            ))
+
+    # Sort consolidated (matched) by count descending, then append unmatched
+    consolidated.sort(key=lambda s: -s.count)
+    final_symbols = consolidated + sorted(unmatched_symbols, key=lambda s: -s.count)
+
+    # Update the drawing in store
+    drawing.symbols = final_symbols
+    drawing.total_symbols = sum(s.count for s in final_symbols)
     drawing.analysis.extend(match_analysis)
     drawings_store[drawing_id] = drawing
+
+    # Invalidate preview cache since symbols changed
+    preview_cache.pop(drawing_id, None)
 
     return {
         "status": "ok",
         "matched": matched_count,
-        "total_symbols": len(drawing.symbols),
-        "unmatched": len(drawing.symbols) - matched_count,
-        "symbols": drawing.symbols,
+        "total_symbols": len(final_symbols),
+        "unmatched": len(unmatched_symbols),
+        "symbols": final_symbols,
         "analysis": match_analysis,
     }
 

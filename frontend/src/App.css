@@ -760,34 +760,22 @@
   white-space: nowrap;
 }
 
-.badge-high {
-  background: #D5F5E3;
-  color: #1E8449;
-  border: 1px solid #A9DFBF;
-}
-
-.badge-medium {
-  background: #FEF9E7;
-  color: #B7950B;
-  border: 1px solid #F9E79F;
-}
-
-.badge-manual {
-  background: #EBF5FB;
-  color: #2E86C1;
-  border: 1px solid #AED6F1;
-}
-
 .badge-legend {
   background: #E8F8F5;
   color: #117A65;
   border: 1px solid #A3E4D7;
 }
 
-.symbol-original-label {
-  font-size: 9px;
-  color: var(--text-muted);
-  font-style: italic;
+.badge-unmatched {
+  background: #F5F5F5;
+  color: #888888;
+  border: 1px solid #DDDDDD;
+}
+
+.badge-manual {
+  background: #EBF5FB;
+  color: #2E86C1;
+  border: 1px solid #AED6F1;
 }
 
 .variant-count {
@@ -1857,26 +1845,6 @@
 
 .legend-step .upload-icon {
   color: #8B7355;
-}
-
-.legend-skip-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 14px;
-  padding: 8px 20px;
-  background: var(--window-bg);
-  border: 1px solid;
-  border-color: var(--bevel-light) var(--bevel-dark) var(--bevel-dark) var(--bevel-light);
-  color: var(--text-secondary);
-  font-size: var(--font-size);
-  font-family: var(--font);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.legend-skip-btn:hover {
-  background: var(--panel-bg);
 }
 
 .legend-success-banner {
