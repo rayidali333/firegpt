@@ -102,10 +102,13 @@ export default function DrawingViewer({
   const iconSize = markerRadius * 3;
   const selectedIconSize = selectedRadius * 2.2;
 
-  // Build symbols with SVG-space positions from preview data
+  // Build symbols with SVG-space positions from preview data.
+  // Only show legend-matched symbols — unmatched raw blocks (Grid, cable fittings,
+  // furniture etc.) are noise and shouldn't clutter the floor plan.
   const symbolsWithPositions = useMemo(() => {
     if (!preview?.symbol_positions) return [];
     return symbols
+      .filter((s) => s.source === "legend")
       .map((s) => ({
         ...s,
         svgPositions: (preview.symbol_positions[s.block_name] || []) as [number, number][],

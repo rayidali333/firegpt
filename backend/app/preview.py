@@ -222,8 +222,8 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     # Some drawings place fire alarm symbols near the DXF origin while
     # architectural XREFs render the building at a large coordinate offset.
     # This detects the pattern and shifts out-of-bounds positions to align.
-    _fixup_coordinate_offset(symbol_svg_positions, vb_x, vb_y, vb_w, vb_h,
-                             position_debug)
+    schedule_removed_blocks = _fixup_coordinate_offset(
+        symbol_svg_positions, vb_x, vb_y, vb_w, vb_h, position_debug)
 
     # ── Recovery pass: for symbols with 0 positions after schedule removal, ──
     # ── try entity.dxf.insert with OCS→WCS transform. The renderable_geom ──
@@ -232,7 +232,14 @@ def generate_drawing_preview(filepath: str, symbols: list[SymbolInfo]) -> dict:
     # ── at project WCS coordinates inside the block definition). ──
     # ── Also handles entities with extrusion (0,0,-1) where OCS X differs ──
     # ── from WCS X (X gets negated). ──
-    missing_symbols = [sym for sym in symbols if sym.block_name not in symbol_svg_positions]
+    # ── IMPORTANT: Skip blocks that were identified as schedule/legend     ──
+    # ── entries — recovery would just re-add the schedule positions.       ──
+    missing_symbols = [
+        sym for sym in symbols
+        if sym.block_name not in symbol_svg_positions
+        and sym.block_name not in schedule_removed_blocks
+        and not any(v in schedule_removed_blocks for v in (sym.block_variants or []))
+    ]
     if missing_symbols:
         missing_blocks: set[str] = set()
         for sym in missing_symbols:
@@ -808,7 +815,7 @@ def _apply_insert_transform(cx: float, cy: float,
 def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
                               vb_x: float, vb_y: float,
                               vb_w: float, vb_h: float,
-                              debug: list[str]):
+                              debug: list[str]) -> set[str]:
     """Fix symbol positions systematically offset from the viewBox.
 
     Handles two cases:
@@ -817,14 +824,19 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
        should be removed entirely.
     2. **Offset positions**: Real placements that are simply offset from the
        viewBox due to XREF coordinate transforms. These can be shifted.
+
+    Returns:
+        Set of block names that were removed as schedule/legend entries.
+        The recovery pass should NOT re-recover these blocks.
     """
     if not symbol_positions:
-        return
+        return set()
 
     # ── Step 1: Detect and remove schedule-like (degenerate) positions ──
     # Per symbol type: if out-of-viewBox positions form a line (all same X or
     # all same Y), they're from a device schedule, not floor plan placements.
     schedule_removed = 0
+    schedule_removed_blocks: set[str] = set()  # Track blocks removed as schedule entries
     for block_name in list(symbol_positions.keys()):
         positions = symbol_positions[block_name]
         if len(positions) < 3:
@@ -858,6 +870,7 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
                              f"for {block_name[:50]}, kept {len(in_vb)} floor plan positions")
             else:
                 del symbol_positions[block_name]
+                schedule_removed_blocks.add(block_name)
                 debug.append(f"  Schedule fix: removed all {len(positions)} schedule positions "
                              f"for {block_name[:50]} (x_range={x_range:.0f}, y_range={y_range:.0f})")
             schedule_removed += len(out_vb)
@@ -879,11 +892,11 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
 
     total = len(in_bounds) + len(out_bounds)
     if total == 0 or len(out_bounds) == 0:
-        return
+        return schedule_removed_blocks
 
     out_ratio = len(out_bounds) / total
     if out_ratio < 0.15:
-        return  # Only a few outliers, not a systematic offset
+        return schedule_removed_blocks  # Only a few outliers, not a systematic offset
 
     # Compute per-dimension offset
     out_xs = [x for x, _ in out_bounds]
@@ -915,7 +928,7 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
     if test_in < len(out_bounds) * 0.5:
         debug.append(f"Coordinate offset fix: offset ({offset_x:.0f}, {offset_y:.0f}) "
                      f"only fixes {test_in}/{len(out_bounds)}, skipping")
-        return
+        return schedule_removed_blocks
 
     # Apply offset to remaining out-of-bounds positions
     fixed = 0
@@ -929,6 +942,8 @@ def _fixup_coordinate_offset(symbol_positions: dict[str, list[list[float]]],
 
     debug.append(f"Coordinate offset fix: shifted {fixed}/{len(out_bounds)} positions "
                  f"by ({offset_x:.0f}, {offset_y:.0f})")
+
+    return schedule_removed_blocks
 
 
 def _compute_insert_svg_position_debug(entity, block_name: str, doc) -> tuple[tuple[float, float] | None, str]:
