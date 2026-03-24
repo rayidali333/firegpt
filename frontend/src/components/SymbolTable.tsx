@@ -25,26 +25,19 @@ function shortBlockName(name: string): string {
   return first.length > 40 ? first.slice(0, 37) + "..." : first;
 }
 
-const CONFIDENCE_BADGE: Record<string, { label: string; className: string; title: string }> = {
-  // Legacy sources (before legend matching)
-  high: { label: "Dict", className: "badge-high", title: "Matched via dictionary — high confidence" },
-  medium: { label: "AI", className: "badge-medium", title: "Classified by AI — verify if critical" },
-  manual: { label: "Manual", className: "badge-manual", title: "Manually overridden by user" },
-};
-
 function getSourceBadge(s: SymbolInfo): { label: string; className: string; title: string } {
   if (s.source === "legend") {
     const legendName = s.matched_legend?.name || "legend entry";
-    const origLabel = s.original_label ? ` (was: "${s.original_label}")` : "";
     return {
       label: "Legend",
       className: "badge-legend",
-      title: `Matched to legend: "${legendName}"${origLabel} — confidence: ${s.match_confidence || "high"}`,
+      title: `Matched to legend: "${legendName}" — confidence: ${s.match_confidence || "high"}`,
     };
   }
-  if (s.source === "manual") return CONFIDENCE_BADGE.manual;
-  if (s.confidence === "medium" || s.source === "ai") return CONFIDENCE_BADGE.medium;
-  return CONFIDENCE_BADGE.high;
+  if (s.source === "manual") {
+    return { label: "Manual", className: "badge-manual", title: "Manually overridden by user" };
+  }
+  return { label: "Unmatched", className: "badge-unmatched", title: "Not matched to legend — raw block name" };
 }
 
 export default function SymbolTable({
@@ -159,14 +152,7 @@ export default function SymbolTable({
                       autoFocus
                     />
                   ) : (
-                    <>
-                      <span className="symbol-label">{s.label}</span>
-                      {s.original_label && s.original_label !== s.label && (
-                        <span className="symbol-original-label" title={`Dictionary/AI label: ${s.original_label}`}>
-                          was: {s.original_label}
-                        </span>
-                      )}
-                    </>
+                    <span className="symbol-label">{s.label}</span>
                   )}
                   <span className="symbol-block-name" title={s.block_name}>
                     {shortBlockName(s.block_name)}

@@ -4,14 +4,14 @@ export interface SymbolInfo {
   count: number;
   locations: [number, number][];
   color: string;
-  confidence: "high" | "medium" | "low" | "manual";
-  source: "dictionary" | "ai" | "legend" | "manual";
+  confidence: "high" | "medium" | "low" | "pending" | "manual";
+  source: "raw" | "legend" | "manual";
   block_variants: string[];
   original_count: number | null;
   // Legend matching (Phase 1)
   matched_legend?: LegendDevice | null;
   match_confidence?: "high" | "medium" | "low" | null;
-  original_label?: string | null;  // Pre-legend label (dictionary/AI guess)
+  original_label?: string | null;  // Pre-legend raw block name
   svg_icon?: string | null;  // Generated SVG icon markup (Phase 2)
 }
 

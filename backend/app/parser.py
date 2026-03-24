@@ -1,16 +1,13 @@
 """
-DXF/DWG Parser — AI-first symbol detection engine.
+DXF/DWG Parser — raw block scanner.
 
 DXF files store reusable symbols as "blocks" (block definitions).
 When a symbol is placed on a drawing, it creates an INSERT entity
 that references the block by name, with a position (x, y, z).
 
-APPROACH: Dictionary matching is used only as a fast path for obvious
-symbols (e.g., "SD", "SMOKE_DETECTOR"). All other blocks are sent to
-Claude for AI classification with full drawing context — block names,
-layers, attributes, internal text, geometry, and any legend/schedule
-text found in the drawing. This makes detection robust across any
-naming convention, language, or CAD standard.
+APPROACH: Legend-first architecture. The parser is a pure scanner that
+extracts ALL block references with metadata. No labeling, no classification.
+The legend matching step (matching.py) handles identification and naming.
 """
 
 import re
@@ -23,203 +20,6 @@ import ezdxf
 from fastapi import HTTPException
 
 from app.models import AuditEntry, SymbolInfo
-
-# ────────────────────────────────────────────────────────
-# Fast-path dictionary: only high-confidence exact matches
-# ────────────────────────────────────────────────────────
-
-# These are universally standard abbreviations that don't need AI.
-# Anything ambiguous should go to AI for classification.
-KNOWN_SYMBOLS = {
-    "SD": "Smoke Detector",
-    "HD": "Heat Detector",
-    "PS": "Pull Station",
-    "NAC": "Notification Appliance Circuit",
-    "HS": "Horn/Strobe",
-    "HORN": "Horn",
-    "STROBE": "Strobe",
-    "H/S": "Horn/Strobe",
-    "FACP": "Fire Alarm Control Panel",
-    "ANN": "Annunciator",
-    "DUCT": "Duct Detector",
-    "DD": "Duct Detector",
-    "BG": "Break Glass",
-    "MCP": "Manual Call Point",
-    "FD": "Fire Door Holder",
-    "SPK": "Speaker",
-    "SPKR": "Speaker",
-    "SPEAKER": "Speaker",
-    "LOUDSPEAKER": "Speaker",
-    "SIREN": "Alarm Siren",
-    "ALARM SIREN": "Alarm Siren",
-    "SPRINKLER": "Sprinkler",
-    "SPRK": "Sprinkler",
-    "SPKL": "Sprinkler",
-    "PIV": "Post Indicator Valve",
-    "FDC": "Fire Department Connection",
-    "OS/Y": "OS&Y Valve",
-    "BEAM": "Beam Detector",
-    "VESDA": "VESDA Detector",
-    "ASD": "Aspirating Smoke Detector",
-    "MODULE": "Monitor/Control Module",
-    "MONITOR MODULE": "Monitor Module",
-    "CONTROL MODULE": "Control Module",
-    "MON": "Monitor Module",
-    "CM": "Control Module",
-    "REL": "Relay Module",
-    "EOL": "End of Line",
-    "SLC": "Signaling Line Circuit",
-    "TB": "Terminal Box",
-    "JB": "Junction Box",
-    "WP": "Weatherproof",
-}
-
-# International terms — substring matched against normalized block names
-KNOWN_SYMBOLS_INTL = {
-    # Spanish
-    "DETECTOR DE HUMO": "Smoke Detector",
-    "DETECTOR DE CALOR": "Heat Detector",
-    "DETECTOR DE INCENDIO": "Fire Detector",
-    "DETECTOR TERMICO": "Heat Detector",
-    "DETECTOR OPTICO": "Smoke Detector",
-    "DETECTOR IONICO": "Smoke Detector",
-    "DETECTOR TERMOVELOCIMETRICO": "Heat Detector",
-    "DETECTOR LINEAL": "Beam Detector",
-    "PULSADOR DE ALARMA": "Pull Station",
-    "PULSADOR MANUAL": "Pull Station",
-    "PULSADOR": "Pull Station",
-    "LUZ DE EMERGENCIA": "Emergency Light",
-    "LUMINARIA EMERGENCIA": "Emergency Light",
-    "SALIDA DE EMERGENCIA": "Emergency Exit Sign",
-    "CARTEL DE SALIDA": "Exit Sign",
-    "MATAFUEGOS": "Fire Extinguisher",
-    "EXTINTOR": "Fire Extinguisher",
-    "SIRENA": "Horn/Strobe",
-    "ALARMA SONORA": "Horn",
-    "ALARMA VISUAL": "Strobe",
-    "ALARMA": "Alarm Device",
-    "TABLERO DE INCENDIO": "Fire Alarm Control Panel",
-    "TABLERO DE BOMBEROS": "Fire Brigade Panel",
-    "PANEL DE ALARMA": "Fire Alarm Control Panel",
-    "TABLERO": "Fire Panel",
-    "CENTRAL DE ALARMA": "Fire Alarm Control Panel",
-    "ROCIADOR": "Sprinkler",
-    "GABINETE DE INCENDIO": "Fire Cabinet",
-    "GABINETE": "Fire Cabinet",
-    "BOCA DE INCENDIO": "Fire Hydrant",
-    "B.I.E.": "Fire Hydrant (BIE)",
-    "BIE": "Fire Hydrant (BIE)",
-    "HIDRANTE": "Fire Hydrant",
-    "COLUMNA DE INCENDIO": "Fire Standpipe",
-    "COLUMNA": "Fire Standpipe",
-    "BOMBA DE INCENDIO": "Fire Pump",
-    "BOMBA": "Fire Pump",
-    "TOMA DE BOMBEROS": "Fire Department Connection",
-    "TOMA IMPULSION": "Fire Department Connection",
-    "CANERIA PRESURIZADA": "Pressurized Pipe",
-    "CANERIA AEREA": "Overhead Pipe",
-    "CANERIA": "Fire Pipe",
-    "BOTIQUIN": "First Aid Kit",
-    "VIA DE EVACUACION": "Evacuation Route",
-    "EVACUACION": "Evacuation Route",
-    "LLAVE DE CORTE": "Gas Shutoff Valve",
-    "MODULO MONITOR": "Monitor Module",
-    "MODULO CONTROL": "Control Module",
-    "MODULO": "Module",
-    # Portuguese
-    "DETECTOR DE FUMACA": "Smoke Detector",
-    "DETECTOR DE FUMACO": "Smoke Detector",
-    "ACIONADOR MANUAL": "Pull Station",
-    "BOTOEIRA": "Pull Station",
-    "AVISADOR SONORO": "Horn",
-    "SINALIZADOR VISUAL": "Strobe",
-    "SAIDA DE EMERGENCIA": "Emergency Exit Sign",
-    "EXTINTOR DE INCENDIO": "Fire Extinguisher",
-    "MANGUEIRA": "Fire Hose",
-    "CENTRAL DE INCENDIO": "Fire Alarm Control Panel",
-    # French
-    "DETECTEUR DE FUMEE": "Smoke Detector",
-    "DETECTEUR DE CHALEUR": "Heat Detector",
-    "DETECTEUR OPTIQUE": "Smoke Detector",
-    "DETECTEUR": "Detector",
-    "DECLENCHEUR MANUEL": "Pull Station",
-    "EXTINCTEUR": "Fire Extinguisher",
-    "SORTIE DE SECOURS": "Emergency Exit Sign",
-    "ALARME INCENDIE": "Fire Alarm",
-    "SIRENE": "Horn",
-    "FLASH": "Strobe",
-    "ROBINET INCENDIE": "Fire Hydrant",
-    "COLONNE SECHE": "Fire Standpipe",
-    "SPRINKLEUR": "Sprinkler",
-    # Italian
-    "RILEVATORE DI FUMO": "Smoke Detector",
-    "RILEVATORE DI CALORE": "Heat Detector",
-    "RILEVATORE": "Detector",
-    "PULSANTE": "Pull Station",
-    "ESTINTORE": "Fire Extinguisher",
-    "USCITA DI EMERGENZA": "Emergency Exit Sign",
-    "IDRANTE": "Fire Hydrant",
-}
-
-# Color assignments by symbol category for drawing visualization
-SYMBOL_COLORS: dict[str, str] = {
-    "Smoke Detector": "#E74C3C",
-    "Heat Detector": "#E67E22",
-    "Duct Detector": "#D35400",
-    "Beam Detector": "#C0392B",
-    "VESDA Detector": "#922B21",
-    "Fire Detector": "#E74C3C",
-    "Detector": "#E74C3C",
-    "Pull Station": "#F39C12",
-    "Break Glass": "#F1C40F",
-    "Manual Call Point": "#F39C12",
-    "Horn/Strobe": "#3498DB",
-    "Horn": "#2980B9",
-    "Strobe": "#1ABC9C",
-    "Speaker": "#2ECC71",
-    "Alarm Siren": "#E74C3C",
-    "Alarm Device": "#3498DB",
-    "Fire Alarm": "#3498DB",
-    "Aspirating Smoke Detector": "#922B21",
-    "Notification Appliance Circuit": "#3498DB",
-    "Fire Alarm Control Panel": "#9B59B6",
-    "Fire Panel": "#9B59B6",
-    "Fire Brigade Panel": "#8E44AD",
-    "Annunciator": "#8E44AD",
-    "Monitor Module": "#27AE60",
-    "Control Module": "#16A085",
-    "Monitor/Control Module": "#1ABC9C",
-    "Module": "#1ABC9C",
-    "Relay Module": "#2C3E50",
-    "End of Line": "#7F8C8D",
-    "Signaling Line Circuit": "#34495E",
-    "Fire Door Holder": "#795548",
-    "Sprinkler": "#607D8B",
-    "Post Indicator Valve": "#546E7A",
-    "Fire Department Connection": "#455A64",
-    "OS&Y Valve": "#546E7A",
-    "Terminal Box": "#7F8C8D",
-    "Junction Box": "#95A5A6",
-    "Weatherproof": "#607D8B",
-    "Emergency Light": "#F1C40F",
-    "Emergency Exit Sign": "#2ECC71",
-    "Exit Sign": "#27AE60",
-    "Fire Extinguisher": "#E67E22",
-    "Fire Cabinet": "#795548",
-    "Fire Hydrant": "#2980B9",
-    "Fire Hydrant (BIE)": "#2980B9",
-    "Fire Standpipe": "#34495E",
-    "Fire Pump": "#8E44AD",
-    "Fire Pipe": "#546E7A",
-    "Pressurized Pipe": "#455A64",
-    "Overhead Pipe": "#607D8B",
-    "Fire Hose": "#2980B9",
-    "Gas Shutoff Valve": "#C0392B",
-    "First Aid Kit": "#27AE60",
-    "Evacuation Route": "#2ECC71",
-}
-
-DEFAULT_COLOR = "#95A5A6"
 
 # Block names to always skip (truly internal AutoCAD objects)
 SKIP_PATTERNS = [
@@ -246,27 +46,6 @@ DXF_VERSIONS = {
     "AC1032": "AutoCAD 2018+",
 }
 
-# Keywords in layer names that indicate fire alarm content
-FIRE_LAYER_KEYWORDS = [
-    "fire", "alarm", "fa_", "fa-", "f.a.",
-    "incendio", "incêndio", "incendi",
-    "smoke", "humo", "fumaca", "fumée",
-    "detector", "detect",
-    "sprinkler", "rociador", "sprinkleur",
-    "suppression", "extinc",
-    "notif", "horn", "strobe", "sirena", "alarma", "alarme",
-    "emergency", "emergencia", "emergência",
-    "evacu",
-]
-
-
-@dataclass
-class MatchResult:
-    """Result from dictionary matching with full audit metadata."""
-    label: str
-    method: str  # "exact_match", "substring_match", "intl_exact", "intl_substring"
-    matched_term: str  # The dictionary key that triggered the match
-
 
 @dataclass
 class BlockInfo:
@@ -284,18 +63,15 @@ class BlockInfo:
 
 @dataclass
 class ParseResult:
-    """Internal result from parsing, includes symbols + analysis log + file path."""
+    """Internal result from parsing — raw blocks + analysis log."""
     symbols: list[SymbolInfo] = field(default_factory=list)
     analysis: list[dict] = field(default_factory=list)
     dxf_path: str = ""
-    # Blocks identified by fast-path dictionary
-    fast_path_symbols: list[SymbolInfo] = field(default_factory=list)
-    # Blocks that need AI classification
-    ai_candidate_blocks: list[BlockInfo] = field(default_factory=list)
-    # Drawing-wide context for AI
+    # All scanned blocks with metadata
+    raw_blocks: list[BlockInfo] = field(default_factory=list)
+    # Drawing-wide context
     all_block_names: list[str] = field(default_factory=list)
     all_layer_names: list[str] = field(default_factory=list)
-    fire_layers: list[str] = field(default_factory=list)
     legend_texts: list[str] = field(default_factory=list)
     audit: list[AuditEntry] = field(default_factory=list)
     xref_warnings: list[str] = field(default_factory=list)
@@ -312,63 +88,8 @@ def _should_skip_block(block_name: str) -> bool:
     return False
 
 
-def _fast_path_label(block_name: str) -> MatchResult | None:
-    """Try to match a block name to a known fire alarm symbol using dictionaries.
-
-    Returns a MatchResult with label + audit metadata, or None if uncertain.
-    This is the fast path — only high-confidence matches.
-    """
-    name_upper = block_name.upper().strip()
-    # Normalize all separators (underscores, hyphens, dots) to spaces for matching.
-    # CAD block names use inconsistent separators: MONITOR_MODULE, MONITOR-MODULE, etc.
-    name_normalized = re.sub(r'[_\-./\\]+', ' ', name_upper).strip()
-
-    # 1. Exact match — English abbreviations
-    if name_upper in KNOWN_SYMBOLS:
-        return MatchResult(KNOWN_SYMBOLS[name_upper], "exact_match", name_upper)
-
-    # 2. Exact match — International terms
-    if name_normalized in KNOWN_SYMBOLS_INTL:
-        return MatchResult(KNOWN_SYMBOLS_INTL[name_normalized], "intl_exact", name_normalized)
-
-    # 3. Substring match — English (longer/more specific first)
-    # Match against normalized name so "MONITOR_MODULE" matches "MONITOR MODULE"
-    for abbrev, label in sorted(KNOWN_SYMBOLS.items(), key=lambda x: -len(x[0])):
-        if len(abbrev) <= 3:
-            # Short abbreviations need word boundary guards to avoid false positives
-            pattern = r'(?<![A-Z0-9])' + re.escape(abbrev) + r'(?![A-Z0-9])'
-            if re.search(pattern, name_normalized):
-                return MatchResult(label, "substring_match", abbrev)
-        else:
-            if abbrev in name_normalized:
-                return MatchResult(label, "substring_match", abbrev)
-
-    # 4. Substring match — International terms
-    for term, label in sorted(KNOWN_SYMBOLS_INTL.items(), key=lambda x: -len(x[0])):
-        if term in name_normalized:
-            return MatchResult(label, "intl_substring", term)
-
-    return None
-
-
-def _is_fire_layer(layer_name: str) -> bool:
-    """Check if a layer name indicates fire alarm content."""
-    name_lower = layer_name.lower()
-    return any(kw in name_lower for kw in FIRE_LAYER_KEYWORDS)
-
-
-def _get_symbol_color(label: str) -> str:
-    """Get the visualization color for a symbol based on its label."""
-    return SYMBOL_COLORS.get(label, DEFAULT_COLOR)
-
-
 def _extract_legend_texts(doc) -> list[str]:
-    """Extract text from the drawing that could be legend/schedule/symbol key info.
-
-    Fire alarm drawings often have a symbol legend or device schedule that
-    maps symbol names to descriptions. This text gives the AI critical context
-    about what naming convention the drawing uses.
-    """
+    """Extract text from the drawing that could be legend/schedule/symbol key info."""
     legend_texts = []
     legend_keywords = [
         "legend", "schedule", "symbol", "device", "key",
@@ -406,7 +127,7 @@ def _extract_legend_texts(doc) -> list[str]:
 
 
 def _collect_block_metadata(block_def, doc) -> dict:
-    """Collect all metadata from a block definition for AI context."""
+    """Collect all metadata from a block definition."""
     texts_inside = []
     attdef_tags = {}
     description = ""
@@ -455,8 +176,8 @@ def _collect_block_metadata(block_def, doc) -> dict:
 def parse_dxf_file(filepath: str) -> ParseResult:
     """Parse a DXF file and extract all block references with metadata.
 
-    Uses dictionary matching as a fast path for obvious symbols.
-    All other blocks are collected with full metadata for AI classification.
+    Returns raw blocks — no classification or labeling.
+    The legend matching step handles identification.
     """
     result = ParseResult(dxf_path=filepath)
 
@@ -483,18 +204,14 @@ def parse_dxf_file(filepath: str) -> ParseResult:
 
     # Step 3: Analyze layers
     layer_names = []
-    fire_layers = []
     try:
         for layer in doc.layers:
             lname = layer.dxf.name
             layer_names.append(lname)
-            if _is_fire_layer(lname):
-                fire_layers.append(lname)
     except Exception:
         pass
 
     result.all_layer_names = layer_names
-    result.fire_layers = fire_layers
 
     if layer_names:
         result.log("info", f"Layers in drawing: {len(layer_names)} total")
@@ -503,16 +220,11 @@ def parse_dxf_file(filepath: str) -> ParseResult:
         else:
             result.log("info", f"Layer names (first 20): {', '.join(layer_names[:20])}...")
 
-    if fire_layers:
-        result.log("success", f"Fire-related layers detected: {', '.join(fire_layers)}")
-    else:
-        result.log("info", "No fire-specific layer names found (will analyze all layers)")
-
-    # Step 4: Extract legend/schedule text for AI context
+    # Step 4: Extract legend/schedule text for context
     legend_texts = _extract_legend_texts(doc)
     result.legend_texts = legend_texts
     if legend_texts:
-        result.log("success", f"Found {len(legend_texts)} legend/schedule text elements for AI context")
+        result.log("success", f"Found {len(legend_texts)} legend/schedule text elements")
 
     # Step 5: Enumerate layouts and scan all INSERT entities
     layout_names = [layout.name for layout in doc.layouts]
@@ -550,8 +262,7 @@ def parse_dxf_file(filepath: str) -> ParseResult:
 
                 # Only count and collect data from model space.
                 # Paper space contains legends, title blocks, and viewports —
-                # not real device placements. Counting paper space inserts
-                # would inflate device counts (e.g., legend sample symbols).
+                # not real device placements.
                 if not is_model_space:
                     continue
 
@@ -621,11 +332,6 @@ def parse_dxf_file(filepath: str) -> ParseResult:
             block_def_metadata[block.name] = _collect_block_metadata(block, doc)
 
     # Step 7: Propagate counts through nesting hierarchy (BFS)
-    # IMPORTANT: Only propagate to blocks that were directly inserted on the
-    # drawing. Without this guard, the BFS creates hundreds of phantom entries
-    # for sub-components (scale rects, structural columns, text frames) that
-    # were never placed as independent symbols — they're just internal parts
-    # of other block definitions.
     directly_inserted = set(block_counts.keys())
     pre_bfs = dict(block_counts)
     processed: set[str] = set()
@@ -672,69 +378,27 @@ def parse_dxf_file(filepath: str) -> ParseResult:
     if result.xref_warnings:
         result.log("warning", f"{len(result.xref_warnings)} external references (XREFs) detected — devices in referenced files are not counted")
 
-    # Step 9: Classify blocks — fast path vs AI candidates
+    # Step 9: Collect all blocks as raw entries — no classification
     result.all_block_names = sorted(block_counts.keys())
-    fast_path_count = 0
-    ai_candidate_count = 0
 
     for block_name, count in sorted(block_counts.items(), key=lambda x: -x[1]):
-        match = _fast_path_label(block_name)
+        layers = sorted(block_layers.get(block_name, set()))
+        meta = block_def_metadata.get(block_name, {})
 
-        if match is not None:
-            # Fast path: dictionary matched with high confidence
-            fast_path_count += 1
-            layers = sorted(block_layers.get(block_name, set()))
-            symbol = SymbolInfo(
-                block_name=block_name,
-                label=match.label,
-                count=count,
-                locations=block_locations.get(block_name, []),
-                color=_get_symbol_color(match.label),
-                confidence="high",
-                source="dictionary",
-            )
-            result.fast_path_symbols.append(symbol)
-            result.symbols.append(symbol)
-            result.audit.append(AuditEntry(
-                block_name=block_name,
-                label=match.label,
-                count=count,
-                method=match.method,
-                confidence="high",
-                matched_term=match.matched_term,
-                layers=layers,
-            ))
-        else:
-            # Collect full metadata for AI classification
-            ai_candidate_count += 1
-            layers = sorted(block_layers.get(block_name, set()))
-            meta = block_def_metadata.get(block_name, {})
+        result.raw_blocks.append(BlockInfo(
+            block_name=block_name,
+            count=count,
+            layers=layers,
+            entity_types=meta.get("entity_types", {}),
+            attribs=block_attribs.get(block_name, {}),
+            texts_inside=meta.get("texts_inside", []),
+            description=meta.get("description", ""),
+            locations=block_locations.get(block_name, []),
+            attdef_tags=meta.get("attdef_tags", {}),
+        ))
 
-            result.ai_candidate_blocks.append(BlockInfo(
-                block_name=block_name,
-                count=count,
-                layers=layers,
-                entity_types=meta.get("entity_types", {}),
-                attribs=block_attribs.get(block_name, {}),
-                texts_inside=meta.get("texts_inside", []),
-                description=meta.get("description", ""),
-                locations=block_locations.get(block_name, []),
-                attdef_tags=meta.get("attdef_tags", {}),
-            ))
-
-    result.log(
-        "info",
-        f"Fast-path identified: {fast_path_count} symbol types "
-        f"({sum(s.count for s in result.fast_path_symbols)} devices)"
-    )
-    if ai_candidate_count > 0:
-        result.log(
-            "info",
-            f"{ai_candidate_count} blocks queued for AI classification"
-        )
-
-    total = sum(s.count for s in result.symbols)
-    result.log("success", f"Detection complete: {len(result.symbols)} symbol types, {total} total devices (pre-AI)")
+    total = sum(b.count for b in result.raw_blocks)
+    result.log("success", f"Scan complete: {len(result.raw_blocks)} unique blocks, {total} total insertions")
 
     return result
 
@@ -743,11 +407,9 @@ def _merge_dxf_result(result: ParseResult, dxf_result: ParseResult, dxf_path: st
     """Copy all parse data from a DXF parse into the DWG result."""
     result.analysis.extend(dxf_result.analysis)
     result.symbols = dxf_result.symbols
-    result.fast_path_symbols = dxf_result.fast_path_symbols
-    result.ai_candidate_blocks = dxf_result.ai_candidate_blocks
+    result.raw_blocks = dxf_result.raw_blocks
     result.all_block_names = dxf_result.all_block_names
     result.all_layer_names = dxf_result.all_layer_names
-    result.fire_layers = dxf_result.fire_layers
     result.legend_texts = dxf_result.legend_texts
     result.audit = dxf_result.audit
     result.xref_warnings = dxf_result.xref_warnings

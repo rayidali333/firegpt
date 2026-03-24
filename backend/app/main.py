@@ -10,9 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.parser import parse_dxf_file, parse_dwg_file, _get_symbol_color
+from app.parser import parse_dxf_file, parse_dwg_file
 from app.preview import generate_drawing_preview
-from app.chat import chat_with_drawing, classify_blocks_with_ai
+from app.chat import chat_with_drawing
 from app.legend import parse_legend_file, ALL_LEGEND_EXTENSIONS
 from app.matching import match_symbols_to_legend
 from app.icon_gen import generate_icons_batch, icons_cache
@@ -48,6 +48,16 @@ file_paths_store: dict[str, str] = {}
 preview_cache: dict[str, dict] = {}
 # Store parsed legends
 legends_store: dict[str, LegendParseResponse] = {}
+
+
+def _category_color(category: str) -> str:
+    """Deterministic color from a category string via hash.
+
+    Maps any category to a visually distinct hue. Same category always
+    gets the same color, regardless of what discipline the drawing is.
+    """
+    h = hash(category) % 360
+    return f"hsl({h}, 55%, 45%)"
 
 
 @app.get("/api/health")
@@ -86,27 +96,16 @@ async def upload_drawing(file: UploadFile):
         raise HTTPException(500, f"Failed to parse drawing: {str(e)}")
 
     # Legend-first architecture: return ALL blocks as raw symbols.
-    # No dictionary labeling, no AI classification, no consolidation.
+    # No labeling, no classification, no consolidation.
     # The legend matching step will identify and consolidate symbols later.
     all_raw_symbols = []
-    for block in parse_result.ai_candidate_blocks:
+    for block in parse_result.raw_blocks:
         all_raw_symbols.append(SymbolInfo(
             block_name=block.block_name,
-            label=block.block_name,  # Raw block name as label (will be replaced by matching)
+            label=block.block_name,  # Raw block name — matching will replace
             count=block.count,
             locations=block.locations,
-            color="#999999",  # Neutral gray — matching will assign real colors
-            confidence="pending",
-            source="raw",
-        ))
-    # Also include fast-path symbols but strip their dictionary labels
-    for sym in parse_result.fast_path_symbols:
-        all_raw_symbols.append(SymbolInfo(
-            block_name=sym.block_name,
-            label=sym.block_name,  # Use raw block name, not dictionary label
-            count=sym.count,
-            locations=sym.locations,
-            color="#999999",
+            color="#999999",  # Neutral gray — matching assigns real colors
             confidence="pending",
             source="raw",
         ))
@@ -312,9 +311,9 @@ async def upload_legend(file: UploadFile):
 
     result.legend_id = str(uuid.uuid4())
 
-    # Set category colors for legend devices (instant keyword matching)
+    # Set category colors for legend devices (deterministic from category)
     for device in result.devices:
-        device.color = _get_symbol_color(device.name)
+        device.color = _category_color(device.category)
 
     legends_store[result.legend_id] = result
     return result
@@ -387,7 +386,7 @@ async def match_drawing_to_legend(drawing_id: str, request: MatchLegendRequest):
             sym.label = device.name  # Legend name is now the label
             sym.source = "legend"
             sym.confidence = match_result.confidence
-            sym.color = _get_symbol_color(device.name)
+            sym.color = _category_color(device.category)
             matched_count += 1
             matched_symbols.append(sym)
         else:
