@@ -1859,26 +1859,6 @@
   color: #8B7355;
 }
 
-.legend-skip-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 14px;
-  padding: 8px 20px;
-  background: var(--window-bg);
-  border: 1px solid;
-  border-color: var(--bevel-light) var(--bevel-dark) var(--bevel-dark) var(--bevel-light);
-  color: var(--text-secondary);
-  font-size: var(--font-size);
-  font-family: var(--font);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.legend-skip-btn:hover {
-  background: var(--panel-bg);
-}
-
 .legend-success-banner {
   display: flex;
   align-items: center;

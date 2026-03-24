@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Upload, BookOpen, CheckCircle, SkipForward } from "lucide-react";
+import { Upload, BookOpen, CheckCircle } from "lucide-react";
 import { LegendData } from "../types";
 
 interface Props {
@@ -9,9 +9,7 @@ interface Props {
   error: string | null;
   legend: LegendData | null;
   legendUploading: boolean;
-  legendSkipped: boolean;
   onLegendUpload: (file: File) => void;
-  onLegendSkip: () => void;
 }
 
 export default function UploadZone({
@@ -21,9 +19,7 @@ export default function UploadZone({
   error,
   legend,
   legendUploading,
-  legendSkipped,
   onLegendUpload,
-  onLegendSkip,
 }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const drawingInputRef = useRef<HTMLInputElement>(null);
@@ -31,8 +27,8 @@ export default function UploadZone({
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState("");
 
-  // Show step 2 (drawing upload) when legend is uploaded or skipped
-  const showDrawingUpload = legend !== null || legendSkipped;
+  // Show step 2 (drawing upload) when legend is uploaded
+  const showDrawingUpload = legend !== null;
 
   useEffect(() => {
     if (!uploading && !legendUploading) {
@@ -131,18 +127,10 @@ export default function UploadZone({
       if (showDrawingUpload) {
         handleDrawingFile(file);
       } else {
-        // On step 1, accept legend files OR drawing files
-        const ext = file.name.toLowerCase().split(".").pop();
-        if (ext === "dxf" || ext === "dwg") {
-          // They dropped a drawing — skip legend step
-          onLegendSkip();
-          onUpload(file);
-        } else {
-          handleLegendFile(file);
-        }
+        handleLegendFile(file);
       }
     },
-    [showDrawingUpload, handleDrawingFile, handleLegendFile, onLegendSkip, onUpload]
+    [showDrawingUpload, handleDrawingFile, handleLegendFile]
   );
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -213,7 +201,7 @@ export default function UploadZone({
             <p className="upload-subtitle">
               Drop your DXF or DWG file here, or click to browse.
               <br />
-              FireGPT will detect and count all fire alarm symbols.
+              FireGPT will detect and count all symbols from your legend.
             </p>
             <div className="upload-formats">
               <span className="format-badge">.DXF</span>
@@ -255,11 +243,11 @@ export default function UploadZone({
           onClick={() => legendInputRef.current?.click()}
         >
           <BookOpen className="upload-icon" />
-          <h2 className="upload-title">Upload a Legend (Optional)</h2>
+          <h2 className="upload-title">Upload a Legend</h2>
           <p className="upload-subtitle">
             Upload the drawing legend/symbol key as a PDF or image.
             <br />
-            AI will extract all device types and symbol descriptions.
+            AI will extract all device types and match them to your drawing.
           </p>
           <div className="upload-formats">
             <span className="format-badge">.PDF</span>
@@ -279,16 +267,11 @@ export default function UploadZone({
           />
         </div>
 
-        <button className="legend-skip-btn" onClick={onLegendSkip}>
-          <SkipForward size={14} />
-          Skip — upload drawing without legend
-        </button>
-
         <div className="upload-step-indicator">
           <span className="step-dot active" />
           <span className="step-line" />
           <span className="step-dot" />
-          <span className="step-label">Step 1 of 2: Legend (Optional)</span>
+          <span className="step-label">Step 1 of 2: Upload Legend</span>
         </div>
       </div>
     </div>
